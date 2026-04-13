@@ -208,34 +208,32 @@ class ThinkingParagraph {
 		_defaultTextStyle?: ConstructorParameters<typeof Markdown>[4],
 	) {
 		// Use a plain theme that strips all color/formatting from thinking blocks.
-		// Code blocks, headings, etc. render as plain dimmed text.
-		// We use identity functions (passthrough) so only the defaultTextStyle
-		// (italic) applies uniformly. No extra formatting escapes that could
-		// create brightness differences.
-		const id = (s: string) => s;
+		// Every element gets the same dim gray italic treatment.
+		const DIM_FG = "\x1b[38;2;140;140;140m";
+		const ITALIC = "\x1b[3m";
+		const wrap = (s: string) => `${DIM_FG}${ITALIC}${s}`;
 		const plainTheme: ConstructorParameters<typeof Markdown>[3] = {
-			heading: id,
-			link: id,
-			linkUrl: id,
-			code: id,
-			codeBlock: id,
-			codeBlockBorder: id,
-			quote: id,
-			quoteBorder: id,
-			hr: id,
-			listBullet: id,
-			bold: id,
-			italic: id,
-			strikethrough: id,
-			underline: id,
+			heading: wrap,
+			link: wrap,
+			linkUrl: wrap,
+			code: wrap,
+			codeBlock: wrap,
+			codeBlockBorder: wrap,
+			quote: wrap,
+			quoteBorder: wrap,
+			hr: wrap,
+			listBullet: wrap,
+			bold: wrap,
+			italic: wrap,
+			strikethrough: wrap,
+			underline: wrap,
 			// Override code highlighting to return plain lines (no syntax colors)
 			highlightCode: (code: string, _lang?: string) => code.split("\n"),
 		};
-		// Keep italic as the base style + a uniform dim color for all text
-		const DIM_FG = "\x1b[38;2;140;140;140m"; // neutral gray, same hue for everything
+		// Same dim gray italic as the base style for all inline text
 		const plainStyle: ConstructorParameters<typeof Markdown>[4] = {
 			italic: true,
-			color: (s: string) => `${DIM_FG}${s}`,
+			color: (s: string) => `${DIM_FG}${ITALIC}${s}`,
 		};
 		this.md = new Markdown(text, 0, 0, plainTheme, plainStyle);
 	}
