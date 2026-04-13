@@ -1415,7 +1415,7 @@ export default function (pi: ExtensionAPI) {
 			const lines = content.text.split("\n");
 			let text = theme.fg("muted", `${lines.length} lines loaded`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " (truncated)");
-			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
+			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
 			const shown = lines.slice(0, previewLimit());
 			text += `\n${buildPreviewText(shown.map((line) => theme.fg("dim", line || " ")), false, theme, previewLimit())}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
@@ -1450,6 +1450,7 @@ export default function (pi: ExtensionAPI) {
 			let text = exitCode === null || exitCode === 0 ? theme.fg("success", "Done") : theme.fg("error", `Exit ${exitCode}`);
 			text += theme.fg("muted", ` (${nonEmpty.length} lines)`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " [truncated]");
+			if (!expanded && nonEmpty.length > 0) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
 			const collapsed = bashCollapsedLimit();
 			text += `\n${buildPreviewText(nonEmpty.map((line) => theme.fg("dim", line)), false, theme, collapsed)}`;
@@ -1486,7 +1487,7 @@ export default function (pi: ExtensionAPI) {
 			if (matches.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "no matches"), theme));
 			let text = theme.fg("muted", `${matches.length} matches`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " (truncated)");
-			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
+			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
 			text += `\n${buildPreviewText(matches.map((line) => theme.fg("dim", line)), false, theme, previewLimit())}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
 		},
@@ -1519,7 +1520,7 @@ export default function (pi: ExtensionAPI) {
 				.filter((line) => line.trim().length > 0);
 			if (items.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "no files found"), theme));
 			let text = theme.fg("muted", `${items.length} files`);
-			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
+			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
 			// Expanded: grouped find results with icons
 			const maxShow = previewLimit();
 			const shown = items.slice(0, maxShow);
@@ -1563,7 +1564,7 @@ export default function (pi: ExtensionAPI) {
 				.filter((line) => line.trim().length > 0);
 			if (items.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "empty directory"), theme));
 			let text = theme.fg("muted", `${items.length} entries`);
-			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
+			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
 			// Expanded: tree-view with icons
 			const maxShow = previewLimit();
 			const shown = items.slice(0, maxShow);
@@ -1761,8 +1762,10 @@ export default function (pi: ExtensionAPI) {
 						.catch(() => {});
 				} else {
 					const { diffs, summary: editSummary } = summarizeEditOperations(operations);
-					const maxShown = Math.min(operations.length, 3);
-					const previewLines = Math.max(8, Math.floor(MAX_PREVIEW_LINES / maxShown));
+					const maxShown = ctx.expanded ? operations.length : Math.min(operations.length, 3);
+					const previewLines = ctx.expanded
+						? Math.max(6, Math.floor(MAX_RENDER_LINES / Math.max(1, maxShown)))
+						: Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
 					Promise.all(
 						diffs.slice(0, maxShown).map((diff, index) =>
 							renderSplit(diff, lg, previewLines, dc)
@@ -1773,7 +1776,9 @@ export default function (pi: ExtensionAPI) {
 						.then((sections) => {
 							if (ctx.state._pk !== key) return;
 							const remainder = operations.length - maxShown;
-							const suffix = remainder > 0 ? `\n${theme.fg("muted", `… ${remainder} more edit blocks`)}` : "";
+							const suffix = remainder > 0
+								? `\n${theme.fg("muted", `… ${remainder} more edit blocks${ctx.expanded ? "" : " • Ctrl+O to expand"}`)}`
+								: "";
 							ctx.state._pt = `${hdr}\n${operations.length} edits ${editSummary}\n\n${sections.join("\n\n")}${suffix}`;
 							ctx.invalidate();
 						})
