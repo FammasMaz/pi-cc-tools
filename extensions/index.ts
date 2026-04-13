@@ -132,14 +132,15 @@ function patchGlobalToolBorders(): void {
 		if (start > end) return rendered;
 
 		const core = rendered.slice(start, end + 1).map((line) => clampLineWidth(line, width));
+		const spacerLine = " ".repeat(width);
 
 		if (toolBackgroundMode === "outlines") {
 			const ruleWidth = Math.max(1, width);
-			return [borderLine(ruleWidth), ...core, borderLine(ruleWidth)];
+			return [spacerLine, borderLine(ruleWidth), ...core, borderLine(ruleWidth)];
 		}
 
-		// transparent: just the core content, no borders or padding
-		return core;
+		// transparent: just the core content with top spacer
+		return [spacerLine, ...core];
 	};
 
 	proto[PATCH_FLAG] = true;
@@ -201,8 +202,6 @@ function patchAssistantMessages(): void {
 				const text = (child as any).text;
 				if (text) {
 					container.children[i] = new DottedParagraph(text, mdTheme);
-					// Add trailing blank line for spacing before next element
-					container.children.splice(i + 1, 0, new Spacer(1));
 				}
 			}
 		}
