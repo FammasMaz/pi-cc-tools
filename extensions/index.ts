@@ -10,6 +10,7 @@ import type {
 	Theme,
 } from "@mariozechner/pi-coding-agent";
 import {
+	AssistantMessageComponent,
 	createBashTool,
 	createEditTool,
 	createFindTool,
@@ -18,7 +19,7 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "@mariozechner/pi-coding-agent";
-import { Container, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Box, Container, Markdown, Spacer, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 import { codeToANSI } from "@shikijs/cli";
 import * as Diff from "diff";
@@ -135,6 +136,33 @@ function summarizeText(text: string, max = 60): string {
 	const oneLine = text.replace(/\n/g, " ").trim();
 	if (oneLine.length <= max) return oneLine;
 	return `${oneLine.slice(0, Math.max(0, max - 3))}...`;
+}
+
+const ASSISTANT_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-message");
+
+function patchAssistantMessages(): void {
+	const proto = AssistantMessageComponent.prototype as any;
+	if (proto[ASSISTANT_PATCH_FLAG]) return;
+	const originalUpdateContent = proto.updateContent;
+	proto.updateContent = function patchedUpdateContent(message: any) {
+		if (!message || !Array.isArray(message.content)) {
+			return originalUpdateContent.call(this, message);
+		}
+		const patchedMessage = {
+			...message,
+			content: message.content.map((block: any) => {
+				if (!block || block.type !== "text" || typeof block.text !== "string") return block;
+				const trimmed = block.text.trim();
+				if (!trimmed || trimmed.startsWith("● ")) return block;
+				return {
+					...block,
+					text: `●  ${trimmed.replace(/\n/g, "\n   ")}`,
+				};
+			}),
+		};
+		return originalUpdateContent.call(this, patchedMessage);
+	};
+	proto[ASSISTANT_PATCH_FLAG] = true;
 }
 
 function shortPath(cwd: string, filePath: string): string {
@@ -1365,6 +1393,7 @@ function isMcpToolCandidate(tool: unknown): boolean {
 
 export default function (pi: ExtensionAPI) {
 	patchGlobalToolBorders();
+	patchAssistantMessages();
 	applyDiffPalette();
 	registerThinkingLabels(pi);
 
