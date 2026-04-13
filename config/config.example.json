@@ -1,0 +1,14 @@
+{
+  "toolBackground": "transparent",
+  "readOutputMode": "preview",
+  "searchOutputMode": "preview",
+  "mcpOutputMode": "preview",
+  "previewLines": 8,
+  "expandedPreviewMaxLines": 4000,
+  "bashOutputMode": "opencode",
+  "bashCollapsedLines": 10,
+  "diffCollapsedLines": 24,
+  "showTruncationHints": false,
+  "diffTheme": "github-dark",
+  "diffColors": {}
+}

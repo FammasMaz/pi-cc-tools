@@ -1,0 +1,37 @@
+{
+  "name": "pi-claude-style-tools",
+  "version": "1.0.0",
+  "description": "Claude Code-style tool rows for pi (bash, read, grep, find, ls, edit, write) with Shiki-powered diff rendering",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "claude-code"
+  ],
+  "license": "MIT",
+  "files": [
+    "extensions/index.ts",
+    "README.md"
+  ],
+  "dependencies": {
+    "@shikijs/cli": "^4.0.2",
+    "diff": "^7.0.0"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "latest",
+    "@mariozechner/pi-tui": "latest",
+    "@sinclair/typebox": "latest",
+    "@types/diff": "^7.0.2",
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.2"
+  }
+}
