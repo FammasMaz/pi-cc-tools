@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { extname, relative } from "node:path";
 
 import type {
@@ -63,6 +63,22 @@ function readSettings(): SettingsFile {
 	return {};
 }
 
+function writeSettingsKey(key: string, value: unknown): void {
+	const home = process.env.HOME ?? "";
+	if (!home) return;
+	const dir = `${home}/.pi`;
+	const path = `${dir}/settings.json`;
+	let settings: Record<string, unknown> = {};
+	try {
+		if (existsSync(path)) settings = JSON.parse(readFileSync(path, "utf8")) ?? {};
+	} catch { /* start fresh */ }
+	settings[key] = value;
+	try {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
+	} catch { /* best effort */ }
+}
+
 let toolBackgroundOverride: "default" | "transparent" | "outlines" | null = null;
 
 function syncToolBackgroundMode(): void {
@@ -71,7 +87,9 @@ function syncToolBackgroundMode(): void {
 		return;
 	}
 	const settings = readSettings();
-	toolBackgroundMode = settings.toolBackground ?? "outlines";
+	// Backward compat: "border" was renamed to "outlines"
+	const raw = settings.toolBackground === "border" ? "outlines" : settings.toolBackground;
+	toolBackgroundMode = raw ?? "outlines";
 }
 
 function applyToolBackgroundMode(theme: unknown): void {
@@ -1469,6 +1487,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			toolBackgroundOverride = mode as typeof toolBackgroundMode;
 			toolBackgroundMode = toolBackgroundOverride;
+			writeSettingsKey("toolBackground", mode);
 			if (ctx.hasUI) {
 				applyToolBackgroundMode(ctx.ui.theme);
 				ctx.ui.notify(`Tool style → ${mode}`, "info");
