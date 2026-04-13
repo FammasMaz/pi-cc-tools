@@ -63,7 +63,13 @@ function readSettings(): SettingsFile {
 	return {};
 }
 
+let toolBackgroundOverride: "default" | "transparent" | "outlines" | null = null;
+
 function syncToolBackgroundMode(): void {
+	if (toolBackgroundOverride) {
+		toolBackgroundMode = toolBackgroundOverride;
+		return;
+	}
 	const settings = readSettings();
 	toolBackgroundMode = settings.toolBackground ?? "outlines";
 }
@@ -1462,7 +1468,8 @@ export default function (pi: ExtensionAPI) {
 				if (ctx.hasUI) ctx.ui.notify(`Unknown mode "${mode}". Options: ${TOOL_MODES.join(", ")}`, "error");
 				return;
 			}
-			toolBackgroundMode = mode as typeof toolBackgroundMode;
+			toolBackgroundOverride = mode as typeof toolBackgroundMode;
+			toolBackgroundMode = toolBackgroundOverride;
 			if (ctx.hasUI) {
 				applyToolBackgroundMode(ctx.ui.theme);
 				ctx.ui.notify(`Tool style → ${mode}`, "info");
