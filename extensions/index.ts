@@ -1427,6 +1427,40 @@ export default function (pi: ExtensionAPI) {
 	applyDiffPalette();
 	registerThinkingLabels(pi);
 
+	// /cc-tools command — toggle tool border style at runtime
+	const TOOL_MODES = ["border", "transparent", "default"] as const;
+	pi.registerCommand("cc-tools", {
+		description: "Switch tool display style: border (lines around tools), transparent (no chrome), default (pi built-in backgrounds)",
+		getArgumentCompletions(prefix) {
+			return TOOL_MODES
+				.filter((m) => m.startsWith(prefix))
+				.map((m) => ({
+					value: m,
+					label: m,
+					description:
+						m === "border" ? "Horizontal rules around each tool (default)"
+						: m === "transparent" ? "No borders or backgrounds"
+						: "Pi built-in tool backgrounds",
+				}));
+		},
+		async handler(args, ctx) {
+			const mode = args.trim().toLowerCase();
+			if (!mode) {
+				if (ctx.hasUI) ctx.ui.notify(`Tool style: ${toolBackgroundMode}`, "info");
+				return;
+			}
+			if (!(TOOL_MODES as readonly string[]).includes(mode)) {
+				if (ctx.hasUI) ctx.ui.notify(`Unknown mode "${mode}". Options: ${TOOL_MODES.join(", ")}`, "error");
+				return;
+			}
+			toolBackgroundMode = mode as typeof toolBackgroundMode;
+			if (ctx.hasUI) {
+				applyToolBackgroundMode(ctx.ui.theme);
+				ctx.ui.notify(`Tool style → ${mode}`, "info");
+			}
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		applyToolBackgroundMode(ctx.ui.theme);
