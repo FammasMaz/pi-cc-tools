@@ -140,6 +140,32 @@ function summarizeText(text: string, max = 60): string {
 
 const ASSISTANT_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-message");
 
+class DottedParagraph {
+	private md: InstanceType<typeof Markdown>;
+
+	constructor(text: string, markdownTheme: ConstructorParameters<typeof Markdown>[3]) {
+		this.md = new Markdown(text, 0, 0, markdownTheme);
+	}
+
+	invalidate(): void {
+		this.md.invalidate();
+	}
+
+	render(width: number): string[] {
+		const PREFIX_W = 2; // visible width of "● "
+		if (width <= PREFIX_W) return ["● "];
+		const lines = this.md.render(width - PREFIX_W);
+		let dotPlaced = false;
+		return lines.map((line: string) => {
+			if (!dotPlaced && stripAnsi(line).trim()) {
+				dotPlaced = true;
+				return `● ${line}`;
+			}
+			return `  ${line}`;
+		});
+	}
+}
+
 function patchAssistantMessages(): void {
 	const proto = AssistantMessageComponent.prototype as any;
 	if (proto[ASSISTANT_PATCH_FLAG]) return;
@@ -148,19 +174,22 @@ function patchAssistantMessages(): void {
 		if (!message || !Array.isArray(message.content)) {
 			return originalUpdateContent.call(this, message);
 		}
-		const patchedMessage = {
-			...message,
-			content: message.content.map((block: any) => {
-				if (!block || block.type !== "text" || typeof block.text !== "string") return block;
-				const trimmed = block.text.trim();
-				if (!trimmed || trimmed.startsWith("● ")) return block;
-				return {
-					...block,
-					text: `●  ${trimmed.replace(/\n/g, "\n   ")}`,
-				};
-			}),
-		};
-		return originalUpdateContent.call(this, patchedMessage);
+		// Call original to build all children (text, thinking, spacers, errors)
+		originalUpdateContent.call(this, message);
+		// Replace text-block Markdown children with DottedParagraph wrappers
+		const container = (this as any).contentContainer;
+		if (!container?.children) return;
+		const mdTheme = (this as any).markdownTheme;
+		for (let i = 0; i < container.children.length; i++) {
+			const child = container.children[i];
+			// Only wrap text-block Markdowns, not thinking blocks (which have italic defaultTextStyle)
+			if (child instanceof Markdown && !(child as any).defaultTextStyle?.italic) {
+				const text = (child as any).text;
+				if (text) {
+					container.children[i] = new DottedParagraph(text, mdTheme);
+				}
+			}
+		}
 	};
 	proto[ASSISTANT_PATCH_FLAG] = true;
 }
