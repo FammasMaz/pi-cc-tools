@@ -231,9 +231,11 @@ class ThinkingParagraph {
 			// Override code highlighting to return plain lines (no syntax colors)
 			highlightCode: (code: string, _lang?: string) => code.split("\n"),
 		};
-		// Keep italic + dim as the base style for all text
+		// Keep italic as the base style + a uniform dim color for all text
+		const DIM_FG = "\x1b[38;2;140;140;140m"; // neutral gray, same hue for everything
 		const plainStyle: ConstructorParameters<typeof Markdown>[4] = {
 			italic: true,
+			color: (s: string) => `${DIM_FG}${s}`,
 		};
 		this.md = new Markdown(text, 0, 0, plainTheme, plainStyle);
 	}
