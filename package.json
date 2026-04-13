@@ -23,6 +23,7 @@
   },
   "files": [
     "extensions/index.ts",
+    "extensions/spinner.ts",
     "config/config.example.json",
     "README.md"
   ],
@@ -37,7 +38,8 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/index.ts"
+      "./extensions/index.ts",
+      "./extensions/spinner.ts"
     ]
   },
   "devDependencies": {
