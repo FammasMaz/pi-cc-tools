@@ -32,10 +32,10 @@ const TRANSPARENT_RESET = `${RESET}${TRANSPARENT_BG}`;
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
 
-let toolBackgroundMode: "default" | "transparent" | "border" = "border";
+let toolBackgroundMode: "default" | "transparent" | "outlines" = "outlines";
 
 interface SettingsFile {
-	toolBackground?: "default" | "transparent" | "border";
+	toolBackground?: "default" | "transparent" | "outlines";
 	readOutputMode?: "hidden" | "summary" | "preview";
 	searchOutputMode?: "hidden" | "count" | "preview";
 	mcpOutputMode?: "hidden" | "summary" | "preview";
@@ -65,7 +65,7 @@ function readSettings(): SettingsFile {
 
 function syncToolBackgroundMode(): void {
 	const settings = readSettings();
-	toolBackgroundMode = settings.toolBackground ?? "border";
+	toolBackgroundMode = settings.toolBackground ?? "outlines";
 }
 
 function applyToolBackgroundMode(theme: unknown): void {
@@ -115,9 +115,10 @@ function patchGlobalToolBorders(): void {
 	proto.render = function patchedContainerRender(width: number): string[] {
 		const rendered = originalRender.call(this, width);
 		if (!Array.isArray(rendered) || rendered.length === 0) return rendered;
-		if (toolBackgroundMode !== "border") return rendered;
+		if (toolBackgroundMode === "default") return rendered;
 		if (!isToolExecutionLike(this)) return rendered;
 
+		// Strip leading/trailing blank lines for both border and transparent modes
 		let start = 0;
 		while (start < rendered.length && isBlankLine(rendered[start])) start++;
 		let end = rendered.length - 1;
@@ -125,8 +126,14 @@ function patchGlobalToolBorders(): void {
 		if (start > end) return rendered;
 
 		const core = rendered.slice(start, end + 1).map((line) => clampLineWidth(line, width));
-		const ruleWidth = Math.max(1, width);
-		return [borderLine(ruleWidth), ...core, borderLine(ruleWidth)];
+
+		if (toolBackgroundMode === "outlines") {
+			const ruleWidth = Math.max(1, width);
+			return [borderLine(ruleWidth), ...core, borderLine(ruleWidth)];
+		}
+
+		// transparent: just the core content, no borders or padding
+		return core;
 	};
 
 	proto[PATCH_FLAG] = true;
@@ -1428,9 +1435,9 @@ export default function (pi: ExtensionAPI) {
 	registerThinkingLabels(pi);
 
 	// /cc-tools command — toggle tool border style at runtime
-	const TOOL_MODES = ["border", "transparent", "default"] as const;
+	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
 	pi.registerCommand("cc-tools", {
-		description: "Switch tool display style: border (lines around tools), transparent (no chrome), default (pi built-in backgrounds)",
+		description: "Switch tool display style: outlines (lines around tools), transparent (no chrome), default (pi built-in backgrounds)",
 		getArgumentCompletions(prefix) {
 			return TOOL_MODES
 				.filter((m) => m.startsWith(prefix))
@@ -1438,7 +1445,7 @@ export default function (pi: ExtensionAPI) {
 					value: m,
 					label: m,
 					description:
-						m === "border" ? "Horizontal rules around each tool (default)"
+						m === "outlines" ? "Horizontal rules around each tool (default)"
 						: m === "transparent" ? "No borders or backgrounds"
 						: "Pi built-in tool backgrounds",
 				}));
