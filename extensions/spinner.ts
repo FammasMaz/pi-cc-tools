@@ -3,13 +3,31 @@ import { Loader } from "@mariozechner/pi-tui";
 
 // ---------------------------------------------------------------------------
 // Patch the built-in Loader to use OpenBrawd-style animated characters
-// instead of braille dots. This replaces the default spinner globally.
+// instead of braille dots. Class fields are instance props so we override
+// updateDisplay on the prototype to inject our characters.
 // ---------------------------------------------------------------------------
 
 const SPINNER_CHARS = ["·", "✢", "✳", "✶", "✻", "✽"];
 const OB_FRAMES = [...SPINNER_CHARS, ...[...SPINNER_CHARS].reverse()];
 
-(Loader.prototype as any).frames = OB_FRAMES;
+const origUpdateDisplay = (Loader.prototype as any).updateDisplay;
+(Loader.prototype as any).updateDisplay = function patchedUpdateDisplay() {
+	const frame = OB_FRAMES[this.currentFrame % OB_FRAMES.length];
+	this.setText(`${this.spinnerColorFn(frame)} ${this.messageColorFn(this.message)}`);
+	if (this.ui) {
+		this.ui.requestRender();
+	}
+};
+
+// Override start() to use 120ms interval (OpenBrawd's speed) instead of 80ms
+const origStart = Loader.prototype.start;
+Loader.prototype.start = function patchedStart() {
+	this.updateDisplay();
+	(this as any).intervalId = setInterval(() => {
+		(this as any).currentFrame = ((this as any).currentFrame + 1) % OB_FRAMES.length;
+		this.updateDisplay();
+	}, 120);
+};
 
 // ---------------------------------------------------------------------------
 // Spinner verbs — fun/whimsical loading messages (different set from OpenBrawd)

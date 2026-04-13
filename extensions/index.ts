@@ -204,10 +204,38 @@ class ThinkingParagraph {
 
 	constructor(
 		text: string,
-		markdownTheme: ConstructorParameters<typeof Markdown>[3],
-		defaultTextStyle?: ConstructorParameters<typeof Markdown>[4],
+		_markdownTheme: ConstructorParameters<typeof Markdown>[3],
+		_defaultTextStyle?: ConstructorParameters<typeof Markdown>[4],
 	) {
-		this.md = new Markdown(text, 0, 0, markdownTheme, defaultTextStyle);
+		// Use a plain theme that strips all color/formatting from thinking blocks.
+		// Code blocks, headings, etc. render as plain dimmed text.
+		// We use identity functions (passthrough) so only the defaultTextStyle
+		// (italic) applies uniformly. No extra formatting escapes that could
+		// create brightness differences.
+		const id = (s: string) => s;
+		const plainTheme: ConstructorParameters<typeof Markdown>[3] = {
+			heading: id,
+			link: id,
+			linkUrl: id,
+			code: id,
+			codeBlock: id,
+			codeBlockBorder: id,
+			quote: id,
+			quoteBorder: id,
+			hr: id,
+			listBullet: id,
+			bold: id,
+			italic: id,
+			strikethrough: id,
+			underline: id,
+			// Override code highlighting to return plain lines (no syntax colors)
+			highlightCode: (code: string, _lang?: string) => code.split("\n"),
+		};
+		// Keep italic + dim as the base style for all text
+		const plainStyle: ConstructorParameters<typeof Markdown>[4] = {
+			italic: true,
+		};
+		this.md = new Markdown(text, 0, 0, plainTheme, plainStyle);
 	}
 
 	invalidate(): void {
@@ -1441,11 +1469,11 @@ function stripThinkingPresentationArtifacts(text: string): string {
 	}
 }
 
-function prefixThinkingLine(text: string, theme: Theme | undefined): string {
+function prefixThinkingLine(text: string, _theme: Theme | undefined): string {
 	const normalized = stripThinkingPresentationArtifacts(text).trim();
 	if (!normalized) return text;
-	if (!theme) return `Thinking: ${normalized}`;
-	return `${theme.fg("accent", "Thinking:")} ${theme.fg("thinkingText", normalized)}`;
+	// Plain text — no ANSI colors, no theme. The ThinkingParagraph handles styling.
+	return `Thinking: ${normalized}`;
 }
 
 function registerThinkingLabels(pi: ExtensionAPI): void {
