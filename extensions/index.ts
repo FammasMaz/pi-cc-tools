@@ -199,6 +199,33 @@ class DottedParagraph {
 	}
 }
 
+class ThinkingParagraph {
+	private md: InstanceType<typeof Markdown>;
+
+	constructor(text: string, markdownTheme: ConstructorParameters<typeof Markdown>[3]) {
+		this.md = new Markdown(text, 0, 0, markdownTheme);
+	}
+
+	invalidate(): void {
+		this.md.invalidate();
+	}
+
+	render(width: number): string[] {
+		// " ✽ " = 1 margin + symbol + space = 3 visible chars
+		const PREFIX_W = 3;
+		if (width <= PREFIX_W) return [" ✽ "];
+		const lines = this.md.render(width - PREFIX_W);
+		let symbolPlaced = false;
+		return lines.map((line: string) => {
+			if (!symbolPlaced && stripAnsi(line).trim()) {
+				symbolPlaced = true;
+				return ` ✽ ${line}`;
+			}
+			return `   ${line}`;
+		});
+	}
+}
+
 function patchAssistantMessages(): void {
 	const proto = AssistantMessageComponent.prototype as any;
 	if (proto[ASSISTANT_PATCH_FLAG]) return;
@@ -215,10 +242,13 @@ function patchAssistantMessages(): void {
 		const mdTheme = (this as any).markdownTheme;
 		for (let i = container.children.length - 1; i >= 0; i--) {
 			const child = container.children[i];
-			// Only wrap text-block Markdowns, not thinking blocks (which have italic defaultTextStyle)
-			if (child instanceof Markdown && !(child as any).defaultTextStyle?.italic) {
+			if (child instanceof Markdown) {
 				const text = (child as any).text;
-				if (text) {
+				if (!text) continue;
+				const isThinking = !!(child as any).defaultTextStyle?.italic;
+				if (isThinking) {
+					container.children[i] = new ThinkingParagraph(text, mdTheme);
+				} else {
 					container.children[i] = new DottedParagraph(text, mdTheme);
 				}
 			}
