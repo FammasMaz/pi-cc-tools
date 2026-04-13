@@ -188,6 +188,16 @@ const SPINNER_VERBS = [
 	"Zigzagging",
 ];
 
+// ---------------------------------------------------------------------------
+// Spinner glyph — OpenBrawd-style animated character sequence
+// ---------------------------------------------------------------------------
+
+/** Characters that bounce: forward then reverse */
+const SPINNER_CHARS = ["·", "✢", "✳", "✶", "✻", "✽"];
+const SPINNER_FRAMES = [...SPINNER_CHARS, ...[...SPINNER_CHARS].reverse()];
+/** ms per character step (matches OpenBrawd's 120ms) */
+const FRAME_INTERVAL_MS = 120;
+
 function pickVerb(): string {
 	return SPINNER_VERBS[Math.floor(Math.random() * SPINNER_VERBS.length)];
 }
@@ -241,12 +251,16 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Build the working message in OpenBrawd style:
-	 *   Verb… (thinking with medium effort · 1:45)
+	 *   ✶ Verb… (thinking with medium effort · 1:45)
 	 *
-	 * The parenthesized status part appears only when there's something to show.
+	 * The animated glyph and parenthesized status appear contextually.
 	 */
 	function buildWorkingMessage(): string {
 		const elapsed = Date.now() - turnStartTime;
+
+		// Animated spinner glyph
+		const frameIndex = Math.floor(Date.now() / FRAME_INTERVAL_MS) % SPINNER_FRAMES.length;
+		const glyph = SPINNER_FRAMES[frameIndex];
 
 		// --- Status parts (go inside parentheses, joined with " · ") ---
 		const statusParts: string[] = [];
@@ -266,7 +280,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// --- Assemble ---
-		let msg = `${currentVerb}…`;
+		let msg = `${glyph} ${currentVerb}…`;
 		if (statusParts.length > 0) {
 			msg += ` (${statusParts.join(" · ")})`;
 		}
@@ -284,7 +298,7 @@ export default function (pi: ExtensionAPI) {
 
 	function startTicking(): void {
 		stopTicking();
-		tickTimer = setInterval(updateDisplay, 200);
+		tickTimer = setInterval(updateDisplay, 80);
 		updateDisplay(); // immediate first update
 	}
 
