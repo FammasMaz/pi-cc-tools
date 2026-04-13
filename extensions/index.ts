@@ -202,8 +202,12 @@ class DottedParagraph {
 class ThinkingParagraph {
 	private md: InstanceType<typeof Markdown>;
 
-	constructor(text: string, markdownTheme: ConstructorParameters<typeof Markdown>[3]) {
-		this.md = new Markdown(text, 0, 0, markdownTheme);
+	constructor(
+		text: string,
+		markdownTheme: ConstructorParameters<typeof Markdown>[3],
+		defaultTextStyle?: ConstructorParameters<typeof Markdown>[4],
+	) {
+		this.md = new Markdown(text, 0, 0, markdownTheme, defaultTextStyle);
 	}
 
 	invalidate(): void {
@@ -247,7 +251,8 @@ function patchAssistantMessages(): void {
 				if (!text) continue;
 				const isThinking = !!(child as any).defaultTextStyle?.italic;
 				if (isThinking) {
-					container.children[i] = new ThinkingParagraph(text, mdTheme);
+					const style = (child as any).defaultTextStyle;
+					container.children[i] = new ThinkingParagraph(text, mdTheme, style);
 				} else {
 					container.children[i] = new DottedParagraph(text, mdTheme);
 				}
