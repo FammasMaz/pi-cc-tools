@@ -188,13 +188,15 @@ function patchAssistantMessages(): void {
 		const container = (this as any).contentContainer;
 		if (!container?.children) return;
 		const mdTheme = (this as any).markdownTheme;
-		for (let i = 0; i < container.children.length; i++) {
+		for (let i = container.children.length - 1; i >= 0; i--) {
 			const child = container.children[i];
 			// Only wrap text-block Markdowns, not thinking blocks (which have italic defaultTextStyle)
 			if (child instanceof Markdown && !(child as any).defaultTextStyle?.italic) {
 				const text = (child as any).text;
 				if (text) {
 					container.children[i] = new DottedParagraph(text, mdTheme);
+					// Add trailing blank line for spacing before next element
+					container.children.splice(i + 1, 0, new Spacer(1));
 				}
 			}
 		}
