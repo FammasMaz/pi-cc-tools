@@ -152,16 +152,17 @@ class DottedParagraph {
 	}
 
 	render(width: number): string[] {
-		const PREFIX_W = 2; // visible width of "● "
-		if (width <= PREFIX_W) return ["● "];
+		// " ● " = 1 margin + dot + space = 3 visible chars
+		const PREFIX_W = 3;
+		if (width <= PREFIX_W) return [" ● "];
 		const lines = this.md.render(width - PREFIX_W);
 		let dotPlaced = false;
 		return lines.map((line: string) => {
 			if (!dotPlaced && stripAnsi(line).trim()) {
 				dotPlaced = true;
-				return `● ${line}`;
+				return ` ● ${line}`;
 			}
-			return `  ${line}`;
+			return `   ${line}`;
 		});
 	}
 }
