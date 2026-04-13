@@ -212,8 +212,8 @@ const SHOW_TIMER_AFTER_MS = 30_000;
 /** How long to display "thought for Ns" after thinking ends */
 const THOUGHT_DISPLAY_MS = 2_000;
 
-/** Minimum time to show "thinking" status (prevents flicker) */
-const MIN_THINKING_DISPLAY_MS = 2_000;
+/** Minimum thinking duration before showing "thought for Ns" (skip if too brief) */
+const MIN_THINKING_SHOW_MS = 1_000;
 
 export default function (pi: ExtensionAPI) {
 	let turnStartTime = 0;
@@ -317,29 +317,25 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Transition thinking state machine when thinking ends.
-	 * Mirrors OpenBrawd's 2s minimum display + 2s "thought for" behavior.
+	 * Immediately freezes the duration — no artificial delay that overshoots the timer.
 	 */
 	function onThinkingEnd(): void {
 		if (thinkingStatus !== "thinking") return;
 
 		const duration = Date.now() - thinkingStartTime;
-		const elapsed = Date.now() - thinkingStartTime;
-		const remainingThinkingTime = Math.max(0, MIN_THINKING_DISPLAY_MS - elapsed);
 
-		const showDuration = () => {
-			thinkingStatus = duration;
-			clearStatusTimer = setTimeout(() => {
-				thinkingStatus = null;
-				clearStatusTimer = null;
-			}, THOUGHT_DISPLAY_MS);
-		};
-
-		if (remainingThinkingTime > 0) {
-			// Show "thinking..." for remaining time then switch to duration
-			showDurationTimer = setTimeout(showDuration, remainingThinkingTime);
-		} else {
-			showDuration();
+		if (duration < MIN_THINKING_SHOW_MS) {
+			// Too brief — skip "thought for" entirely to avoid flicker
+			thinkingStatus = null;
+			return;
 		}
+
+		// Immediately show frozen "thought for Ns", then clear after display period
+		thinkingStatus = duration;
+		clearStatusTimer = setTimeout(() => {
+			thinkingStatus = null;
+			clearStatusTimer = null;
+		}, THOUGHT_DISPLAY_MS);
 	}
 
 	// --- Event handlers ---
