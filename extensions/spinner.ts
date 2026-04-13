@@ -1,4 +1,15 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Loader } from "@mariozechner/pi-tui";
+
+// ---------------------------------------------------------------------------
+// Patch the built-in Loader to use OpenBrawd-style animated characters
+// instead of braille dots. This replaces the default spinner globally.
+// ---------------------------------------------------------------------------
+
+const SPINNER_CHARS = ["·", "✢", "✳", "✶", "✻", "✽"];
+const OB_FRAMES = [...SPINNER_CHARS, ...[...SPINNER_CHARS].reverse()];
+
+(Loader.prototype as any).frames = OB_FRAMES;
 
 // ---------------------------------------------------------------------------
 // Spinner verbs — fun/whimsical loading messages (different set from OpenBrawd)
@@ -189,14 +200,9 @@ const SPINNER_VERBS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Spinner glyph — OpenBrawd-style animated character sequence
+// Spinner glyph characters are now patched into the Loader above.
+// No separate glyph prefix needed.
 // ---------------------------------------------------------------------------
-
-/** Characters that bounce: forward then reverse */
-const SPINNER_CHARS = ["·", "✢", "✳", "✶", "✻", "✽"];
-const SPINNER_FRAMES = [...SPINNER_CHARS, ...[...SPINNER_CHARS].reverse()];
-/** ms per character step (matches OpenBrawd's 120ms) */
-const FRAME_INTERVAL_MS = 120;
 
 function pickVerb(): string {
 	return SPINNER_VERBS[Math.floor(Math.random() * SPINNER_VERBS.length)];
@@ -250,17 +256,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/**
-	 * Build the working message in OpenBrawd style:
-	 *   ✶ Verb… (thinking with medium effort · 1:45)
+	 * Build the working message:
+	 *   Verb… (thinking with medium effort · 1:45)
 	 *
-	 * The animated glyph and parenthesized status appear contextually.
+	 * The Loader provides the animated glyph prefix automatically.
 	 */
 	function buildWorkingMessage(): string {
 		const elapsed = Date.now() - turnStartTime;
-
-		// Animated spinner glyph
-		const frameIndex = Math.floor(Date.now() / FRAME_INTERVAL_MS) % SPINNER_FRAMES.length;
-		const glyph = SPINNER_FRAMES[frameIndex];
 
 		// --- Status parts (go inside parentheses, joined with " · ") ---
 		const statusParts: string[] = [];
@@ -280,7 +282,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// --- Assemble ---
-		let msg = `${glyph} ${currentVerb}…`;
+		let msg = `${currentVerb}…`;
 		if (statusParts.length > 0) {
 			msg += ` (${statusParts.join(" · ")})`;
 		}
@@ -298,7 +300,7 @@ export default function (pi: ExtensionAPI) {
 
 	function startTicking(): void {
 		stopTicking();
-		tickTimer = setInterval(updateDisplay, 80);
+		tickTimer = setInterval(updateDisplay, 200);
 		updateDisplay(); // immediate first update
 	}
 
