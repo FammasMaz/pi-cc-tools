@@ -211,7 +211,7 @@ function formatDuration(ms: number): string {
 const SHOW_TIMER_AFTER_MS = 30_000;
 
 /** How long to display "thought for Ns" after thinking ends */
-const THOUGHT_DISPLAY_MS = 2_000;
+const THOUGHT_DISPLAY_MS = 2_000; // used only on turn_end linger
 
 /** Minimum thinking duration before showing "thought for Ns" (skip sub-100ms flickers) */
 const MIN_THINKING_SHOW_MS = 100;
@@ -318,7 +318,7 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Transition thinking state machine when thinking ends.
-	 * Immediately freezes the duration — no artificial delay that overshoots the timer.
+	 * Shows "thought for Ns" until the next thinking_start or turn_end.
 	 */
 	function onThinkingEnd(): void {
 		if (thinkingStatus !== "thinking") return;
@@ -331,12 +331,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Immediately show frozen "thought for Ns", then clear after display period
+		// Freeze the duration — stays visible until next thinking_start or turn_end
 		thinkingStatus = duration;
-		clearStatusTimer = setTimeout(() => {
-			thinkingStatus = null;
-			clearStatusTimer = null;
-		}, THOUGHT_DISPLAY_MS);
 	}
 
 	// --- Event handlers ---
