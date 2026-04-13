@@ -5,11 +5,25 @@
   "keywords": [
     "pi-package",
     "pi-extension",
-    "claude-code"
+    "claude-code",
+    "pi",
+    "tool-renderer",
+    "shiki",
+    "diff"
   ],
   "license": "MIT",
+  "author": "FammasMaz",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FammasMaz/pi-cc-tools.git"
+  },
+  "homepage": "https://github.com/FammasMaz/pi-cc-tools#readme",
+  "bugs": {
+    "url": "https://github.com/FammasMaz/pi-cc-tools/issues"
+  },
   "files": [
     "extensions/index.ts",
+    "config/config.example.json",
     "README.md"
   ],
   "dependencies": {
