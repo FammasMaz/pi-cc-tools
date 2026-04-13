@@ -192,14 +192,15 @@ function pickVerb(): string {
 	return SPINNER_VERBS[Math.floor(Math.random() * SPINNER_VERBS.length)];
 }
 
-/** Format elapsed ms as h:mm:ss or m:ss or 0:ss */
+/** Format elapsed ms as compact duration: 5s, 1m 23s, 1h 2m 3s */
 function formatDuration(ms: number): string {
 	const totalSec = Math.floor(ms / 1000);
 	const h = Math.floor(totalSec / 3600);
 	const m = Math.floor((totalSec % 3600) / 60);
 	const s = totalSec % 60;
-	if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-	return `${m}:${String(s).padStart(2, "0")}`;
+	if (h > 0) return `${h}h ${m}m ${s}s`;
+	if (m > 0) return `${m}m ${s}s`;
+	return `${s}s`;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,8 +213,8 @@ const SHOW_TIMER_AFTER_MS = 30_000;
 /** How long to display "thought for Ns" after thinking ends */
 const THOUGHT_DISPLAY_MS = 2_000;
 
-/** Minimum thinking duration before showing "thought for Ns" (skip if too brief) */
-const MIN_THINKING_SHOW_MS = 1_000;
+/** Minimum thinking duration before showing "thought for Ns" (skip sub-100ms flickers) */
+const MIN_THINKING_SHOW_MS = 100;
 
 export default function (pi: ExtensionAPI) {
 	let turnStartTime = 0;
@@ -367,7 +368,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_end", async () => {
-		clearDisplay();
+		// If we're showing "thought for Ns", let it linger briefly so the user sees it
+		if (typeof thinkingStatus === "number") {
+			// Keep ticking for the remaining display time, then clear
+			const remaining = THOUGHT_DISPLAY_MS;
+			setTimeout(() => clearDisplay(), remaining);
+		} else {
+			clearDisplay();
+		}
 	});
 
 	pi.on("agent_end", async () => {
