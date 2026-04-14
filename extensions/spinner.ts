@@ -9,11 +9,22 @@ import { Loader } from "@mariozechner/pi-tui";
 
 const SPINNER_CHARS = ["·", "✢", "✳", "✶", "✻", "✽"];
 const OB_FRAMES = [...SPINNER_CHARS, ...[...SPINNER_CHARS].reverse()];
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+const RAW_ANSI_RE = /\x1b\[[0-9;]*m/;
+const RESET = "\x1b[0m";
+const CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
+const CLAUDE_ORANGE_EDGE = "\x1b[38;2;230;134;102m";
+const CLAUDE_ORANGE_SHIMMER = "\x1b[38;2;245;149;117m";
+const STATUS_DIM = "\x1b[38;2;153;153;153m";
+const SHIMMER_INTERVAL_MS = 150;
 
 const origUpdateDisplay = (Loader.prototype as any).updateDisplay;
 (Loader.prototype as any).updateDisplay = function patchedUpdateDisplay() {
 	const frame = OB_FRAMES[this.currentFrame % OB_FRAMES.length];
-	this.setText(`${this.spinnerColorFn(frame)} ${this.messageColorFn(this.message)}`);
+	const message = typeof this.message === "string" && RAW_ANSI_RE.test(this.message)
+		? this.message
+		: this.messageColorFn(this.message);
+	this.setText(`${this.spinnerColorFn(frame)} ${message}`);
 	if (this.ui) {
 		this.ui.requestRender();
 	}
@@ -237,6 +248,47 @@ function formatDuration(ms: number): string {
 	return `${s}s`;
 }
 
+function stripAnsi(text: string): string {
+	return text.replace(ANSI_RE, "");
+}
+
+function formatCount(value: number): string {
+	return new Intl.NumberFormat("en-US").format(value);
+}
+
+function estimateResponseLength(message: any): number {
+	if (!Array.isArray(message?.content)) return 0;
+	return message.content.reduce((sum: number, block: any) =>
+		sum + (block?.type === "text" && typeof block.text === "string" ? block.text.length : 0), 0);
+}
+
+function statusText(text: string): string {
+	return `${STATUS_DIM}${text}${RESET}`;
+}
+
+function colorizeShimmerSegment(segment: string): string {
+	const chars = Array.from(segment);
+	if (chars.length === 0) return "";
+	const center = Math.floor(chars.length / 2);
+	return chars
+		.map((char, index) => `${index === center ? CLAUDE_ORANGE_SHIMMER : CLAUDE_ORANGE_EDGE}${char}`)
+		.join("");
+}
+
+function renderShimmerText(text: string, tick: number): string {
+	const chars = Array.from(stripAnsi(text));
+	if (chars.length === 0) return "";
+	const cycleLength = chars.length + 20;
+	const glimmerIndex = chars.length + 10 - (tick % cycleLength);
+	const shimmerStart = glimmerIndex - 1;
+	const shimmerEnd = glimmerIndex + 1;
+	if (shimmerStart >= chars.length || shimmerEnd < 0) return `${CLAUDE_ORANGE}${text}${RESET}`;
+	const before = chars.slice(0, Math.max(0, shimmerStart)).join("");
+	const shimmer = chars.slice(Math.max(0, shimmerStart), Math.min(chars.length, shimmerEnd + 1)).join("");
+	const after = chars.slice(Math.min(chars.length, shimmerEnd + 1)).join("");
+	return `${CLAUDE_ORANGE}${before}${colorizeShimmerSegment(shimmer)}${CLAUDE_ORANGE}${after}${RESET}`;
+}
+
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
@@ -254,6 +306,8 @@ export default function (pi: ExtensionAPI) {
 	let turnStartTime = 0;
 	let tickTimer: ReturnType<typeof setInterval> | null = null;
 	let currentVerb = "";
+	let responseLength = 0;
+	let shimmerTick = 0;
 
 	// Thinking state machine (mirrors OpenBrawd's approach)
 	let thinkingStatus: "thinking" | number /* duration ms */ | null = null;
@@ -275,12 +329,13 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Build the working message:
-	 *   Verb… (thinking with medium effort · 1:45)
+	 *   Verb… (thinking with medium effort · ↓ 123 tokens · 1:45)
 	 *
 	 * The Loader provides the animated glyph prefix automatically.
 	 */
 	function buildWorkingMessage(): string {
 		const elapsed = Date.now() - turnStartTime;
+		const tokenCount = Math.max(0, Math.round(responseLength / 4));
 
 		// --- Status parts (go inside parentheses, joined with " · ") ---
 		const statusParts: string[] = [];
@@ -294,15 +349,19 @@ export default function (pi: ExtensionAPI) {
 			statusParts.push(`thought for ${dur}s`);
 		}
 
-		// Elapsed time (shown after threshold, or always if verbose/thinking)
-		if (elapsed > SHOW_TIMER_AFTER_MS || thinkingStatus !== null) {
+		if (tokenCount > 0) {
+			statusParts.push(`↓ ${formatCount(tokenCount)} tokens`);
+		}
+
+		// Elapsed time (shown after threshold, or whenever we're actively showing status)
+		if (elapsed > SHOW_TIMER_AFTER_MS || thinkingStatus !== null || tokenCount > 0) {
 			statusParts.push(formatDuration(elapsed));
 		}
 
 		// --- Assemble ---
-		let msg = `${currentVerb}…`;
+		let msg = renderShimmerText(`${currentVerb}…`, shimmerTick);
 		if (statusParts.length > 0) {
-			msg += ` (${statusParts.join(" · ")})`;
+			msg += statusText(` (${statusParts.join(" · ")})`);
 		}
 
 		return msg;
@@ -318,7 +377,10 @@ export default function (pi: ExtensionAPI) {
 
 	function startTicking(): void {
 		stopTicking();
-		tickTimer = setInterval(updateDisplay, 200);
+		tickTimer = setInterval(() => {
+			shimmerTick++;
+			updateDisplay();
+		}, SHIMMER_INTERVAL_MS);
 		updateDisplay(); // immediate first update
 	}
 
@@ -344,6 +406,8 @@ export default function (pi: ExtensionAPI) {
 		stopTicking();
 		clearThinkingTimers();
 		thinkingStatus = null;
+		responseLength = 0;
+		shimmerTick = 0;
 		if (!activeCtx?.hasUI) return;
 		try {
 			activeCtx.ui.setWorkingMessage(); // restore default
@@ -375,6 +439,8 @@ export default function (pi: ExtensionAPI) {
 		activeCtx = ctx;
 		turnStartTime = Date.now();
 		currentVerb = pickVerb();
+		responseLength = 0;
+		shimmerTick = 0;
 		thinkingStatus = null;
 		clearThinkingTimers();
 		startTicking();
@@ -383,6 +449,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_update", async (event, ctx) => {
 		activeCtx = ctx;
 		const evt = event.assistantMessageEvent;
+		responseLength = estimateResponseLength(event.message);
 
 		if (evt.type === "thinking_start") {
 			if (thinkingStatus !== "thinking") {

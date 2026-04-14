@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { extname, relative } from "node:path";
+import { readFile as readFileAsync } from "node:fs/promises";
+import { extname, relative, resolve } from "node:path";
 
 import type {
 	BashToolDetails,
@@ -113,6 +114,23 @@ function stripAnsi(text: string): string {
 	return text.replace(ANSI_RE, "");
 }
 
+function stripRenderedHeadingMarkers(line: string): string {
+	return line.replace(/^((?:\x1b\[[0-9;]*m|[ \t])*)#{3,6}[ \t]*((?:\x1b\[[0-9;]*m)*)/, "$1$2");
+}
+
+function sanitizeRenderedTextBlockLines(lines: string[]): string[] {
+	let inFence = false;
+	return lines.map((line) => {
+		const plain = stripAnsi(line).trimStart();
+		if (plain.startsWith("```")) {
+			inFence = !inFence;
+			return line;
+		}
+		if (inFence) return line;
+		return stripRenderedHeadingMarkers(line).replace(/###/g, "");
+	});
+}
+
 function isBlankLine(text: string): boolean {
 	return stripAnsi(text).trim().length === 0;
 }
@@ -189,7 +207,7 @@ class DottedParagraph {
 		// " ● " = 1 margin + dot + space = 3 visible chars
 		const PREFIX_W = 3;
 		if (width <= PREFIX_W) return [" ● "];
-		const lines = this.md.render(width - PREFIX_W);
+		const lines = sanitizeRenderedTextBlockLines(this.md.render(width - PREFIX_W));
 		let dotPlaced = false;
 		return lines.map((line: string) => {
 			if (!dotPlaced && stripAnsi(line).trim()) {
@@ -248,7 +266,7 @@ class ThinkingParagraph {
 		// " ✽ " = 1 margin + symbol + space = 3 visible chars
 		const PREFIX_W = 3;
 		if (width <= PREFIX_W) return [" ✽ "];
-		const lines = this.md.render(width - PREFIX_W);
+		const lines = sanitizeRenderedTextBlockLines(this.md.render(width - PREFIX_W));
 		let symbolPlaced = false;
 		return lines.map((line: string) => {
 			if (!symbolPlaced && stripAnsi(line).trim()) {
@@ -1524,6 +1542,184 @@ function summarizeEditOperations(operations: Array<{ oldText: string; newText: s
 	return { diffs, totalAdded, totalRemoved, totalLines, totalHunks, summary: summarizeDiff(totalAdded, totalRemoved) };
 }
 
+function normalizeToLf(text: string): string {
+	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function stripBomText(text: string): string {
+	return text.startsWith("\uFEFF") ? text.slice(1) : text;
+}
+
+function normalizeTextForFuzzyMatch(text: string): string {
+	return text
+		.normalize("NFKC")
+		.split("\n")
+		.map((line) => line.trimEnd())
+		.join("\n")
+		.replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+		.replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+		.replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
+		.replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
+}
+
+function findEditMatch(content: string, oldText: string): { found: boolean; index: number; matchLength: number; usedFuzzyMatch: boolean } {
+	const exactIndex = content.indexOf(oldText);
+	if (exactIndex !== -1) return { found: true, index: exactIndex, matchLength: oldText.length, usedFuzzyMatch: false };
+	const fuzzyContent = normalizeTextForFuzzyMatch(content);
+	const fuzzyOldText = normalizeTextForFuzzyMatch(oldText);
+	const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
+	return fuzzyIndex === -1
+		? { found: false, index: -1, matchLength: 0, usedFuzzyMatch: false }
+		: { found: true, index: fuzzyIndex, matchLength: fuzzyOldText.length, usedFuzzyMatch: true };
+}
+
+function countFuzzyOccurrences(content: string, oldText: string): number {
+	const fuzzyContent = normalizeTextForFuzzyMatch(content);
+	const fuzzyOldText = normalizeTextForFuzzyMatch(oldText);
+	return fuzzyContent.split(fuzzyOldText).length - 1;
+}
+
+function lineNumberAtIndex(text: string, index: number): number {
+	return text.slice(0, Math.max(0, index)).split("\n").length;
+}
+
+function countLineBreaks(text: string): number {
+	return (text.match(/\n/g) ?? []).length;
+}
+
+function offsetParsedDiff(diff: ParsedDiff, oldOffset: number, newOffset = oldOffset): ParsedDiff {
+	return {
+		...diff,
+		lines: diff.lines.map((line) =>
+			line.type === "sep"
+				? line
+				: {
+					...line,
+					oldNum: line.oldNum === null ? null : line.oldNum + oldOffset,
+					newNum: line.newNum === null ? null : line.newNum + newOffset,
+				},
+		),
+	};
+}
+
+function getFirstChangedNewLine(diff: ParsedDiff): number {
+	let currentNewLine = 0;
+	for (let i = 0; i < diff.lines.length; i++) {
+		const line = diff.lines[i];
+		if (line.type === "sep") {
+			currentNewLine = 0;
+			continue;
+		}
+		if (line.type === "ctx") {
+			currentNewLine = (line.newNum ?? currentNewLine) + 1;
+			continue;
+		}
+		if (line.type === "add") return line.newNum ?? currentNewLine;
+		if (currentNewLine > 0) return currentNewLine;
+		const next = diff.lines.slice(i + 1).find((entry) => entry.type !== "sep" && entry.newNum !== null);
+		if (next && next.newNum !== null) return next.newNum;
+		return line.oldNum ?? 0;
+	}
+	return 0;
+}
+
+interface LocalizedEditDiff {
+	diff: ParsedDiff;
+	line: number;
+}
+
+async function computeLocalizedEditDiffs(filePath: string, operations: Array<{ oldText: string; newText: string }>, cwd: string): Promise<LocalizedEditDiff[] | null> {
+	if (!filePath || operations.length === 0) return null;
+	try {
+		const rawContent = await readFileAsync(resolve(cwd, filePath), "utf8");
+		const normalizedContent = normalizeToLf(stripBomText(rawContent));
+		const normalizedOps = operations.map((edit) => ({ oldText: normalizeToLf(edit.oldText), newText: normalizeToLf(edit.newText) }));
+		const baseContent = normalizedOps.some((edit) => findEditMatch(normalizedContent, edit.oldText).usedFuzzyMatch)
+			? normalizeTextForFuzzyMatch(normalizedContent)
+			: normalizedContent;
+		const matches = normalizedOps.map((edit, editIndex) => {
+			const match = findEditMatch(baseContent, edit.oldText);
+			if (!match.found || countFuzzyOccurrences(baseContent, edit.oldText) !== 1) return null;
+			return { editIndex, matchIndex: match.index, matchLength: match.matchLength, newText: edit.newText };
+		});
+		if (matches.some((match) => match === null)) return null;
+		const ordered = [...(matches as Array<{ editIndex: number; matchIndex: number; matchLength: number; newText: string }>)].sort((a, b) => a.matchIndex - b.matchIndex);
+		for (let i = 1; i < ordered.length; i++) {
+			const prev = ordered[i - 1];
+			const current = ordered[i];
+			if (prev.matchIndex + prev.matchLength > current.matchIndex) return null;
+		}
+		const localized: Array<LocalizedEditDiff | null> = Array(operations.length).fill(null);
+		let lineDelta = 0;
+		for (const match of ordered) {
+			const oldChunk = baseContent.slice(match.matchIndex, match.matchIndex + match.matchLength);
+			const oldStartLine = lineNumberAtIndex(baseContent, match.matchIndex);
+			const newStartLine = oldStartLine + lineDelta;
+			const diff = offsetParsedDiff(parseDiff(oldChunk, match.newText), oldStartLine - 1, newStartLine - 1);
+			localized[match.editIndex] = { diff, line: getFirstChangedNewLine(diff) };
+			lineDelta += countLineBreaks(match.newText) - countLineBreaks(oldChunk);
+		}
+		return localized.every(Boolean) ? (localized as LocalizedEditDiff[]) : null;
+	} catch {
+		return null;
+	}
+}
+
+function renderEditPreviewBody(
+	ctx: any,
+	key: string,
+	theme: Theme,
+	language: BundledLanguage | undefined,
+	operations: Array<{ oldText: string; newText: string }>,
+	diffs: ParsedDiff[],
+	lines: number[],
+	summary: string,
+): void {
+	const dc = resolveDiffColors(theme);
+	if (operations.length === 1) {
+		const [diff] = diffs;
+		const line = lines[0] ?? getFirstChangedNewLine(diff);
+		renderSplit(diff, language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc)
+			.then((rendered) => {
+				if (ctx.state._pk !== key) return;
+				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}\n${rendered}`;
+				ctx.invalidate();
+			})
+			.catch(() => {
+				if (ctx.state._pk !== key) return;
+				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}`;
+				ctx.invalidate();
+			});
+		return;
+	}
+	const maxShown = ctx.expanded ? operations.length : Math.min(operations.length, 3);
+	const previewLines = ctx.expanded
+		? Math.max(6, Math.floor(MAX_RENDER_LINES / Math.max(1, maxShown)))
+		: Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
+	Promise.all(
+		diffs.slice(0, maxShown).map((diff, index) => {
+			const line = lines[index] ?? getFirstChangedNewLine(diff);
+			return renderSplit(diff, language, previewLines, dc)
+				.then((rendered) => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)}\n${rendered}`)
+				.catch(() => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)} ${summarizeDiff(diff.added, diff.removed)}`);
+		}),
+	)
+		.then((sections) => {
+			if (ctx.state._pk !== key) return;
+			const remainder = operations.length - maxShown;
+			const suffix = remainder > 0
+				? `\n${theme.fg("muted", `… ${remainder} more edit blocks${ctx.expanded ? "" : " • Ctrl+O to expand"}`)}`
+				: "";
+			ctx.state._ptBody = `${operations.length} edits ${summary}\n\n${sections.join("\n\n")}${suffix}`;
+			ctx.invalidate();
+		})
+		.catch(() => {
+			if (ctx.state._pk !== key) return;
+			ctx.state._ptBody = `${operations.length} edits ${summary}`;
+			ctx.invalidate();
+		});
+}
+
 function stripThinkingPresentationArtifacts(text: string): string {
 	let current = text.replace(/\x1b\[[0-9;]*m/g, "");
 	while (true) {
@@ -1701,6 +1897,61 @@ function getApplyPatchLine(diff: ParsedDiff, kind: ApplyPatchChangePreview["kind
 	return 0;
 }
 
+function parsePatchBodyLine(rawLine: string): { marker: "+" | "-" | " "; content: string } {
+	const marker = rawLine[0];
+	if (marker === "+" || marker === "-" || marker === " ") return { marker, content: rawLine.slice(1) };
+	return { marker: " ", content: rawLine };
+}
+
+function findLineSequence(haystack: string[], needle: string[], fromIndex = 0): number {
+	if (needle.length === 0) return Math.max(0, fromIndex);
+	outer: for (let i = Math.max(0, fromIndex); i <= haystack.length - needle.length; i++) {
+		for (let j = 0; j < needle.length; j++) {
+			if (haystack[i + j] !== needle[j]) continue outer;
+		}
+		return i;
+	}
+	return -1;
+}
+
+function inferApplyPatchHunkStarts(lines: string[], sourceContent: string): Array<{ oldStart: number | null; newStart: number | null }> {
+	const sourceLines = normalizeToLf(sourceContent).split("\n");
+	const hunks: string[][] = [];
+	let currentHunk: string[] | null = null;
+	for (const rawLine of lines) {
+		if (rawLine.startsWith("*** Move to: ")) continue;
+		if (rawLine.startsWith("@@")) {
+			if (currentHunk) hunks.push(currentHunk);
+			currentHunk = [];
+			continue;
+		}
+		if (!currentHunk) currentHunk = [];
+		currentHunk.push(rawLine);
+	}
+	if (currentHunk) hunks.push(currentHunk);
+
+	const starts: Array<{ oldStart: number | null; newStart: number | null }> = [];
+	let searchFrom = 0;
+	let lineDelta = 0;
+	for (const hunk of hunks) {
+		const oldLines = hunk
+			.map((rawLine) => parsePatchBodyLine(rawLine))
+			.filter((line) => line.marker !== "+")
+			.map((line) => line.content);
+		let matchIndex = findLineSequence(sourceLines, oldLines, searchFrom);
+		if (matchIndex === -1) matchIndex = findLineSequence(sourceLines, oldLines, 0);
+		const oldStart = matchIndex === -1 ? null : matchIndex + 1;
+		const newStart = oldStart === null ? null : oldStart + lineDelta;
+		starts.push({ oldStart, newStart });
+		if (matchIndex === -1) continue;
+		searchFrom = matchIndex + oldLines.length;
+		const added = hunk.filter((rawLine) => parsePatchBodyLine(rawLine).marker === "+").length;
+		const removed = hunk.filter((rawLine) => parsePatchBodyLine(rawLine).marker === "-").length;
+		lineDelta += added - removed;
+	}
+	return starts;
+}
+
 function stripPatchLinePrefix(line: string, prefix: "+" | "-"): string {
 	return line.startsWith(prefix) ? line.slice(1) : line;
 }
@@ -1712,7 +1963,7 @@ function trimDiffSeparators(lines: DiffLine[]): DiffLine[] {
 	return trimmed;
 }
 
-function parseApplyPatchUpdateDiff(lines: string[]): ParsedDiff {
+function parseApplyPatchUpdateDiff(lines: string[], sourceContent?: string): ParsedDiff {
 	const diffLines: DiffLine[] = [];
 	let added = 0;
 	let removed = 0;
@@ -1720,6 +1971,8 @@ function parseApplyPatchUpdateDiff(lines: string[]): ParsedDiff {
 	let oldLine: number | null = null;
 	let newLine: number | null = null;
 	let inHunk = false;
+	const inferredStarts = sourceContent ? inferApplyPatchHunkStarts(lines, sourceContent) : [];
+	let hunkIndex = 0;
 
 	for (const rawLine of lines) {
 		if (rawLine.startsWith("*** Move to: ")) continue;
@@ -1728,21 +1981,23 @@ function parseApplyPatchUpdateDiff(lines: string[]): ParsedDiff {
 				diffLines.push({ type: "sep", oldNum: null, newNum: null, content: "" });
 			}
 			const match = rawLine.match(/^@@\s*-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s*@@/);
-			oldLine = match ? Number.parseInt(match[1], 10) : null;
-			newLine = match ? Number.parseInt(match[2], 10) : null;
+			const inferred = inferredStarts[hunkIndex] ?? { oldStart: null, newStart: null };
+			oldLine = match ? Number.parseInt(match[1], 10) : inferred.oldStart;
+			newLine = match ? Number.parseInt(match[2], 10) : inferred.newStart;
+			hunkIndex++;
 			inHunk = true;
 			continue;
 		}
 		if (rawLine === "\\ No newline at end of file") continue;
-		if (!inHunk) inHunk = true;
-
-		let marker = rawLine[0] ?? " ";
-		let content = rawLine;
-		if (marker === "+" || marker === "-" || marker === " ") {
-			content = rawLine.slice(1);
-		} else {
-			marker = " ";
+		if (!inHunk) {
+			const inferred = inferredStarts[hunkIndex] ?? { oldStart: null, newStart: null };
+			oldLine = inferred.oldStart;
+			newLine = inferred.newStart;
+			hunkIndex++;
+			inHunk = true;
 		}
+
+		const { marker, content } = parsePatchBodyLine(rawLine);
 
 		chars += content.length;
 		if (marker === "+") {
@@ -1770,7 +2025,7 @@ function parseApplyPatchUpdateDiff(lines: string[]): ParsedDiff {
 	};
 }
 
-function parseApplyPatchPreview(patchText: string, sp: (path: string) => string): ApplyPatchPreview {
+function parseApplyPatchPreview(patchText: string, sp: (path: string) => string, cwd = process.cwd()): ApplyPatchPreview {
 	const normalized = patchText.replace(/\r\n/g, "\n");
 	const lines = normalized.split("\n");
 	const changes: ApplyPatchChangePreview[] = [];
@@ -1809,11 +2064,19 @@ function parseApplyPatchPreview(patchText: string, sp: (path: string) => string)
 		}
 
 		const displayPath = moveTo ? `${sp(path)} ${BORDER_COLOR}→${TRANSPARENT_RESET} ${sp(moveTo)}` : sp(path);
+		let sourceContent: string | undefined;
+		if (kind === "update") {
+			try {
+				sourceContent = readFileSync(resolve(cwd, path), "utf8");
+			} catch {
+				sourceContent = undefined;
+			}
+		}
 		const diff = kind === "add"
 			? parseDiff("", body.map((entry) => stripPatchLinePrefix(entry, "+")).join("\n"))
 			: kind === "delete"
 				? parseDiff(body.map((entry) => stripPatchLinePrefix(entry, "-")).join("\n"), "")
-				: parseApplyPatchUpdateDiff(body);
+				: parseApplyPatchUpdateDiff(body, sourceContent);
 		changes.push({
 			kind,
 			path,
@@ -1848,14 +2111,18 @@ function describeApplyPatchChange(change: ApplyPatchChangePreview): string {
 	return `Update ${change.displayPath}`;
 }
 
+function formatLineMeta(line: number, theme: Theme): string {
+	return line > 0 ? ` ${theme.fg("muted", `at line ${line}`)}` : "";
+}
+
 function formatApplyPatchLine(change: ApplyPatchChangePreview, theme: Theme): string {
-	return change.line > 0 ? ` ${theme.fg("muted", `at line ${change.line}`)}` : "";
+	return formatLineMeta(change.line, theme);
 }
 
 function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: string) => string): Text {
 	syncToolCallStatus(ctx);
 	const patchText = getStringArg(args, "patchText", "patch_text");
-	const preview = parseApplyPatchPreview(patchText, sp);
+	const preview = parseApplyPatchPreview(patchText, sp, ctx.cwd ?? process.cwd());
 	ctx.state._openAiPatchFiles = preview.changes.map((change) => change.displayPath);
 	ctx.state._applyPatchPreview = preview;
 	const hdr = toolHeader("Apply Patch", summarizeOpenAiToolCall("apply_patch", args, theme, sp), theme, toolStatusDot(ctx, theme));
@@ -2558,30 +2825,43 @@ export default function (pi: ExtensionAPI) {
 		async execute(toolCallId, params, signal, onUpdate, _ctx) {
 			const fp = params.path ?? (params as any).file_path ?? "";
 			const operations = getEditOperations(params);
+			const localizedDiffs = await computeLocalizedEditDiffs(fp, operations, cwd);
 			const result = await editTool.execute(toolCallId, params, signal, onUpdate);
 			if (operations.length === 0) return result;
 			const { diffs, summary, totalLines, totalHunks } = summarizeEditOperations(operations);
+			const baseDetails = (((result as any).details ?? {}) as Record<string, unknown>);
 			if (operations.length === 1) {
-				let editLine = 0;
-				try {
-					if (fp && existsSync(fp)) {
-						const f = readFileSync(fp, "utf-8");
-						const idx = f.indexOf(operations[0].newText);
-						if (idx >= 0) editLine = f.slice(0, idx).split("\n").length;
-					}
-				} catch {
-					editLine = 0;
-				}
-				(result as any).details = { _type: "editInfo", summary, editLine, hunks: totalHunks, added: diffs[0]?.added ?? 0, removed: diffs[0]?.removed ?? 0 };
+				const localized = localizedDiffs?.[0];
+				const editLine = localized?.line ?? (typeof baseDetails.firstChangedLine === "number" ? baseDetails.firstChangedLine : 0);
+				const diff = localized?.diff ?? diffs[0];
+				(result as any).details = {
+					...baseDetails,
+					_type: "editInfo",
+					summary,
+					editLine,
+					hunks: countDiffHunks(diff),
+					added: diff?.added ?? 0,
+					removed: diff?.removed ?? 0,
+				};
 				return result;
 			}
-			(result as any).details = { _type: "multiEditInfo", summary, editCount: operations.length, diffLineCount: totalLines, hunks: totalHunks, totalAdded: diffs.reduce((sum, diff) => sum + diff.added, 0), totalRemoved: diffs.reduce((sum, diff) => sum + diff.removed, 0) };
+			(result as any).details = {
+				...baseDetails,
+				_type: "multiEditInfo",
+				summary,
+				editCount: operations.length,
+				diffLineCount: totalLines,
+				hunks: totalHunks,
+				totalAdded: diffs.reduce((sum, diff) => sum + diff.added, 0),
+				totalRemoved: diffs.reduce((sum, diff) => sum + diff.removed, 0),
+			};
 			return result;
 		},
 		renderCall(args, theme, ctx) {
 			const fp = args?.path ?? (args as any)?.file_path ?? "";
 			const operations = getEditOperations(args);
 			const summary = operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp);
+			const { diffs: fallbackDiffs, summary: editSummary } = summarizeEditOperations(operations);
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader("Edit", summary, theme, toolStatusDot(ctx, theme));
 			if (!(ctx.argsComplete && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
@@ -2590,40 +2870,17 @@ export default function (pi: ExtensionAPI) {
 				ctx.state._pk = key;
 				ctx.state._ptBody = theme.fg("muted", "(rendering…)");
 				const lg = lang(fp);
-				const dc = resolveDiffColors(theme);
-				if (operations.length === 1) {
-					const diff = parseDiff(operations[0].oldText, operations[0].newText);
-					renderSplit(diff, lg, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc)
-						.then((rendered) => {
-							if (ctx.state._pk !== key) return;
-							ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}\n${rendered}`;
-							ctx.invalidate();
-						})
-						.catch(() => {});
-				} else {
-					const { diffs, summary: editSummary } = summarizeEditOperations(operations);
-					const maxShown = ctx.expanded ? operations.length : Math.min(operations.length, 3);
-					const previewLines = ctx.expanded
-						? Math.max(6, Math.floor(MAX_RENDER_LINES / Math.max(1, maxShown)))
-						: Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
-					Promise.all(
-						diffs.slice(0, maxShown).map((diff, index) =>
-							renderSplit(diff, lg, previewLines, dc)
-								.then((rendered) => `Edit ${index + 1}/${operations.length}\n${rendered}`)
-								.catch(() => `Edit ${index + 1}/${operations.length} ${summarizeDiff(diff.added, diff.removed)}`),
-						),
-					)
-						.then((sections) => {
-							if (ctx.state._pk !== key) return;
-							const remainder = operations.length - maxShown;
-							const suffix = remainder > 0
-								? `\n${theme.fg("muted", `… ${remainder} more edit blocks${ctx.expanded ? "" : " • Ctrl+O to expand"}`)}`
-								: "";
-							ctx.state._ptBody = `${operations.length} edits ${editSummary}\n\n${sections.join("\n\n")}${suffix}`;
-							ctx.invalidate();
-						})
-						.catch(() => {});
-				}
+				void computeLocalizedEditDiffs(fp, operations, cwd)
+					.then((localizedDiffs) => {
+						if (ctx.state._pk !== key) return;
+						const diffs = localizedDiffs?.map((entry) => entry.diff) ?? fallbackDiffs;
+						const lines = localizedDiffs?.map((entry) => entry.line) ?? diffs.map((diff) => getFirstChangedNewLine(diff));
+						renderEditPreviewBody(ctx, key, theme, lg, operations, diffs, lines, editSummary);
+					})
+					.catch(() => {
+						if (ctx.state._pk !== key) return;
+						renderEditPreviewBody(ctx, key, theme, lg, operations, fallbackDiffs, fallbackDiffs.map((diff) => getFirstChangedNewLine(diff)), editSummary);
+					});
 			}
 			const body = ctx.state._ptBody as string | undefined;
 			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
@@ -2645,7 +2902,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			if ((result as any).details?._type === "editInfo") {
 				const { editLine, hunks, added, removed } = (result as any).details;
-				const loc = editLine > 0 ? ` ${theme.fg("muted", `at line ${editLine}`)}` : "";
+				const loc = formatLineMeta(editLine ?? 0, theme);
 				const summary = diffSummaryWithMeta(added ?? 0, removed ?? 0, hunks ?? 0, "");
 				return makeText(ctx.lastComponent, withBranch(`${summary}${loc}`, theme));
 			}
