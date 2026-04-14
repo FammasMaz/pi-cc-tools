@@ -1,6 +1,6 @@
 {
   "name": "pi-claude-style-tools",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Claude Code-style tool rows for pi (bash, read, grep, find, ls, edit, write) with Shiki-powered diff rendering",
   "keywords": [
     "pi-package",
@@ -15,7 +15,7 @@
   "author": "FammasMaz",
   "repository": {
     "type": "git",
-    "url": "https://github.com/FammasMaz/pi-cc-tools.git"
+    "url": "git+https://github.com/FammasMaz/pi-cc-tools.git"
   },
   "homepage": "https://github.com/FammasMaz/pi-cc-tools#readme",
   "bugs": {
