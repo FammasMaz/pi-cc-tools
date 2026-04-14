@@ -22,10 +22,10 @@ const origUpdateDisplay = (Loader.prototype as any).updateDisplay;
 // Override start() to use 120ms interval (OpenBrawd's speed) instead of 80ms
 const origStart = Loader.prototype.start;
 Loader.prototype.start = function patchedStart() {
-	this.updateDisplay();
+	(this as any).updateDisplay();
 	(this as any).intervalId = setInterval(() => {
 		(this as any).currentFrame = ((this as any).currentFrame + 1) % OB_FRAMES.length;
-		this.updateDisplay();
+		(this as any).updateDisplay();
 	}, 120);
 };
 

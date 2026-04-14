@@ -11,6 +11,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import {
 	AssistantMessageComponent,
+	ToolExecutionComponent,
 	createBashTool,
 	createEditTool,
 	createFindTool,
@@ -35,7 +36,7 @@ const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
 let toolBackgroundMode: "default" | "transparent" | "outlines" = "outlines";
 
 interface SettingsFile {
-	toolBackground?: "default" | "transparent" | "outlines";
+	toolBackground?: "default" | "transparent" | "outlines" | "border";
 	readOutputMode?: "hidden" | "summary" | "preview";
 	searchOutputMode?: "hidden" | "count" | "preview";
 	mcpOutputMode?: "hidden" | "summary" | "preview";
@@ -171,6 +172,7 @@ function summarizeText(text: string, max = 60): string {
 }
 
 const ASSISTANT_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-message");
+const TOOL_EXECUTION_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-execution");
 
 class DottedParagraph {
 	private md: InstanceType<typeof Markdown>;
@@ -290,6 +292,60 @@ function patchAssistantMessages(): void {
 	proto[ASSISTANT_PATCH_FLAG] = true;
 }
 
+function patchToolExecutionRenderers(): void {
+	const proto = ToolExecutionComponent.prototype as any;
+	if (proto[TOOL_EXECUTION_PATCH_FLAG]) return;
+
+	const originalGetCallRenderer = proto.getCallRenderer;
+	const originalGetResultRenderer = proto.getResultRenderer;
+
+	proto.getCallRenderer = function patchedGetCallRenderer() {
+		const toolName = typeof this?.toolName === "string" ? this.toolName : "";
+		if (toolName === "apply_patch") {
+			return (args: any, theme: Theme, ctx: any) =>
+				renderApplyPatchCall(args, theme, ctx, (path: string) => shortPath(ctx.cwd ?? process.cwd(), path));
+		}
+		if (OPENAI_STYLE_TOOL_NAMES.has(toolName) && !CORE_TOOL_OVERRIDES.has(toolName)) {
+			return (args: any, theme: Theme, ctx: any) => {
+				syncToolCallStatus(ctx);
+				ctx.state._openAiPatchFiles = [];
+				return makeText(
+					ctx.lastComponent,
+					toolHeader(
+						humanizeToolName(toolName),
+						summarizeOpenAiToolCall(toolName, args, theme, (path: string) => shortPath(ctx.cwd ?? process.cwd(), path)),
+						theme,
+						toolStatusDot(ctx, theme),
+					),
+				);
+			};
+		}
+		return originalGetCallRenderer.call(this);
+	};
+
+	proto.getResultRenderer = function patchedGetResultRenderer() {
+		const toolName = typeof this?.toolName === "string" ? this.toolName : "";
+		if (toolName === "apply_patch") {
+			return (result: any, options: any, theme: Theme, ctx: any) =>
+				renderApplyPatchResult({ content: result.content, details: result.details }, options.isPartial, theme, ctx);
+		}
+		if (OPENAI_STYLE_TOOL_NAMES.has(toolName) && !CORE_TOOL_OVERRIDES.has(toolName)) {
+			return (result: any, options: any, theme: Theme, ctx: any) =>
+				renderOpenAiToolResult(
+					toolName,
+					{ content: result.content, details: result.details },
+					options.expanded,
+					options.isPartial,
+					theme,
+					ctx,
+				);
+		}
+		return originalGetResultRenderer.call(this);
+	};
+
+	proto[TOOL_EXECUTION_PATCH_FLAG] = true;
+}
+
 function shortPath(cwd: string, filePath: string): string {
 	if (!filePath) return "";
 	const rel = relative(cwd, filePath);
@@ -314,6 +370,14 @@ function toolHeader(tool: string, summary: string, theme: Theme, prefix = ""): s
 
 function setToolStatus(ctx: any, status: "pending" | "success" | "error"): void {
 	ctx.state._toolStatus = status;
+}
+
+function syncToolCallStatus(ctx: any): void {
+	if (!ctx?.executionStarted || ctx?.isPartial) {
+		setToolStatus(ctx, "pending");
+		return;
+	}
+	setToolStatus(ctx, ctx.isError ? "error" : "success");
 }
 
 function toolStatusDot(ctx: any, theme: Theme): string {
@@ -1505,11 +1569,595 @@ function getMode<T extends string>(value: unknown, allowed: readonly T[], fallba
 	return typeof value === "string" && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
 }
 
+const CORE_TOOL_OVERRIDES = new Set(["read", "bash", "grep", "find", "ls", "write", "edit"]);
+
+const OPENAI_STYLE_TOOL_NAMES = new Set([
+	"apply_patch",
+	"webfetch",
+	"question",
+	"questionnaire",
+	"context_tag",
+	"context_log",
+	"context_checkout",
+	"annotate",
+	"web_search",
+	"code_search",
+	"fetch_content",
+	"get_search_content",
+	"alpha_search",
+	"alpha_get_paper",
+	"alpha_ask_paper",
+	"alpha_annotate_paper",
+	"alpha_list_annotations",
+	"alpha_read_code",
+	"Skill",
+	"EnterPlanMode",
+	"ExitPlanMode",
+	"Agent",
+	"get_subagent_result",
+	"steer_subagent",
+	"TaskCreate",
+	"TaskList",
+	"TaskGet",
+	"TaskUpdate",
+	"TaskOutput",
+	"TaskStop",
+	"TaskExecute",
+]);
+
 function isMcpToolCandidate(tool: unknown): boolean {
 	const rec = tool as Record<string, unknown> | undefined;
 	const name = typeof rec?.name === "string" ? rec.name : "";
 	const description = typeof rec?.description === "string" ? rec.description : "";
 	return name === "mcp" || /\bmcp\b/i.test(description);
+}
+
+function isOpenAiToolCandidate(tool: unknown): boolean {
+	const rec = tool as Record<string, unknown> | undefined;
+	const name = typeof rec?.name === "string" ? rec.name : "";
+	if (!name || CORE_TOOL_OVERRIDES.has(name) || isMcpToolCandidate(tool)) return false;
+	return OPENAI_STYLE_TOOL_NAMES.has(name);
+}
+
+function humanizeToolName(name: string): string {
+	return name
+		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+		.replace(/[_-]+/g, " ")
+		.replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function getTextContent(result: any): string {
+	if (!Array.isArray(result?.content)) return "";
+	return result.content
+		.filter((block: any) => block?.type === "text" && typeof block.text === "string")
+		.map((block: any) => block.text)
+		.join("\n");
+}
+
+function getStringArg(args: any, ...keys: string[]): string {
+	for (const key of keys) {
+		const value = args?.[key];
+		if (typeof value === "string" && value.trim()) return value.trim();
+	}
+	return "";
+}
+
+function getStringArrayArg(args: any, ...keys: string[]): string[] {
+	for (const key of keys) {
+		const value = args?.[key];
+		if (!Array.isArray(value)) continue;
+		const items = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+		if (items.length > 0) return items;
+	}
+	return [];
+}
+
+function extractApplyPatchFiles(patchText: string): string[] {
+	if (!patchText) return [];
+	const files = new Set<string>();
+	for (const match of patchText.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
+		const filePath = match[1]?.trim();
+		if (filePath) files.add(filePath);
+	}
+	return [...files];
+}
+
+interface ApplyPatchChangePreview {
+	kind: "add" | "update" | "delete";
+	path: string;
+	displayPath: string;
+	moveTo?: string;
+	diff: ParsedDiff;
+	language: BundledLanguage | undefined;
+	hunks: number;
+	summary: string;
+	line: number;
+}
+
+interface ApplyPatchPreview {
+	changes: ApplyPatchChangePreview[];
+	totalAdded: number;
+	totalRemoved: number;
+	totalHunks: number;
+	totalLines: number;
+	summary: string;
+}
+
+function countDiffHunks(diff: ParsedDiff): number {
+	return diff.lines.length === 0 ? 0 : diff.lines.filter((line) => line.type === "sep").length + 1;
+}
+
+function getApplyPatchLine(diff: ParsedDiff, kind: ApplyPatchChangePreview["kind"]): number {
+	if (kind === "add") {
+		return diff.lines.find((line) => line.type === "add" && line.newNum !== null)?.newNum ?? 1;
+	}
+	if (kind === "delete") {
+		return diff.lines.find((line) => line.type === "del" && line.oldNum !== null)?.oldNum ?? 1;
+	}
+	for (const line of diff.lines) {
+		if (line.type === "add" && line.newNum !== null) return line.newNum;
+		if (line.type === "del" && line.oldNum !== null) return line.oldNum;
+	}
+	return 0;
+}
+
+function stripPatchLinePrefix(line: string, prefix: "+" | "-"): string {
+	return line.startsWith(prefix) ? line.slice(1) : line;
+}
+
+function trimDiffSeparators(lines: DiffLine[]): DiffLine[] {
+	const trimmed = [...lines];
+	while (trimmed[0]?.type === "sep") trimmed.shift();
+	while (trimmed[trimmed.length - 1]?.type === "sep") trimmed.pop();
+	return trimmed;
+}
+
+function parseApplyPatchUpdateDiff(lines: string[]): ParsedDiff {
+	const diffLines: DiffLine[] = [];
+	let added = 0;
+	let removed = 0;
+	let chars = 0;
+	let oldLine: number | null = null;
+	let newLine: number | null = null;
+	let inHunk = false;
+
+	for (const rawLine of lines) {
+		if (rawLine.startsWith("*** Move to: ")) continue;
+		if (rawLine.startsWith("@@")) {
+			if (diffLines.length > 0 && diffLines[diffLines.length - 1]?.type !== "sep") {
+				diffLines.push({ type: "sep", oldNum: null, newNum: null, content: "" });
+			}
+			const match = rawLine.match(/^@@\s*-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s*@@/);
+			oldLine = match ? Number.parseInt(match[1], 10) : null;
+			newLine = match ? Number.parseInt(match[2], 10) : null;
+			inHunk = true;
+			continue;
+		}
+		if (rawLine === "\\ No newline at end of file") continue;
+		if (!inHunk) inHunk = true;
+
+		let marker = rawLine[0] ?? " ";
+		let content = rawLine;
+		if (marker === "+" || marker === "-" || marker === " ") {
+			content = rawLine.slice(1);
+		} else {
+			marker = " ";
+		}
+
+		chars += content.length;
+		if (marker === "+") {
+			diffLines.push({ type: "add", oldNum: null, newNum: newLine, content });
+			added++;
+			if (newLine !== null) newLine++;
+			continue;
+		}
+		if (marker === "-") {
+			diffLines.push({ type: "del", oldNum: oldLine, newNum: null, content });
+			removed++;
+			if (oldLine !== null) oldLine++;
+			continue;
+		}
+		diffLines.push({ type: "ctx", oldNum: oldLine, newNum: newLine, content });
+		if (oldLine !== null) oldLine++;
+		if (newLine !== null) newLine++;
+	}
+
+	return {
+		lines: trimDiffSeparators(diffLines),
+		added,
+		removed,
+		chars,
+	};
+}
+
+function parseApplyPatchPreview(patchText: string, sp: (path: string) => string): ApplyPatchPreview {
+	const normalized = patchText.replace(/\r\n/g, "\n");
+	const lines = normalized.split("\n");
+	const changes: ApplyPatchChangePreview[] = [];
+	let index = 0;
+
+	const fileHeader = /^\*\*\* (Add|Update|Delete) File: (.+)$/;
+	const endHeader = /^\*\*\* End Patch$/;
+
+	while (index < lines.length) {
+		const line = lines[index];
+		if (!line || line === "*** Begin Patch") {
+			index++;
+			continue;
+		}
+		if (endHeader.test(line)) break;
+		const header = line.match(fileHeader);
+		if (!header) {
+			index++;
+			continue;
+		}
+
+		const kind = header[1].toLowerCase() as ApplyPatchChangePreview["kind"];
+		const path = header[2].trim();
+		index++;
+
+		let moveTo: string | undefined;
+		const body: string[] = [];
+		while (index < lines.length && !fileHeader.test(lines[index]) && !endHeader.test(lines[index])) {
+			if (lines[index].startsWith("*** Move to: ")) {
+				moveTo = lines[index].slice("*** Move to: ".length).trim();
+				index++;
+				continue;
+			}
+			body.push(lines[index]);
+			index++;
+		}
+
+		const displayPath = moveTo ? `${sp(path)} ${BORDER_COLOR}→${TRANSPARENT_RESET} ${sp(moveTo)}` : sp(path);
+		const diff = kind === "add"
+			? parseDiff("", body.map((entry) => stripPatchLinePrefix(entry, "+")).join("\n"))
+			: kind === "delete"
+				? parseDiff(body.map((entry) => stripPatchLinePrefix(entry, "-")).join("\n"), "")
+				: parseApplyPatchUpdateDiff(body);
+		changes.push({
+			kind,
+			path,
+			displayPath,
+			moveTo,
+			diff,
+			language: lang(moveTo || path),
+			hunks: countDiffHunks(diff),
+			summary: summarizeDiff(diff.added, diff.removed),
+			line: getApplyPatchLine(diff, kind),
+		});
+	}
+
+	const totalAdded = changes.reduce((sum, change) => sum + change.diff.added, 0);
+	const totalRemoved = changes.reduce((sum, change) => sum + change.diff.removed, 0);
+	const totalHunks = changes.reduce((sum, change) => sum + change.hunks, 0);
+	const totalLines = changes.reduce((sum, change) => sum + change.diff.lines.length, 0);
+	return {
+		changes,
+		totalAdded,
+		totalRemoved,
+		totalHunks,
+		totalLines,
+		summary: summarizeDiff(totalAdded, totalRemoved),
+	};
+}
+
+function describeApplyPatchChange(change: ApplyPatchChangePreview): string {
+	if (change.moveTo) return `Rename ${change.displayPath}`;
+	if (change.kind === "add") return `Create ${change.displayPath}`;
+	if (change.kind === "delete") return `Delete ${change.displayPath}`;
+	return `Update ${change.displayPath}`;
+}
+
+function formatApplyPatchLine(change: ApplyPatchChangePreview, theme: Theme): string {
+	return change.line > 0 ? ` ${theme.fg("muted", `at line ${change.line}`)}` : "";
+}
+
+function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: string) => string): Text {
+	syncToolCallStatus(ctx);
+	const patchText = getStringArg(args, "patchText", "patch_text");
+	const preview = parseApplyPatchPreview(patchText, sp);
+	ctx.state._openAiPatchFiles = preview.changes.map((change) => change.displayPath);
+	ctx.state._applyPatchPreview = preview;
+	const hdr = toolHeader("Apply Patch", summarizeOpenAiToolCall("apply_patch", args, theme, sp), theme, toolStatusDot(ctx, theme));
+
+	if (!(ctx.argsComplete && preview.changes.length > 0)) return makeText(ctx.lastComponent, hdr);
+
+	const key = JSON.stringify({ patchText, expanded: ctx.expanded });
+	if (ctx.state._applyPatchPreviewKey !== key) {
+		ctx.state._applyPatchPreviewKey = key;
+		ctx.state._applyPatchPreviewBody = theme.fg("muted", "(rendering…)");
+		const dc = resolveDiffColors(theme);
+		if (preview.changes.length === 1) {
+			const [change] = preview.changes;
+			renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc)
+				.then((rendered) => {
+					if (ctx.state._applyPatchPreviewKey !== key) return;
+					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`;
+					ctx.invalidate();
+				})
+				.catch(() => {
+					if (ctx.state._applyPatchPreviewKey !== key) return;
+					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`;
+					ctx.invalidate();
+				});
+		} else {
+			const maxShown = ctx.expanded ? preview.changes.length : Math.min(preview.changes.length, 3);
+			const previewLines = ctx.expanded
+				? Math.max(6, Math.floor(MAX_RENDER_LINES / Math.max(1, maxShown)))
+				: Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
+			Promise.all(
+				preview.changes.slice(0, maxShown).map((change, index) =>
+					renderSplit(change.diff, change.language, previewLines, dc)
+						.then((rendered) => `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`)
+						.catch(() => `${index + 1}. ${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`),
+				),
+			)
+				.then((sections) => {
+					if (ctx.state._applyPatchPreviewKey !== key) return;
+					const remainder = preview.changes.length - maxShown;
+					const suffix = remainder > 0
+						? `\n${theme.fg("muted", `… ${remainder} more file patches${ctx.expanded ? "" : " • Ctrl+O to expand"}`)}`
+						: "";
+					const summary = `${preview.changes.length} files ${preview.summary}`;
+					ctx.state._applyPatchPreviewBody = `${summary}\n\n${sections.join("\n\n")}${suffix}`;
+					ctx.invalidate();
+				})
+				.catch(() => {
+					if (ctx.state._applyPatchPreviewKey !== key) return;
+					ctx.state._applyPatchPreviewBody = `${preview.changes.length} files ${preview.summary}`;
+					ctx.invalidate();
+				});
+		}
+	}
+
+	const body = ctx.state._applyPatchPreviewBody as string | undefined;
+	return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
+}
+
+function renderApplyPatchResult(result: any, isPartial: boolean, theme: Theme, ctx: any): Text {
+	if (isPartial) {
+		setupBlinkTimer(ctx);
+		return makeText(ctx.lastComponent, theme.fg("dim", "Applying Patch..."));
+	}
+	clearBlinkTimer(ctx);
+	setToolStatus(ctx, ctx.isError ? "error" : "success");
+
+	if (ctx.isError) {
+		const raw = getTextContent(result).trim();
+		const firstLine = raw ? raw.split("\n")[0] : "Apply patch failed";
+		return makeText(ctx.lastComponent, withBranch(theme.fg("error", firstLine), theme));
+	}
+
+	const preview = ctx.state?._applyPatchPreview as ApplyPatchPreview | undefined;
+	if (!preview || preview.changes.length === 0) {
+		return makeText(ctx.lastComponent, withBranch(theme.fg("success", "Applied"), theme));
+	}
+
+	if (preview.changes.length === 1) {
+		const [change] = preview.changes;
+		const summary = diffSummaryWithMeta(change.diff.added, change.diff.removed, change.hunks, change.kind === "add" ? "new file" : change.kind === "delete" ? "delete" : "");
+		return makeText(ctx.lastComponent, withBranch(`${theme.fg("success", "Applied")} ${theme.fg("muted", change.displayPath)} ${summary}${formatApplyPatchLine(change, theme)}`, theme));
+	}
+
+	const summary = diffSummaryWithMeta(preview.totalAdded, preview.totalRemoved, preview.totalHunks, "");
+	return makeText(ctx.lastComponent, withBranch(`${theme.fg("success", "Applied")} ${preview.changes.length} files ${summary}${preview.totalLines ? ` ${theme.fg("muted", `(${preview.totalLines} diff lines)`)}` : ""}`, theme));
+}
+
+function summarizeOpenAiToolCall(name: string, args: any, theme: Theme, sp: (path: string) => string): string {
+	switch (name) {
+		case "apply_patch": {
+			const patchText = getStringArg(args, "patchText", "patch_text");
+			const files = extractApplyPatchFiles(patchText);
+			if (files.length === 0) return theme.fg("muted", "patch");
+			if (files.length === 1) return sp(files[0]);
+			return `${sp(files[0])} ${theme.fg("muted", `(+${files.length - 1} files)`)}`;
+		}
+		case "webfetch":
+			return getStringArg(args, "url") || theme.fg("muted", "fetch page");
+		case "fetch_content": {
+			const url = getStringArg(args, "url");
+			if (url) return url;
+			const urls = getStringArrayArg(args, "urls");
+			if (urls.length === 0) return theme.fg("muted", "fetch content");
+			if (urls.length === 1) return urls[0];
+			return `${urls[0]} ${theme.fg("muted", `(+${urls.length - 1} urls)`)}`;
+		}
+		case "get_search_content":
+			return getStringArg(args, "responseId", "response_id") || theme.fg("muted", "load cached content");
+		case "web_search": {
+			const query = getStringArg(args, "query");
+			if (query) return summarizeText(query, 72);
+			const queries = getStringArrayArg(args, "queries");
+			if (queries.length === 0) return theme.fg("muted", "search web");
+			if (queries.length === 1) return summarizeText(queries[0], 72);
+			return `${summarizeText(queries[0], 48)} ${theme.fg("muted", `(+${queries.length - 1} queries)`)}`;
+		}
+		case "code_search":
+			return summarizeText(getStringArg(args, "query") || "search code", 72);
+		case "question":
+			return summarizeText(getStringArg(args, "question") || "ask user", 72);
+		case "questionnaire": {
+			const questions = Array.isArray(args?.questions) ? args.questions.length : 0;
+			return questions > 0 ? `${questions} questions` : theme.fg("muted", "questionnaire");
+		}
+		case "context_tag":
+			return getStringArg(args, "name") || theme.fg("muted", "save point");
+		case "context_log":
+			return theme.fg("muted", "history");
+		case "context_checkout":
+			return getStringArg(args, "target") || theme.fg("muted", "checkout context");
+		case "annotate":
+			return getStringArg(args, "url") || theme.fg("muted", "current tab");
+		case "alpha_search":
+			return summarizeText(getStringArg(args, "query") || "search papers", 72);
+		case "alpha_get_paper":
+		case "alpha_ask_paper":
+		case "alpha_annotate_paper":
+			return getStringArg(args, "paper") || theme.fg("muted", "paper");
+		case "alpha_read_code":
+			return getStringArg(args, "githubUrl", "github_url") || theme.fg("muted", "repository");
+		case "Skill":
+			return getStringArg(args, "name") || theme.fg("muted", "run skill");
+		case "EnterPlanMode":
+			return theme.fg("muted", "enable read-only planning");
+		case "ExitPlanMode":
+			return theme.fg("muted", "present plan");
+		case "Agent":
+			return summarizeText(getStringArg(args, "description", "prompt") || "launch agent", 72);
+		case "get_subagent_result":
+			return getStringArg(args, "agent_id") || theme.fg("muted", "agent result");
+		case "steer_subagent":
+			return getStringArg(args, "agent_id") || theme.fg("muted", "steer agent");
+		case "TaskCreate":
+			return summarizeText(getStringArg(args, "subject") || "create task", 72);
+		case "TaskList":
+			return theme.fg("muted", "task list");
+		case "TaskGet":
+		case "TaskUpdate":
+			return getStringArg(args, "taskId", "task_id") || theme.fg("muted", "task");
+		case "TaskOutput":
+		case "TaskStop":
+			return getStringArg(args, "task_id", "taskId") || theme.fg("muted", "background task");
+		case "TaskExecute": {
+			const taskIds = getStringArrayArg(args, "task_ids", "taskIds");
+			if (taskIds.length === 0) return theme.fg("muted", "start tasks");
+			return taskIds.length === 1 ? taskIds[0] : `${taskIds[0]} ${theme.fg("muted", `(+${taskIds.length - 1} tasks)`)}`;
+		}
+		default:
+			return summarizeText(
+				getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt") || humanizeToolName(name),
+				72,
+			);
+	}
+}
+
+interface ParsedTaskListLine {
+	id: string;
+	status: string;
+	subject: string;
+}
+
+function parseTaskListLine(line: string): ParsedTaskListLine | null {
+	const match = line.match(/^#(\d+) \[([^\]]+)\] (.+)$/);
+	if (!match) return null;
+	return {
+		id: match[1],
+		status: match[2],
+		subject: match[3],
+	};
+}
+
+function formatTaskStatus(status: string, theme: Theme): string {
+	if (status === "completed") return theme.fg("success", status);
+	if (status === "in_progress") return theme.fg("warning", status);
+	return theme.fg("muted", status);
+}
+
+function formatOpenAiSuccessLine(name: string, line: string, theme: Theme): string {
+	const trimmed = line.trim();
+	if (!trimmed) return theme.fg("success", "Done");
+
+	if (name === "TaskCreate") {
+		const match = trimmed.match(/^Task #(\d+) created successfully: (.+)$/);
+		if (match) {
+			return `${theme.fg("success", "Created task")} ${theme.fg("accent", `#${match[1]}`)} ${theme.fg("muted", match[2])}`;
+		}
+	}
+
+	if (name === "TaskUpdate") {
+		const match = trimmed.match(/^Updated task #(\d+) (.+)$/);
+		if (match) {
+			return `${theme.fg("success", "Updated task")} ${theme.fg("accent", `#${match[1]}`)} ${theme.fg("muted", match[2])}`;
+		}
+	}
+
+	if (name === "TaskExecute") {
+		return `${theme.fg("success", "Started")} ${theme.fg("muted", trimmed)}`;
+	}
+
+	if (name === "context_tag") {
+		const match = trimmed.match(/^Created tag '([^']+)' at (.+)$/);
+		if (match) {
+			return `${theme.fg("success", "Created tag")} ${theme.fg("accent", match[1])} ${theme.fg("muted", match[2])}`;
+		}
+	}
+
+	if (name === "context_checkout") {
+		return `${theme.fg("success", "Checked out")} ${theme.fg("muted", trimmed.replace(/^Checked out\s*/i, ""))}`;
+	}
+
+	if (name === "TaskStop") {
+		return `${theme.fg("success", "Stopped")} ${theme.fg("muted", trimmed)}`;
+	}
+
+	return theme.fg("muted", trimmed);
+}
+
+function renderTaskListResult(lines: string[], expanded: boolean, theme: Theme, ctx: any): Text {
+	const tasks = lines.map(parseTaskListLine).filter((task): task is ParsedTaskListLine => task !== null);
+	if (tasks.length === 0) {
+		const text = lines.length === 0 ? theme.fg("muted", "no tasks") : buildPreviewText(lines.map((line) => theme.fg("dim", line)), expanded, theme, previewLimit());
+		return makeText(ctx.lastComponent, withBranch(text, theme));
+	}
+
+	const pending = tasks.filter((task) => task.status === "pending").length;
+	const inProgress = tasks.filter((task) => task.status === "in_progress").length;
+	const completed = tasks.filter((task) => task.status === "completed").length;
+	let summary = theme.fg("muted", `${tasks.length} tasks`);
+	const parts: string[] = [];
+	if (inProgress > 0) parts.push(`${theme.fg("warning", String(inProgress))} in progress`);
+	if (pending > 0) parts.push(`${theme.fg("muted", String(pending))} pending`);
+	if (completed > 0) parts.push(`${theme.fg("success", String(completed))} completed`);
+	if (parts.length > 0) summary += ` ${theme.fg("muted", "•")} ${parts.join(` ${theme.fg("muted", "•")} `)}`;
+
+	if (!expanded) {
+		return makeText(ctx.lastComponent, withBranch(`${summary}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+	}
+
+	const shown = tasks.slice(0, previewLimit());
+	const preview = shown.map((task) => `${theme.fg("accent", `#${task.id}`)} ${formatTaskStatus(task.status, theme)} ${theme.fg("dim", task.subject)}`);
+	const remaining = tasks.length - shown.length;
+	if (remaining > 0) preview.push(theme.fg("muted", `… ${remaining} more tasks`));
+	return makeText(ctx.lastComponent, withBranch(`${summary}\n${preview.join("\n")}`, theme));
+}
+
+function renderOpenAiToolResult(name: string, result: any, expanded: boolean, isPartial: boolean, theme: Theme, ctx: any): Text {
+	if (isPartial) {
+		setupBlinkTimer(ctx);
+		return makeText(ctx.lastComponent, theme.fg("dim", `${humanizeToolName(name)}...`));
+	}
+	clearBlinkTimer(ctx);
+	setToolStatus(ctx, ctx.isError ? "error" : "success");
+
+	const raw = getTextContent(result).trim();
+	const lines = raw ? raw.split("\n") : [];
+	const patchFiles = Array.isArray(ctx.state?._openAiPatchFiles) ? ctx.state._openAiPatchFiles : [];
+
+	if (lines.length === 0) {
+		if (patchFiles.length > 0) {
+			const suffix = patchFiles.length === 1 ? patchFiles[0] : `${patchFiles.length} files`;
+			return makeText(ctx.lastComponent, withBranch(`${theme.fg(ctx.isError ? "error" : "success", ctx.isError ? "Failed" : "Applied")} ${theme.fg("muted", suffix)}`, theme));
+		}
+		return makeText(ctx.lastComponent, withBranch(theme.fg(ctx.isError ? "error" : "success", ctx.isError ? "Failed" : "Done"), theme));
+	}
+
+	if (!ctx.isError && name === "TaskList") {
+		return renderTaskListResult(lines, expanded, theme, ctx);
+	}
+
+	if (!ctx.isError && lines.length === 1) {
+		return makeText(ctx.lastComponent, withBranch(formatOpenAiSuccessLine(name, lines[0], theme), theme));
+	}
+
+	const statusText = ctx.isError ? theme.fg("error", lines[0]) : theme.fg("muted", `${lines.length} lines returned`);
+	if (!expanded) {
+		const suffix = lines.length > 1 ? theme.fg("muted", " • Ctrl+O to expand") : "";
+		return makeText(ctx.lastComponent, withBranch(`${statusText}${suffix}`, theme));
+	}
+	const preview = lines.length === 1
+		? theme.fg(ctx.isError ? "error" : "dim", lines[0])
+		: buildPreviewText(lines.map((line) => theme.fg(ctx.isError ? "error" : "dim", line || " ")), true, theme, previewLimit());
+	return makeText(ctx.lastComponent, withBranch(`${statusText}\n${preview}`, theme));
 }
 
 // ===========================================================================
@@ -1519,6 +2167,7 @@ function isMcpToolCandidate(tool: unknown): boolean {
 export default function (pi: ExtensionAPI) {
 	patchGlobalToolBorders();
 	patchAssistantMessages();
+	patchToolExecutionRenderers();
 	applyDiffPalette();
 	registerThinkingLabels(pi);
 
@@ -1581,7 +2230,7 @@ export default function (pi: ExtensionAPI) {
 			return readTool.execute(toolCallId, params, signal, onUpdate);
 		},
 		renderCall(args, theme, ctx) {
-			setToolStatus(ctx, "pending");
+			syncToolCallStatus(ctx);
 			let summary = sp(args.path ?? "");
 			if (args.offset || args.limit) {
 				const parts: string[] = [];
@@ -1622,7 +2271,7 @@ export default function (pi: ExtensionAPI) {
 			return bashTool.execute(toolCallId, params, signal, onUpdate);
 		},
 		renderCall(args, theme, ctx) {
-			setToolStatus(ctx, "pending");
+			syncToolCallStatus(ctx);
 			return makeText(ctx.lastComponent, toolHeader("Bash", summarizeText(args.command, 72), theme, toolStatusDot(ctx, theme)));
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
@@ -1658,7 +2307,7 @@ export default function (pi: ExtensionAPI) {
 			return grepTool.execute(toolCallId, params, signal, onUpdate);
 		},
 		renderCall(args, theme, ctx) {
-			setToolStatus(ctx, "pending");
+			syncToolCallStatus(ctx);
 			let summary = `\"${summarizeText(args.pattern, 40)}\"`;
 			if (args.path) summary += ` in ${args.path}`;
 			return makeText(ctx.lastComponent, toolHeader("Grep", summary, theme, toolStatusDot(ctx, theme)));
@@ -1693,7 +2342,7 @@ export default function (pi: ExtensionAPI) {
 			return findTool.execute(toolCallId, params, signal, onUpdate);
 		},
 		renderCall(args, theme, ctx) {
-			setToolStatus(ctx, "pending");
+			syncToolCallStatus(ctx);
 			let summary = `\"${summarizeText(args.pattern, 40)}\"`;
 			if (args.path) summary += ` in ${args.path}`;
 			return makeText(ctx.lastComponent, toolHeader("Find", summary, theme, toolStatusDot(ctx, theme)));
@@ -1739,7 +2388,7 @@ export default function (pi: ExtensionAPI) {
 			return lsTool.execute(toolCallId, params, signal, onUpdate);
 		},
 		renderCall(args, theme, ctx) {
-			setToolStatus(ctx, "pending");
+			syncToolCallStatus(ctx);
 			return makeText(ctx.lastComponent, toolHeader("List", sp(args.path ?? "."), theme, toolStatusDot(ctx, theme)));
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
@@ -1807,27 +2456,28 @@ export default function (pi: ExtensionAPI) {
 			const fp = args?.path ?? (args as any)?.file_path ?? "";
 			const isNew = !fp || !existsSync(fp);
 			const label = isNew ? "Create" : "Write";
-			setToolStatus(ctx, "pending");
+			syncToolCallStatus(ctx);
 			const hdr = toolHeader(label, `${sp(fp)} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}`, theme, toolStatusDot(ctx, theme));
 			if (args?.content && ctx.argsComplete && isNew) {
 				const previewKey = `create:${fp}:${String(args.content).length}:${ctx.expanded}`;
 				if (ctx.state._previewKey !== previewKey) {
 					ctx.state._previewKey = previewKey;
-					ctx.state._previewText = hdr;
+					ctx.state._previewBody = "";
 					const lg = lang(fp);
 					hlBlock(args.content, lg)
 						.then((lines) => {
 							if (ctx.state._previewKey !== previewKey) return;
 							const maxShow = ctx.expanded ? lines.length : 16;
-							let out = `${hdr}\n${theme.fg("success", `${lines.length} lines`)}`;
+							let out = theme.fg("success", `${lines.length} lines`);
 							for (const line of lines.slice(0, maxShow)) out += `\n${line}`;
 							if (lines.length > maxShow) out += `\n${theme.fg("muted", `… ${lines.length - maxShow} more lines`)}`;
-							ctx.state._previewText = out;
+							ctx.state._previewBody = out;
 							ctx.invalidate();
 						})
 						.catch(() => {});
 				}
-				return makeText(ctx.lastComponent, ctx.state._previewText ?? hdr);
+				const body = ctx.state._previewBody as string | undefined;
+				return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 			}
 			return makeText(ctx.lastComponent, hdr);
 		},
@@ -1932,13 +2582,13 @@ export default function (pi: ExtensionAPI) {
 			const fp = args?.path ?? (args as any)?.file_path ?? "";
 			const operations = getEditOperations(args);
 			const summary = operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp);
-			setToolStatus(ctx, "pending");
+			syncToolCallStatus(ctx);
 			const hdr = toolHeader("Edit", summary, theme, toolStatusDot(ctx, theme));
 			if (!(ctx.argsComplete && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
 			const key = JSON.stringify({ fp, operations, expanded: ctx.expanded });
 			if (ctx.state._pk !== key) {
 				ctx.state._pk = key;
-				ctx.state._pt = `${hdr}\n${theme.fg("muted", "(rendering…)")}`;
+				ctx.state._ptBody = theme.fg("muted", "(rendering…)");
 				const lg = lang(fp);
 				const dc = resolveDiffColors(theme);
 				if (operations.length === 1) {
@@ -1946,7 +2596,7 @@ export default function (pi: ExtensionAPI) {
 					renderSplit(diff, lg, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc)
 						.then((rendered) => {
 							if (ctx.state._pk !== key) return;
-							ctx.state._pt = `${hdr}\n${summarizeDiff(diff.added, diff.removed)}\n${rendered}`;
+							ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}\n${rendered}`;
 							ctx.invalidate();
 						})
 						.catch(() => {});
@@ -1969,13 +2619,14 @@ export default function (pi: ExtensionAPI) {
 							const suffix = remainder > 0
 								? `\n${theme.fg("muted", `… ${remainder} more edit blocks${ctx.expanded ? "" : " • Ctrl+O to expand"}`)}`
 								: "";
-							ctx.state._pt = `${hdr}\n${operations.length} edits ${editSummary}\n\n${sections.join("\n\n")}${suffix}`;
+							ctx.state._ptBody = `${operations.length} edits ${editSummary}\n\n${sections.join("\n\n")}${suffix}`;
 							ctx.invalidate();
 						})
 						.catch(() => {});
 				}
 			}
-			return makeText(ctx.lastComponent, ctx.state._pt ?? hdr);
+			const body = ctx.state._ptBody as string | undefined;
+			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 		},
 		renderResult(result, { isPartial }, theme, ctx) {
 			if (isPartial) {
@@ -2006,6 +2657,48 @@ export default function (pi: ExtensionAPI) {
 			return makeText(ctx.lastComponent, withBranch(theme.fg("success", "Applied"), theme));
 		},
 	});
+
+	const wrappedOpenAiTools = new Set<string>();
+	const registerOpenAiToolOverrides = (): void => {
+		let allTools: unknown[] = [];
+		try {
+			allTools = typeof (pi as any).getAllTools === "function" ? (pi as any).getAllTools() : [];
+		} catch {
+			allTools = [];
+		}
+		for (const tool of allTools) {
+			if (!isOpenAiToolCandidate(tool)) continue;
+			const record = tool as Record<string, unknown>;
+			const name = typeof record.name === "string" ? record.name : "";
+			if (!name || wrappedOpenAiTools.has(name)) continue;
+			const execute = typeof record.execute === "function" ? (record.execute as any) : null;
+			if (!execute) continue;
+			const rawLabel = typeof record.label === "string" ? record.label.trim() : "";
+			const label = rawLabel && rawLabel !== name && !rawLabel.includes("_") ? rawLabel : humanizeToolName(name);
+			const description = typeof record.description === "string" ? record.description : label;
+			(pi as any).registerTool({
+				name,
+				label,
+				description,
+				parameters: record.parameters,
+				prepareArguments: typeof record.prepareArguments === "function" ? record.prepareArguments : undefined,
+				async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: any) {
+					return await Promise.resolve(execute(toolCallId, params, signal, onUpdate, ctx));
+				},
+				renderCall(args: any, theme: Theme, ctx: any) {
+					if (name === "apply_patch") return renderApplyPatchCall(args, theme, ctx, sp);
+					syncToolCallStatus(ctx);
+					ctx.state._openAiPatchFiles = [];
+					return makeText(ctx.lastComponent, toolHeader(label, summarizeOpenAiToolCall(name, args, theme, sp), theme, toolStatusDot(ctx, theme)));
+				},
+				renderResult(result: any, { expanded, isPartial }: any, theme: Theme, ctx: any) {
+					if (name === "apply_patch") return renderApplyPatchResult(result, isPartial, theme, ctx);
+					return renderOpenAiToolResult(name, result, expanded, isPartial, theme, ctx);
+				},
+			});
+			wrappedOpenAiTools.add(name);
+		}
+	};
 
 	const wrappedMcpTools = new Set<string>();
 	const registerMcpToolOverrides = (): void => {
@@ -2062,9 +2755,11 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", async () => {
+		registerOpenAiToolOverrides();
 		registerMcpToolOverrides();
 	});
 	pi.on("before_agent_start", async () => {
+		registerOpenAiToolOverrides();
 		registerMcpToolOverrides();
 	});
 }
