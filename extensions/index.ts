@@ -51,21 +51,35 @@ interface SettingsFile {
 	diffColors?: Record<string, string>;
 }
 
+let _settingsCache: { value: SettingsFile; timestamp: number } | null = null;
+const SETTINGS_CACHE_TTL_MS = 5_000;
+
 function readSettings(): SettingsFile {
+	const now = Date.now();
+	if (_settingsCache && now - _settingsCache.timestamp < SETTINGS_CACHE_TTL_MS) {
+		return _settingsCache.value;
+	}
 	const paths = [`${process.cwd()}/.pi/settings.json`, `${process.env.HOME ?? ""}/.pi/settings.json`];
 	for (const path of paths) {
 		try {
 			if (!path || !existsSync(path)) continue;
 			const raw = JSON.parse(readFileSync(path, "utf8"));
-			if (raw && typeof raw === "object") return raw as SettingsFile;
+			if (raw && typeof raw === "object") {
+				const result = raw as SettingsFile;
+				_settingsCache = { value: result, timestamp: now };
+				return result;
+			}
 		} catch {
 			// ignore invalid settings files
 		}
 	}
-	return {};
+	const empty: SettingsFile = {};
+	_settingsCache = { value: empty, timestamp: now };
+	return empty;
 }
 
 function writeSettingsKey(key: string, value: unknown): void {
+	_settingsCache = null; // invalidate cache on write
 	const home = process.env.HOME ?? "";
 	if (!home) return;
 	const dir = `${home}/.pi`;
@@ -431,25 +445,45 @@ function withBranch(content: string, _theme: Theme, _isError = false): string {
 // Blink timer for partial (running) states
 // ---------------------------------------------------------------------------
 
-function setupBlinkTimer(ctx: any): void {
-	if (ctx.state._blinkTimer) return;
-	ctx.state._blinkPhase = true;
-	const timer = setInterval(() => {
-		ctx.state._blinkPhase = !ctx.state._blinkPhase;
-		try { ctx.invalidate(); } catch { /* noop */ }
+// ---------------------------------------------------------------------------
+// Global blink timer — single timer invalidates all active contexts
+// ---------------------------------------------------------------------------
+
+const _blinkContexts = new Set<any>();
+let _globalBlinkTimer: ReturnType<typeof setInterval> | null = null;
+let _globalBlinkPhase = true;
+
+function _startGlobalBlinkTimer(): void {
+	if (_globalBlinkTimer) return;
+	_globalBlinkTimer = setInterval(() => {
+		_globalBlinkPhase = !_globalBlinkPhase;
+		for (const ctx of _blinkContexts) {
+			try { ctx.invalidate(); } catch { /* noop */ }
+		}
 	}, 500);
-	ctx.state._blinkTimer = timer;
 }
 
-function clearBlinkTimer(ctx: any): void {
-	if (ctx.state._blinkTimer) {
-		clearInterval(ctx.state._blinkTimer);
-		ctx.state._blinkTimer = null;
+function _stopGlobalBlinkTimerIfEmpty(): void {
+	if (_blinkContexts.size === 0 && _globalBlinkTimer) {
+		clearInterval(_globalBlinkTimer);
+		_globalBlinkTimer = null;
 	}
 }
 
+function setupBlinkTimer(ctx: any): void {
+	if (_blinkContexts.has(ctx)) return;
+	_blinkContexts.add(ctx);
+	ctx.state._blinkPhase = true;
+	_startGlobalBlinkTimer();
+}
+
+function clearBlinkTimer(ctx: any): void {
+	_blinkContexts.delete(ctx);
+	_stopGlobalBlinkTimerIfEmpty();
+}
+
 function blinkDot(ctx: any, theme: Theme): string {
-	return ctx.state._blinkPhase ? theme.fg("success", "●") : theme.fg("muted", "○");
+	return _globalBlinkPhase ? theme.fg("success", "●") : theme.fg("muted", "○");
 }
 
 // ---------------------------------------------------------------------------
@@ -3018,5 +3052,18 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async () => {
 		registerOpenAiToolOverrides();
 		registerMcpToolOverrides();
+	});
+
+	// Safety net: clear all blink timers on turn/session boundaries
+	pi.on("turn_end", async () => {
+		_blinkContexts.clear();
+		_stopGlobalBlinkTimerIfEmpty();
+	});
+	pi.on("session_shutdown", async () => {
+		_blinkContexts.clear();
+		if (_globalBlinkTimer) {
+			clearInterval(_globalBlinkTimer);
+			_globalBlinkTimer = null;
+		}
 	});
 }

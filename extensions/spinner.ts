@@ -16,7 +16,7 @@ const CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
 const CLAUDE_ORANGE_EDGE = "\x1b[38;2;230;134;102m";
 const CLAUDE_ORANGE_SHIMMER = "\x1b[38;2;245;149;117m";
 const STATUS_DIM = "\x1b[38;2;153;153;153m";
-const SHIMMER_INTERVAL_MS = 150;
+const SHIMMER_INTERVAL_MS = 500;
 
 const origUpdateDisplay = (Loader.prototype as any).updateDisplay;
 (Loader.prototype as any).updateDisplay = function patchedUpdateDisplay() {
@@ -37,7 +37,7 @@ Loader.prototype.start = function patchedStart() {
 	(this as any).intervalId = setInterval(() => {
 		(this as any).currentFrame = ((this as any).currentFrame + 1) % OB_FRAMES.length;
 		(this as any).updateDisplay();
-	}, 120);
+	}, 250);
 };
 
 // ---------------------------------------------------------------------------
