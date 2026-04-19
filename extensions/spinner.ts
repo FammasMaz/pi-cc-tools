@@ -296,11 +296,21 @@ function renderShimmerText(text: string, tick: number): string {
 /** Threshold before showing elapsed time in status parentheses (matches OpenBrawd's 30s) */
 const SHOW_TIMER_AFTER_MS = 30_000;
 
-/** How long to display "thought for Ns" after thinking ends */
-const THOUGHT_DISPLAY_MS = 2_000; // used only on turn_end linger
+/** How long to display "thought for Ns" after thinking ends (survives across turn boundaries) */
+const THOUGHT_DISPLAY_MS = 3_500;
 
 /** Minimum thinking duration before showing "thought for Ns" (skip sub-100ms flickers) */
 const MIN_THINKING_SHOW_MS = 100;
+
+/** Past-tense verbs for turn completion messages (from OpenBrawd) */
+const TURN_COMPLETION_VERBS = [
+	"Baked", "Brewed", "Churned", "Cogitated", "Cooked",
+	"Crunched", "Sautéed", "Worked",
+];
+
+function pickCompletionVerb(): string {
+	return TURN_COMPLETION_VERBS[Math.floor(Math.random() * TURN_COMPLETION_VERBS.length)];
+}
 
 export default function (pi: ExtensionAPI) {
 	let turnStartTime = 0;
@@ -316,6 +326,9 @@ export default function (pi: ExtensionAPI) {
 	let clearStatusTimer: ReturnType<typeof setTimeout> | null = null;
 
 	let activeCtx: { ui: any; hasUI: boolean } | null = null;
+
+	// Timestamp when "thought for Ns" was set — used to enforce minimum linger
+	let thoughtForSetAt = 0;
 
 	function getEffortSuffix(): string {
 		try {
@@ -431,6 +444,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Freeze the duration — stays visible until next thinking_start or turn_end
 		thinkingStatus = duration;
+		thoughtForSetAt = Date.now();
 	}
 
 	// --- Event handlers ---
@@ -441,7 +455,16 @@ export default function (pi: ExtensionAPI) {
 		currentVerb = pickVerb();
 		responseLength = 0;
 		shimmerTick = 0;
-		thinkingStatus = null;
+		// Preserve "thought for Ns" if it was recently set (linger across turns)
+		if (typeof thinkingStatus !== "number") {
+			thinkingStatus = null;
+		} else {
+			const elapsed = Date.now() - thoughtForSetAt;
+			if (elapsed >= THOUGHT_DISPLAY_MS) {
+				thinkingStatus = null;
+			}
+			// else: keep the "thought for Ns" display — linger timer will clear it
+		}
 		clearThinkingTimers();
 		startTicking();
 	});
@@ -464,15 +487,44 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("turn_end", async () => {
-		// If we're showing "thought for Ns", let it linger briefly so the user sees it
-		if (typeof thinkingStatus === "number") {
-			// Keep ticking for the remaining display time, then clear
-			const remaining = THOUGHT_DISPLAY_MS;
-			setTimeout(() => clearDisplay(), remaining);
-		} else {
-			clearDisplay();
+	pi.on("turn_end", async (_event, ctx) => {
+		activeCtx = ctx;
+		const elapsed = Date.now() - turnStartTime;
+
+		// Show "Worked for Xs" completion message
+		if (activeCtx?.hasUI && elapsed >= 1000) {
+			const verb = pickCompletionVerb();
+			const dur = formatDuration(elapsed);
+			const msg = `${STATUS_DIM}✱ ${verb} for ${dur}${RESET}`;
+			try {
+				activeCtx.ui.setWorkingMessage(msg);
+				// Keep the completion message visible for a couple seconds
+				setTimeout(() => {
+					try { activeCtx?.ui?.setWorkingMessage(); } catch { /* noop */ }
+				}, 2_500);
+			} catch { /* noop */ }
 		}
+
+		// If we're showing "thought for Ns", let it linger from when it was set
+		if (typeof thinkingStatus === "number") {
+			const sinceSet = Date.now() - thoughtForSetAt;
+			const remaining = Math.max(0, THOUGHT_DISPLAY_MS - sinceSet);
+			if (remaining > 0) {
+				// Don't clear yet — the "thought for" should stay visible
+				setTimeout(() => {
+					thinkingStatus = null;
+					updateDisplay();
+				}, remaining);
+			} else {
+				thinkingStatus = null;
+			}
+		}
+
+		// Stop ticking but don't clear the working message (completion msg handles it)
+		stopTicking();
+		clearThinkingTimers();
+		responseLength = 0;
+		shimmerTick = 0;
 	});
 
 	pi.on("agent_end", async () => {
