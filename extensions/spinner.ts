@@ -2,42 +2,61 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Loader } from "@mariozechner/pi-tui";
 
 // ---------------------------------------------------------------------------
-// Patch the built-in Loader to use OpenBrawd-style animated characters
-// instead of braille dots. Class fields are instance props so we override
-// updateDisplay on the prototype to inject our characters.
+// Patch built-in Loader with Claude/OpenBrawd-style glyphs.
+// Keep animation adaptive: small sessions animate, long sessions slow down,
+// very large sessions stop animating completely to avoid full-screen re-render
+// thrash on every spinner frame.
 // ---------------------------------------------------------------------------
 
 const SPINNER_CHARS = ["·", "✢", "✳", "✶", "✻", "✽"];
 const OB_FRAMES = [...SPINNER_CHARS, ...[...SPINNER_CHARS].reverse()];
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const RAW_ANSI_RE = /\x1b\[[0-9;]*m/;
 const RESET = "\x1b[0m";
 const CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
-const CLAUDE_ORANGE_EDGE = "\x1b[38;2;230;134;102m";
-const CLAUDE_ORANGE_SHIMMER = "\x1b[38;2;245;149;117m";
 const STATUS_DIM = "\x1b[38;2;153;153;153m";
-const SHIMMER_INTERVAL_MS = 500;
+const LOADER_FAST_INTERVAL_MS = 350;
+const LOADER_SLOW_INTERVAL_MS = 900;
+const LOADER_SLOW_THRESHOLD_LINES = 500;
+const LOADER_FREEZE_THRESHOLD_LINES = 1400;
+const LOADER_LAST_TEXT = Symbol.for("pi-claude-style-tools:loader-last-text");
 
-const origUpdateDisplay = (Loader.prototype as any).updateDisplay;
+function getLoaderIntervalMs(loader: any): number | null {
+	const renderedLines = Array.isArray(loader?.ui?.previousLines) ? loader.ui.previousLines.length : 0;
+	if (renderedLines >= LOADER_FREEZE_THRESHOLD_LINES) return null;
+	if (renderedLines >= LOADER_SLOW_THRESHOLD_LINES) return LOADER_SLOW_INTERVAL_MS;
+	return LOADER_FAST_INTERVAL_MS;
+}
+
 (Loader.prototype as any).updateDisplay = function patchedUpdateDisplay() {
 	const frame = OB_FRAMES[this.currentFrame % OB_FRAMES.length];
 	const message = typeof this.message === "string" && RAW_ANSI_RE.test(this.message)
 		? this.message
 		: this.messageColorFn(this.message);
-	this.setText(`${this.spinnerColorFn(frame)} ${message}`);
+	const nextText = `${this.spinnerColorFn(frame)} ${message}`;
+	if ((this as any)[LOADER_LAST_TEXT] === nextText) return;
+	(this as any)[LOADER_LAST_TEXT] = nextText;
+	this.setText(nextText);
 	if (this.ui) {
 		this.ui.requestRender();
 	}
 };
 
-// Override start() to use 120ms interval (OpenBrawd's speed) instead of 80ms
-const origStart = Loader.prototype.start;
 Loader.prototype.start = function patchedStart() {
+	this.stop();
 	(this as any).updateDisplay();
-	(this as any).intervalId = setInterval(() => {
-		(this as any).currentFrame = ((this as any).currentFrame + 1) % OB_FRAMES.length;
-		(this as any).updateDisplay();
-	}, 250);
+	const scheduleNext = () => {
+		const intervalMs = getLoaderIntervalMs(this);
+		if (intervalMs === null) {
+			(this as any).intervalId = null;
+			return;
+		}
+		(this as any).intervalId = setTimeout(() => {
+			(this as any).currentFrame = ((this as any).currentFrame + 1) % OB_FRAMES.length;
+			(this as any).updateDisplay();
+			scheduleNext();
+		}, intervalMs);
+	};
+	scheduleNext();
 };
 
 // ---------------------------------------------------------------------------
@@ -248,10 +267,6 @@ function formatDuration(ms: number): string {
 	return `${s}s`;
 }
 
-function stripAnsi(text: string): string {
-	return text.replace(ANSI_RE, "");
-}
-
 function formatCount(value: number): string {
 	return new Intl.NumberFormat("en-US").format(value);
 }
@@ -266,43 +281,27 @@ function statusText(text: string): string {
 	return `${STATUS_DIM}${text}${RESET}`;
 }
 
-function colorizeShimmerSegment(segment: string): string {
-	const chars = Array.from(segment);
-	if (chars.length === 0) return "";
-	const center = Math.floor(chars.length / 2);
-	return chars
-		.map((char, index) => `${index === center ? CLAUDE_ORANGE_SHIMMER : CLAUDE_ORANGE_EDGE}${char}`)
-		.join("");
-}
-
-function renderShimmerText(text: string, tick: number): string {
-	const chars = Array.from(stripAnsi(text));
-	if (chars.length === 0) return "";
-	const cycleLength = chars.length + 20;
-	const glimmerIndex = chars.length + 10 - (tick % cycleLength);
-	const shimmerStart = glimmerIndex - 1;
-	const shimmerEnd = glimmerIndex + 1;
-	if (shimmerStart >= chars.length || shimmerEnd < 0) return `${CLAUDE_ORANGE}${text}${RESET}`;
-	const before = chars.slice(0, Math.max(0, shimmerStart)).join("");
-	const shimmer = chars.slice(Math.max(0, shimmerStart), Math.min(chars.length, shimmerEnd + 1)).join("");
-	const after = chars.slice(Math.min(chars.length, shimmerEnd + 1)).join("");
-	return `${CLAUDE_ORANGE}${before}${colorizeShimmerSegment(shimmer)}${CLAUDE_ORANGE}${after}${RESET}`;
-}
-
 // ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
-/** Threshold before showing elapsed time in status parentheses (matches OpenBrawd's 30s) */
+/** Threshold before showing elapsed time in status parentheses */
 const SHOW_TIMER_AFTER_MS = 30_000;
 
-/** How long to display "thought for Ns" after thinking ends (survives across turn boundaries) */
+/** How long to preserve "thought for Ns" across turns */
 const THOUGHT_DISPLAY_MS = 3_500;
 
-/** Minimum thinking duration before showing "thought for Ns" (skip sub-100ms flickers) */
+/** Minimum thinking duration before showing "thought for Ns" */
 const MIN_THINKING_SHOW_MS = 100;
 
-/** Past-tense verbs for turn completion messages (from OpenBrawd) */
+/** Message refresh cadence. Keep slow; Loader already animates. */
+const WORKING_MESSAGE_INTERVAL_MS = 1_000;
+const WORKING_MESSAGE_SLOW_INTERVAL_MS = 3_000;
+
+/** Completion message linger */
+const TURN_COMPLETION_MS = 2_500;
+
+/** Past-tense verbs for turn completion messages */
 const TURN_COMPLETION_VERBS = [
 	"Baked", "Brewed", "Churned", "Cogitated", "Cooked",
 	"Crunched", "Sautéed", "Worked",
@@ -314,21 +313,18 @@ function pickCompletionVerb(): string {
 
 export default function (pi: ExtensionAPI) {
 	let turnStartTime = 0;
-	let tickTimer: ReturnType<typeof setInterval> | null = null;
+	let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+	let completionTimer: ReturnType<typeof setTimeout> | null = null;
+	let thoughtStatusTimer: ReturnType<typeof setTimeout> | null = null;
 	let currentVerb = "";
 	let responseLength = 0;
-	let shimmerTick = 0;
-
-	// Thinking state machine (mirrors OpenBrawd's approach)
 	let thinkingStatus: "thinking" | number /* duration ms */ | null = null;
 	let thinkingStartTime = 0;
-	let showDurationTimer: ReturnType<typeof setTimeout> | null = null;
-	let clearStatusTimer: ReturnType<typeof setTimeout> | null = null;
-
-	let activeCtx: { ui: any; hasUI: boolean } | null = null;
-
-	// Timestamp when "thought for Ns" was set — used to enforce minimum linger
 	let thoughtForSetAt = 0;
+	let activeTurnId = 0;
+	let turnActive = false;
+	let lastWorkingMessage: string | null = null;
+	let activeCtx: { ui: any; hasUI: boolean } | null = null;
 
 	function getEffortSuffix(): string {
 		try {
@@ -340,198 +336,219 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	/**
-	 * Build the working message:
-	 *   Verb… (thinking with medium effort · ↓ 123 tokens · 1:45)
-	 *
-	 * The Loader provides the animated glyph prefix automatically.
-	 */
 	function buildWorkingMessage(): string {
 		const elapsed = Date.now() - turnStartTime;
 		const tokenCount = Math.max(0, Math.round(responseLength / 4));
-
-		// --- Status parts (go inside parentheses, joined with " · ") ---
 		const statusParts: string[] = [];
 
-		// Thinking / thought-for indicator
 		if (thinkingStatus === "thinking") {
-			const effort = getEffortSuffix();
-			statusParts.push(`thinking${effort}`);
+			statusParts.push(`thinking${getEffortSuffix()}`);
 		} else if (typeof thinkingStatus === "number") {
-			const dur = Math.max(1, Math.round(thinkingStatus / 1000));
-			statusParts.push(`thought for ${dur}s`);
+			statusParts.push(`thought for ${Math.max(1, Math.round(thinkingStatus / 1000))}s`);
 		}
 
 		if (tokenCount > 0) {
 			statusParts.push(`↓ ${formatCount(tokenCount)} tokens`);
 		}
 
-		// Elapsed time (shown after threshold, or whenever we're actively showing status)
 		if (elapsed > SHOW_TIMER_AFTER_MS || thinkingStatus !== null || tokenCount > 0) {
 			statusParts.push(formatDuration(elapsed));
 		}
 
-		// --- Assemble ---
-		let msg = renderShimmerText(`${currentVerb}…`, shimmerTick);
+		let message = `${CLAUDE_ORANGE}${currentVerb}…${RESET}`;
 		if (statusParts.length > 0) {
-			msg += statusText(` (${statusParts.join(" · ")})`);
+			message += statusText(` (${statusParts.join(" · ")})`);
 		}
-
-		return msg;
+		return message;
 	}
 
-	function updateDisplay(): void {
+	function syncWorkingMessage(force = false): void {
 		if (!activeCtx?.hasUI) return;
-		const msg = buildWorkingMessage();
+		const nextMessage = buildWorkingMessage();
+		if (!force && nextMessage === lastWorkingMessage) return;
+		lastWorkingMessage = nextMessage;
 		try {
-			activeCtx.ui.setWorkingMessage(msg);
+			activeCtx.ui.setWorkingMessage(nextMessage);
 		} catch { /* noop */ }
 	}
 
-	function startTicking(): void {
-		stopTicking();
-		tickTimer = setInterval(() => {
-			shimmerTick++;
-			updateDisplay();
-		}, SHIMMER_INTERVAL_MS);
-		updateDisplay(); // immediate first update
+	function restoreDefaultWorkingMessage(): void {
+		lastWorkingMessage = null;
+		if (!activeCtx?.hasUI) return;
+		try {
+			activeCtx.ui.setWorkingMessage();
+		} catch { /* noop */ }
 	}
 
-	function stopTicking(): void {
-		if (tickTimer) {
-			clearInterval(tickTimer);
-			tickTimer = null;
+	function getWorkingMessageIntervalMs(): number | null {
+		const renderedLines = Array.isArray(activeCtx?.ui?.previousLines) ? activeCtx.ui.previousLines.length : 0;
+		if (renderedLines >= LOADER_FREEZE_THRESHOLD_LINES) return null;
+		if (renderedLines >= LOADER_SLOW_THRESHOLD_LINES) return WORKING_MESSAGE_SLOW_INTERVAL_MS;
+		return WORKING_MESSAGE_INTERVAL_MS;
+	}
+
+	function startRefreshLoop(): void {
+		stopRefreshLoop();
+		syncWorkingMessage(true);
+		const scheduleNext = () => {
+			const intervalMs = getWorkingMessageIntervalMs();
+			if (intervalMs === null) {
+				refreshTimer = null;
+				return;
+			}
+			refreshTimer = setTimeout(() => {
+				refreshTimer = null;
+				syncWorkingMessage();
+				scheduleNext();
+			}, intervalMs);
+		};
+		scheduleNext();
+	}
+
+	function stopRefreshLoop(): void {
+		if (refreshTimer) {
+			clearTimeout(refreshTimer);
+			refreshTimer = null;
 		}
 	}
 
-	function clearThinkingTimers(): void {
-		if (showDurationTimer) {
-			clearTimeout(showDurationTimer);
-			showDurationTimer = null;
+	function clearCompletionTimer(): void {
+		if (completionTimer) {
+			clearTimeout(completionTimer);
+			completionTimer = null;
 		}
-		if (clearStatusTimer) {
-			clearTimeout(clearStatusTimer);
-			clearStatusTimer = null;
+	}
+
+	function clearThoughtStatusTimer(): void {
+		if (thoughtStatusTimer) {
+			clearTimeout(thoughtStatusTimer);
+			thoughtStatusTimer = null;
 		}
+	}
+
+	function scheduleThoughtStatusClear(): void {
+		clearThoughtStatusTimer();
+		if (typeof thinkingStatus !== "number") return;
+		const remaining = THOUGHT_DISPLAY_MS - (Date.now() - thoughtForSetAt);
+		if (remaining <= 0) {
+			thinkingStatus = null;
+			if (turnActive) syncWorkingMessage(true);
+			else if (!completionTimer) restoreDefaultWorkingMessage();
+			return;
+		}
+		thoughtStatusTimer = setTimeout(() => {
+			thoughtStatusTimer = null;
+			if (typeof thinkingStatus !== "number") return;
+			if (Date.now() - thoughtForSetAt < THOUGHT_DISPLAY_MS) {
+				scheduleThoughtStatusClear();
+				return;
+			}
+			thinkingStatus = null;
+			if (turnActive) syncWorkingMessage(true);
+			else if (!completionTimer) restoreDefaultWorkingMessage();
+		}, remaining);
 	}
 
 	function clearDisplay(): void {
-		stopTicking();
-		clearThinkingTimers();
+		stopRefreshLoop();
+		clearCompletionTimer();
+		clearThoughtStatusTimer();
 		thinkingStatus = null;
+		thoughtForSetAt = 0;
 		responseLength = 0;
-		shimmerTick = 0;
-		if (!activeCtx?.hasUI) return;
-		try {
-			activeCtx.ui.setWorkingMessage(); // restore default
-		} catch { /* noop */ }
+		restoreDefaultWorkingMessage();
 	}
 
-	/**
-	 * Transition thinking state machine when thinking ends.
-	 * Shows "thought for Ns" until the next thinking_start or turn_end.
-	 */
 	function onThinkingEnd(): void {
 		if (thinkingStatus !== "thinking") return;
-
 		const duration = Date.now() - thinkingStartTime;
-
 		if (duration < MIN_THINKING_SHOW_MS) {
-			// Too brief — skip "thought for" entirely to avoid flicker
 			thinkingStatus = null;
+			clearThoughtStatusTimer();
 			return;
 		}
-
-		// Freeze the duration — stays visible until next thinking_start or turn_end
 		thinkingStatus = duration;
 		thoughtForSetAt = Date.now();
+		scheduleThoughtStatusClear();
 	}
 
-	// --- Event handlers ---
-
 	pi.on("turn_start", async (_event, ctx) => {
+		activeTurnId++;
+		turnActive = true;
 		activeCtx = ctx;
 		turnStartTime = Date.now();
 		currentVerb = pickVerb();
 		responseLength = 0;
-		shimmerTick = 0;
-		// Preserve "thought for Ns" if it was recently set (linger across turns)
-		if (typeof thinkingStatus !== "number") {
+		clearCompletionTimer();
+		if (typeof thinkingStatus !== "number" || Date.now() - thoughtForSetAt >= THOUGHT_DISPLAY_MS) {
 			thinkingStatus = null;
+			clearThoughtStatusTimer();
 		} else {
-			const elapsed = Date.now() - thoughtForSetAt;
-			if (elapsed >= THOUGHT_DISPLAY_MS) {
-				thinkingStatus = null;
-			}
-			// else: keep the "thought for Ns" display — linger timer will clear it
+			scheduleThoughtStatusClear();
 		}
-		clearThinkingTimers();
-		startTicking();
+		startRefreshLoop();
 	});
 
 	pi.on("message_update", async (event, ctx) => {
 		activeCtx = ctx;
-		const evt = event.assistantMessageEvent;
 		responseLength = estimateResponseLength(event.message);
+		const evt = event.assistantMessageEvent;
+		let statusChanged = false;
 
 		if (evt.type === "thinking_start") {
-			if (thinkingStatus !== "thinking") {
-				clearThinkingTimers();
-				thinkingStatus = "thinking";
-				thinkingStartTime = Date.now();
-			}
+			clearThoughtStatusTimer();
+			thinkingStatus = "thinking";
+			thinkingStartTime = Date.now();
+			statusChanged = true;
 		}
-
 		if (evt.type === "thinking_end") {
 			onThinkingEnd();
+			statusChanged = true;
+		}
+
+		if (statusChanged) {
+			syncWorkingMessage(true);
 		}
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
+		turnActive = false;
 		activeCtx = ctx;
+		const turnId = activeTurnId;
 		const elapsed = Date.now() - turnStartTime;
+		stopRefreshLoop();
+		clearCompletionTimer();
 
-		// Show "Worked for Xs" completion message
+		if (typeof thinkingStatus === "number" && Date.now() - thoughtForSetAt >= THOUGHT_DISPLAY_MS) {
+			thinkingStatus = null;
+			clearThoughtStatusTimer();
+		}
+
 		if (activeCtx?.hasUI && elapsed >= 1000) {
-			const verb = pickCompletionVerb();
-			const dur = formatDuration(elapsed);
-			const msg = `${STATUS_DIM}✱ ${verb} for ${dur}${RESET}`;
+			const message = `${STATUS_DIM}✱ ${pickCompletionVerb()} for ${formatDuration(elapsed)}${RESET}`;
+			lastWorkingMessage = message;
 			try {
-				activeCtx.ui.setWorkingMessage(msg);
-				// Keep the completion message visible for a couple seconds
-				setTimeout(() => {
-					try { activeCtx?.ui?.setWorkingMessage(); } catch { /* noop */ }
-				}, 2_500);
+				activeCtx.ui.setWorkingMessage(message);
 			} catch { /* noop */ }
+			completionTimer = setTimeout(() => {
+				completionTimer = null;
+				if (activeTurnId !== turnId) return;
+				restoreDefaultWorkingMessage();
+			}, TURN_COMPLETION_MS);
+		} else if (typeof thinkingStatus !== "number") {
+			restoreDefaultWorkingMessage();
 		}
 
-		// If we're showing "thought for Ns", let it linger from when it was set
-		if (typeof thinkingStatus === "number") {
-			const sinceSet = Date.now() - thoughtForSetAt;
-			const remaining = Math.max(0, THOUGHT_DISPLAY_MS - sinceSet);
-			if (remaining > 0) {
-				// Don't clear yet — the "thought for" should stay visible
-				setTimeout(() => {
-					thinkingStatus = null;
-					updateDisplay();
-				}, remaining);
-			} else {
-				thinkingStatus = null;
-			}
-		}
-
-		// Stop ticking but don't clear the working message (completion msg handles it)
-		stopTicking();
-		clearThinkingTimers();
 		responseLength = 0;
-		shimmerTick = 0;
 	});
 
 	pi.on("agent_end", async () => {
+		turnActive = false;
 		clearDisplay();
 	});
 
 	pi.on("session_shutdown", async () => {
+		turnActive = false;
 		clearDisplay();
 		activeCtx = null;
 	});

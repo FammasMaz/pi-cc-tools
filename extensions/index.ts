@@ -451,39 +451,31 @@ function withBranch(content: string, _theme: Theme, _isError = false): string {
 
 const _blinkContexts = new Set<any>();
 let _globalBlinkTimer: ReturnType<typeof setInterval> | null = null;
-let _globalBlinkPhase = true;
 
+// Pending tool blinking forced periodic invalidation of active tool rows.
+// On long sessions that meant full-screen re-render churn every 500ms.
+// Keep pending state static instead.
 function _startGlobalBlinkTimer(): void {
-	if (_globalBlinkTimer) return;
-	_globalBlinkTimer = setInterval(() => {
-		_globalBlinkPhase = !_globalBlinkPhase;
-		for (const ctx of _blinkContexts) {
-			try { ctx.invalidate(); } catch { /* noop */ }
-		}
-	}, 500);
+	// no-op by design
 }
 
 function _stopGlobalBlinkTimerIfEmpty(): void {
-	if (_blinkContexts.size === 0 && _globalBlinkTimer) {
+	if (_globalBlinkTimer) {
 		clearInterval(_globalBlinkTimer);
 		_globalBlinkTimer = null;
 	}
 }
 
-function setupBlinkTimer(ctx: any): void {
-	if (_blinkContexts.has(ctx)) return;
-	_blinkContexts.add(ctx);
-	ctx.state._blinkPhase = true;
-	_startGlobalBlinkTimer();
+function setupBlinkTimer(_ctx: any): void {
+	// no-op by design
 }
 
-function clearBlinkTimer(ctx: any): void {
-	_blinkContexts.delete(ctx);
-	_stopGlobalBlinkTimerIfEmpty();
+function clearBlinkTimer(_ctx: any): void {
+	// no-op by design
 }
 
-function blinkDot(ctx: any, theme: Theme): string {
-	return _globalBlinkPhase ? theme.fg("success", "●") : theme.fg("muted", "○");
+function blinkDot(_ctx: any, theme: Theme): string {
+	return theme.fg("muted", "○");
 }
 
 // ---------------------------------------------------------------------------
