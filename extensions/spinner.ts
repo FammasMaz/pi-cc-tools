@@ -19,6 +19,7 @@ const LOADER_SLOW_INTERVAL_MS = 900;
 const LOADER_SLOW_THRESHOLD_LINES = 500;
 const LOADER_FREEZE_THRESHOLD_LINES = 1400;
 const LOADER_LAST_TEXT = Symbol.for("pi-claude-style-tools:loader-last-text");
+const ACTIVE_UI_SYMBOL = Symbol.for("pi-claude-style-tools:active-ui");
 
 function getLoaderIntervalMs(loader: any): number | null {
 	const renderedLines = Array.isArray(loader?.ui?.previousLines) ? loader.ui.previousLines.length : 0;
@@ -37,6 +38,7 @@ function getLoaderIntervalMs(loader: any): number | null {
 	(this as any)[LOADER_LAST_TEXT] = nextText;
 	this.setText(nextText);
 	if (this.ui) {
+		(globalThis as any)[ACTIVE_UI_SYMBOL] = this.ui;
 		this.ui.requestRender();
 	}
 };

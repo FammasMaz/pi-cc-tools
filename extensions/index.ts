@@ -416,7 +416,6 @@ function toolStatusDot(ctx: any, theme: Theme): string {
 	const status = ctx.state?._toolStatus as "pending" | "success" | "error" | undefined;
 	if (status === "success") return `${theme.fg("success", "●")} `;
 	if (status === "error") return `${theme.fg("error", "●")} `;
-	setupBlinkTimer(ctx);
 	return `${blinkDot(ctx, theme)} `;
 }
 
@@ -449,33 +448,107 @@ function withBranch(content: string, _theme: Theme, _isError = false): string {
 // Global blink timer — single timer invalidates all active contexts
 // ---------------------------------------------------------------------------
 
-const _blinkContexts = new Set<any>();
-let _globalBlinkTimer: ReturnType<typeof setInterval> | null = null;
+const ACTIVE_UI_SYMBOL = Symbol.for("pi-claude-style-tools:active-ui");
+const MAX_BLINKING_TOOLS = 5;
+const BLINK_INTERVAL_MS = 600;
+const BLINK_SLOW_INTERVAL_MS = 1_100;
+const BLINK_SLOW_THRESHOLD_LINES = 500;
+const BLINK_FREEZE_THRESHOLD_LINES = 1400;
 
-// Pending tool blinking forced periodic invalidation of active tool rows.
-// On long sessions that meant full-screen re-render churn every 500ms.
-// Keep pending state static instead.
-function _startGlobalBlinkTimer(): void {
-	// no-op by design
+type BlinkEntry = { key: any; order: number; invalidate: () => void };
+
+const _blinkContexts = new Map<any, BlinkEntry>();
+let _globalBlinkTimer: ReturnType<typeof setTimeout> | null = null;
+let _blinkOrder = 0;
+let _globalBlinkPhase = true;
+
+function getBlinkIntervalMs(): number | null {
+	const ui = (globalThis as any)[ACTIVE_UI_SYMBOL];
+	const renderedLines = Array.isArray(ui?.previousLines) ? ui.previousLines.length : 0;
+	if (renderedLines >= BLINK_FREEZE_THRESHOLD_LINES) return null;
+	if (renderedLines >= BLINK_SLOW_THRESHOLD_LINES) return BLINK_SLOW_INTERVAL_MS;
+	return BLINK_INTERVAL_MS;
+}
+
+function getBlinkKey(ctx: any): any {
+	return ctx?.state ?? ctx;
+}
+
+function getBlinkingEntries(): BlinkEntry[] {
+	return [..._blinkContexts.values()]
+		.sort((a, b) => b.order - a.order)
+		.slice(0, MAX_BLINKING_TOOLS);
+}
+
+function updateBlinkActiveStates(): void {
+	const intervalMs = getBlinkIntervalMs();
+	const activeSet = intervalMs === null ? new Set<any>() : new Set(getBlinkingEntries().map((entry) => entry.key));
+	for (const entry of _blinkContexts.values()) {
+		const active = activeSet.has(entry.key);
+		if (entry.key?._blinkActive !== active) {
+			entry.key._blinkActive = active;
+			try { entry.invalidate(); } catch { /* noop */ }
+		}
+	}
+}
+
+function _scheduleGlobalBlinkTimer(): void {
+	if (_globalBlinkTimer) return;
+	const intervalMs = getBlinkIntervalMs();
+	if (intervalMs === null || _blinkContexts.size === 0) return;
+	_globalBlinkTimer = setTimeout(() => {
+		_globalBlinkTimer = null;
+		if (_blinkContexts.size === 0 || getBlinkIntervalMs() === null) {
+			updateBlinkActiveStates();
+			return;
+		}
+		_globalBlinkPhase = !_globalBlinkPhase;
+		for (const entry of getBlinkingEntries()) {
+			try { entry.invalidate(); } catch { /* noop */ }
+		}
+		_scheduleGlobalBlinkTimer();
+	}, intervalMs);
 }
 
 function _stopGlobalBlinkTimerIfEmpty(): void {
-	if (_globalBlinkTimer) {
-		clearInterval(_globalBlinkTimer);
+	if (_globalBlinkTimer && (_blinkContexts.size === 0 || getBlinkIntervalMs() === null)) {
+		clearTimeout(_globalBlinkTimer);
 		_globalBlinkTimer = null;
 	}
 }
 
-function setupBlinkTimer(_ctx: any): void {
-	// no-op by design
+function setupBlinkTimer(ctx: any): void {
+	const key = getBlinkKey(ctx);
+	if (!key) return;
+	const invalidate = typeof ctx?.invalidate === "function" ? () => ctx.invalidate() : () => {};
+	const existing = _blinkContexts.get(key);
+	if (!existing) {
+		_blinkContexts.set(key, { key, order: ++_blinkOrder, invalidate });
+		key._blinkActive = false;
+	} else {
+		existing.invalidate = invalidate;
+	}
+	updateBlinkActiveStates();
+	_stopGlobalBlinkTimerIfEmpty();
+	_scheduleGlobalBlinkTimer();
 }
 
-function clearBlinkTimer(_ctx: any): void {
-	// no-op by design
+function clearBlinkTimer(ctx: any): void {
+	const key = getBlinkKey(ctx);
+	if (!key) return;
+	_blinkContexts.delete(key);
+	key._blinkActive = false;
+	updateBlinkActiveStates();
+	_stopGlobalBlinkTimerIfEmpty();
+	_scheduleGlobalBlinkTimer();
 }
 
-function blinkDot(_ctx: any, theme: Theme): string {
-	return theme.fg("muted", "○");
+function blinkDot(ctx: any, theme: Theme): string {
+	setupBlinkTimer(ctx);
+	const key = getBlinkKey(ctx);
+	if (getBlinkIntervalMs() === null) return theme.fg("muted", "○");
+	if (key?._blinkActive !== true) return theme.fg("muted", "○");
+	return _globalBlinkPhase ? theme.fg("success", "●") : theme.fg("muted", "○");
 }
 
 // ---------------------------------------------------------------------------
@@ -3048,13 +3121,22 @@ export default function (pi: ExtensionAPI) {
 
 	// Safety net: clear all blink timers on turn/session boundaries
 	pi.on("turn_end", async () => {
-		_blinkContexts.clear();
-		_stopGlobalBlinkTimerIfEmpty();
-	});
-	pi.on("session_shutdown", async () => {
+		for (const entry of _blinkContexts.values()) {
+			entry.key._blinkActive = false;
+		}
 		_blinkContexts.clear();
 		if (_globalBlinkTimer) {
-			clearInterval(_globalBlinkTimer);
+			clearTimeout(_globalBlinkTimer);
+			_globalBlinkTimer = null;
+		}
+	});
+	pi.on("session_shutdown", async () => {
+		for (const entry of _blinkContexts.values()) {
+			entry.key._blinkActive = false;
+		}
+		_blinkContexts.clear();
+		if (_globalBlinkTimer) {
+			clearTimeout(_globalBlinkTimer);
 			_globalBlinkTimer = null;
 		}
 	});
