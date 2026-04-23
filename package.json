@@ -27,6 +27,9 @@
     "config/config.example.json",
     "README.md"
   ],
+  "scripts": {
+    "bench:tools": "bun scripts/benchmark-tools.ts"
+  },
   "dependencies": {
     "@shikijs/cli": "^4.0.2",
     "diff": "^7.0.0"
