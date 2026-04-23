@@ -23,7 +23,6 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { Box, Container, Markdown, Spacer, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
-import { codeToANSI } from "@shikijs/cli";
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 
@@ -32,7 +31,10 @@ const BORDER_COLOR = "\x1b[38;5;238m";
 const TRANSPARENT_BG = "\x1b[49m";
 const TRANSPARENT_RESET = `${RESET}${TRANSPARENT_BG}`;
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
+const ANSI_PRESENT_RE = /\x1b\[[0-9;]*m/;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
+const TOOL_RENDER_CACHE = Symbol.for("pi-claude-style-tools:tool-render-cache");
+const TOOL_CACHE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-cache-invalidation");
 
 let toolBackgroundMode: "default" | "transparent" | "outlines" = "outlines";
 
@@ -170,10 +172,20 @@ function patchGlobalToolBorders(): void {
 
 	const originalRender = proto.render;
 	proto.render = function patchedContainerRender(width: number): string[] {
+		if (isToolExecutionLike(this)) {
+			const cached = (this as any)[TOOL_RENDER_CACHE];
+			if (cached?.width === width && cached?.mode === toolBackgroundMode) {
+				return cached.lines;
+			}
+		}
+
 		const rendered = originalRender.call(this, width);
 		if (!Array.isArray(rendered) || rendered.length === 0) return rendered;
-		if (toolBackgroundMode === "default") return rendered;
 		if (!isToolExecutionLike(this)) return rendered;
+		if (toolBackgroundMode === "default") {
+			(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: rendered };
+			return rendered;
+		}
 
 		// Strip leading/trailing blank lines for both border and transparent modes
 		let start = 0;
@@ -184,14 +196,18 @@ function patchGlobalToolBorders(): void {
 
 		const core = rendered.slice(start, end + 1).map((line) => clampLineWidth(line, width));
 		const spacerLine = " ".repeat(width);
+		let result: string[];
 
 		if (toolBackgroundMode === "outlines") {
 			const ruleWidth = Math.max(1, width);
-			return [spacerLine, borderLine(ruleWidth), ...core, borderLine(ruleWidth)];
+			result = [spacerLine, borderLine(ruleWidth), ...core, borderLine(ruleWidth)];
+		} else {
+			// transparent: just the core content with top spacer
+			result = [spacerLine, ...core];
 		}
 
-		// transparent: just the core content with top spacer
-		return [spacerLine, ...core];
+		(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: result };
+		return result;
 	};
 
 	proto[PATCH_FLAG] = true;
@@ -223,38 +239,57 @@ function clearStateKeys(state: Record<string, unknown> | undefined, ...keys: str
 	}
 }
 
+function clearToolRenderCache(value: unknown): void {
+	if (!value || typeof value !== "object") return;
+	delete (value as any)[TOOL_RENDER_CACHE];
+}
+
 const ASSISTANT_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-message");
 const TOOL_EXECUTION_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-execution");
 
 class DottedParagraph {
 	private md: InstanceType<typeof Markdown>;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
 
 	constructor(text: string, markdownTheme: ConstructorParameters<typeof Markdown>[3]) {
 		this.md = new Markdown(text, 0, 0, markdownTheme);
 	}
 
 	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
 		this.md.invalidate();
 	}
 
 	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
 		// " ● " = 1 margin + dot + space = 3 visible chars
 		const PREFIX_W = 3;
-		if (width <= PREFIX_W) return [" ● "];
+		if (width <= PREFIX_W) {
+			this.cachedWidth = width;
+			this.cachedLines = [" ● "];
+			return this.cachedLines;
+		}
 		const lines = sanitizeRenderedTextBlockLines(this.md.render(width - PREFIX_W));
 		let dotPlaced = false;
-		return lines.map((line: string) => {
+		const rendered = lines.map((line: string) => {
 			if (!dotPlaced && stripAnsi(line).trim()) {
 				dotPlaced = true;
 				return ` ● ${line}`;
 			}
 			return `   ${line}`;
 		});
+		this.cachedWidth = width;
+		this.cachedLines = rendered;
+		return rendered;
 	}
 }
 
 class ThinkingParagraph {
 	private md: InstanceType<typeof Markdown>;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
 
 	constructor(
 		text: string,
@@ -293,22 +328,32 @@ class ThinkingParagraph {
 	}
 
 	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
 		this.md.invalidate();
 	}
 
 	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
 		// " ✽ " = 1 margin + symbol + space = 3 visible chars
 		const PREFIX_W = 3;
-		if (width <= PREFIX_W) return [" ✽ "];
+		if (width <= PREFIX_W) {
+			this.cachedWidth = width;
+			this.cachedLines = [" ✽ "];
+			return this.cachedLines;
+		}
 		const lines = sanitizeRenderedTextBlockLines(this.md.render(width - PREFIX_W));
 		let symbolPlaced = false;
-		return lines.map((line: string) => {
+		const rendered = lines.map((line: string) => {
 			if (!symbolPlaced && stripAnsi(line).trim()) {
 				symbolPlaced = true;
 				return ` ✽ ${line}`;
 			}
 			return `   ${line}`;
 		});
+		this.cachedWidth = width;
+		this.cachedLines = rendered;
+		return rendered;
 	}
 }
 
@@ -342,6 +387,36 @@ function patchAssistantMessages(): void {
 		}
 	};
 	proto[ASSISTANT_PATCH_FLAG] = true;
+}
+
+function patchToolRenderCacheInvalidation(): void {
+	const proto = ToolExecutionComponent.prototype as any;
+	if (proto[TOOL_CACHE_PATCH_FLAG]) return;
+
+	const methods = [
+		"updateDisplay",
+		"updateArgs",
+		"markExecutionStarted",
+		"setArgsComplete",
+		"updateResult",
+		"setExpanded",
+		"setShowImages",
+		"setImageWidthCells",
+		"invalidate",
+	];
+
+	for (const method of methods) {
+		const original = proto[method];
+		if (typeof original !== "function") continue;
+		proto[method] = function patchedToolMutation(...args: any[]) {
+			clearToolRenderCache(this);
+			const result = original.apply(this, args);
+			clearToolRenderCache(this);
+			return result;
+		};
+	}
+
+	proto[TOOL_CACHE_PATCH_FLAG] = true;
 }
 
 function patchToolExecutionRenderers(): void {
@@ -788,6 +863,7 @@ function hexToFgAnsi(hex: string): string {
 }
 
 let DIFF_THEME: BundledTheme = (process.env.DIFF_THEME as BundledTheme | undefined) ?? "github-dark";
+let codeToAnsiLoader: Promise<any> | null = null;
 
 const SPLIT_MIN_WIDTH = 150;
 const SPLIT_MIN_CODE_WIDTH = 60;
@@ -1260,7 +1336,13 @@ function lang(filePath: string): BundledLanguage | undefined {
 	return EXT_LANG[extname(filePath).slice(1).toLowerCase()];
 }
 
-void codeToANSI("", "typescript", DIFF_THEME).catch(() => {});
+async function codeToAnsiLazy(code: string, language: BundledLanguage, theme: BundledTheme): Promise<string> {
+	if (!codeToAnsiLoader) {
+		codeToAnsiLoader = import("@shikijs/cli").then((mod) => mod.codeToANSI);
+	}
+	const codeToAnsi = await codeToAnsiLoader;
+	return codeToAnsi(code, language, theme);
+}
 
 const hlCache = new Map<string, string[]>();
 
@@ -1286,7 +1368,7 @@ async function hlBlock(code: string, language: BundledLanguage | undefined): Pro
 	const hit = hlCache.get(key);
 	if (hit) return touchCache(key, hit);
 	try {
-		const ansi = normalizeShikiContrast(await codeToANSI(code, language, DIFF_THEME));
+		const ansi = normalizeShikiContrast(await codeToAnsiLazy(code, language, DIFF_THEME));
 		const out = (ansi.endsWith("\n") ? ansi.slice(0, -1) : ansi).split("\n");
 		return touchCache(key, out);
 	} catch {
@@ -1843,7 +1925,8 @@ function renderEditPreviewBody(
 }
 
 function stripThinkingPresentationArtifacts(text: string): string {
-	let current = text.replace(/\x1b\[[0-9;]*m/g, "");
+	if (!ANSI_PRESENT_RE.test(text) && !/^\s*thinking:\s*/i.test(text)) return text;
+	let current = ANSI_PRESENT_RE.test(text) ? text.replace(ANSI_RE, "") : text;
 	while (true) {
 		const next = current.replace(/^(?:thinking:\s*)+/i, "").trimStart();
 		if (next === current) return current;
@@ -1852,6 +1935,9 @@ function stripThinkingPresentationArtifacts(text: string): string {
 }
 
 function prefixThinkingLine(text: string, _theme: Theme | undefined): string {
+	if (!ANSI_PRESENT_RE.test(text) && text.startsWith("Thinking: ") && !/^Thinking:\s*thinking:\s*/i.test(text)) {
+		return text;
+	}
 	const normalized = stripThinkingPresentationArtifacts(text).trim();
 	if (!normalized) return text;
 	// Plain text — no ANSI colors, no theme. The ThinkingParagraph handles styling.
@@ -2619,6 +2705,7 @@ function renderOpenAiToolResult(name: string, result: any, expanded: boolean, is
 // ===========================================================================
 
 export default function (pi: ExtensionAPI) {
+	patchToolRenderCacheInvalidation();
 	patchGlobalToolBorders();
 	patchAssistantMessages();
 	patchToolExecutionRenderers();

@@ -268,6 +268,18 @@ function estimateResponseLength(message: any): number {
 		sum + (block?.type === "text" && typeof block.text === "string" ? block.text.length : 0), 0);
 }
 
+function textBlockLengths(message: any): number[] {
+	if (!Array.isArray(message?.content)) return [];
+	const lengths: number[] = [];
+	for (let i = 0; i < message.content.length; i++) {
+		const block = message.content[i];
+		if (block?.type === "text" && typeof block.text === "string") {
+			lengths[i] = block.text.length;
+		}
+	}
+	return lengths;
+}
+
 function statusText(text: string): string {
 	return `${STATUS_DIM}${text}${RESET}`;
 }
@@ -308,6 +320,7 @@ export default function (pi: ExtensionAPI) {
 	let thoughtStatusTimer: ReturnType<typeof setTimeout> | null = null;
 	let currentVerb = "";
 	let responseLength = 0;
+	let responseTextBlockLengths: number[] = [];
 	let thinkingStatus: "thinking" | number /* duration ms */ | null = null;
 	let thinkingStartTime = 0;
 	let thoughtForSetAt = 0;
@@ -350,6 +363,17 @@ export default function (pi: ExtensionAPI) {
 			message += statusText(` (${statusParts.join(" · ")})`);
 		}
 		return message;
+	}
+
+	function setResponseTextBlockLength(index: number, length: number): void {
+		const previous = responseTextBlockLengths[index] ?? 0;
+		responseTextBlockLengths[index] = Math.max(0, length);
+		responseLength = Math.max(0, responseLength + responseTextBlockLengths[index] - previous);
+	}
+
+	function resetResponseTracking(message?: any): void {
+		responseTextBlockLengths = message ? textBlockLengths(message) : [];
+		responseLength = message ? estimateResponseLength(message) : 0;
 	}
 
 	function syncWorkingMessage(force = false): void {
@@ -438,7 +462,7 @@ export default function (pi: ExtensionAPI) {
 		clearThoughtStatusTimer();
 		thinkingStatus = null;
 		thoughtForSetAt = 0;
-		responseLength = 0;
+		resetResponseTracking();
 		restoreDefaultWorkingMessage();
 	}
 
@@ -461,7 +485,7 @@ export default function (pi: ExtensionAPI) {
 		activeCtx = ctx;
 		turnStartTime = Date.now();
 		currentVerb = pickVerb();
-		responseLength = 0;
+		resetResponseTracking();
 		clearCompletionTimer();
 		if (typeof thinkingStatus !== "number" || Date.now() - thoughtForSetAt >= THOUGHT_DISPLAY_MS) {
 			thinkingStatus = null;
@@ -474,9 +498,23 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_update", async (event, ctx) => {
 		activeCtx = ctx;
-		responseLength = estimateResponseLength(event.message);
 		const evt = event.assistantMessageEvent;
 		let statusChanged = false;
+
+		if (evt.type === "start") {
+			resetResponseTracking();
+		} else if (evt.type === "text_start") {
+			setResponseTextBlockLength(evt.contentIndex, 0);
+		} else if (evt.type === "text_delta") {
+			const previous = responseTextBlockLengths[evt.contentIndex] ?? 0;
+			setResponseTextBlockLength(evt.contentIndex, previous + (typeof evt.delta === "string" ? evt.delta.length : 0));
+		} else if (evt.type === "text_end") {
+			setResponseTextBlockLength(evt.contentIndex, typeof evt.content === "string" ? evt.content.length : 0);
+		} else if (evt.type === "done") {
+			resetResponseTracking(evt.message);
+		} else if (evt.type === "error") {
+			resetResponseTracking(evt.error);
+		}
 
 		if (evt.type === "thinking_start") {
 			clearThoughtStatusTimer();
@@ -523,6 +561,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		responseLength = 0;
+		responseTextBlockLengths = [];
 	});
 
 	pi.on("agent_end", async () => {
