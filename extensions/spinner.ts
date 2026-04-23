@@ -3,9 +3,8 @@ import { Loader } from "@mariozechner/pi-tui";
 
 // ---------------------------------------------------------------------------
 // Patch built-in Loader with Claude/OpenBrawd-style glyphs.
-// Keep animation adaptive: small sessions animate, long sessions slow down,
-// very large sessions stop animating completely to avoid full-screen re-render
-// thrash on every spinner frame.
+// Keep animation cadence constant so the spinner doesn't appear to slow down
+// or freeze as the session grows.
 // ---------------------------------------------------------------------------
 
 const SPINNER_CHARS = ["·", "✢", "✳", "✶", "✻", "✽"];
@@ -14,18 +13,12 @@ const RAW_ANSI_RE = /\x1b\[[0-9;]*m/;
 const RESET = "\x1b[0m";
 const CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
 const STATUS_DIM = "\x1b[38;2;153;153;153m";
-const LOADER_FAST_INTERVAL_MS = 350;
-const LOADER_SLOW_INTERVAL_MS = 900;
-const LOADER_SLOW_THRESHOLD_LINES = 500;
-const LOADER_FREEZE_THRESHOLD_LINES = 1400;
+const LOADER_INTERVAL_MS = 250;
 const LOADER_LAST_TEXT = Symbol.for("pi-claude-style-tools:loader-last-text");
 const ACTIVE_UI_SYMBOL = Symbol.for("pi-claude-style-tools:active-ui");
 
-function getLoaderIntervalMs(loader: any): number | null {
-	const renderedLines = Array.isArray(loader?.ui?.previousLines) ? loader.ui.previousLines.length : 0;
-	if (renderedLines >= LOADER_FREEZE_THRESHOLD_LINES) return null;
-	if (renderedLines >= LOADER_SLOW_THRESHOLD_LINES) return LOADER_SLOW_INTERVAL_MS;
-	return LOADER_FAST_INTERVAL_MS;
+function getLoaderIntervalMs(_loader: any): number {
+	return LOADER_INTERVAL_MS;
 }
 
 (Loader.prototype as any).updateDisplay = function patchedUpdateDisplay() {
@@ -48,10 +41,6 @@ Loader.prototype.start = function patchedStart() {
 	(this as any).updateDisplay();
 	const scheduleNext = () => {
 		const intervalMs = getLoaderIntervalMs(this);
-		if (intervalMs === null) {
-			(this as any).intervalId = null;
-			return;
-		}
 		(this as any).intervalId = setTimeout(() => {
 			(this as any).currentFrame = ((this as any).currentFrame + 1) % OB_FRAMES.length;
 			(this as any).updateDisplay();
@@ -296,9 +285,8 @@ const THOUGHT_DISPLAY_MS = 3_500;
 /** Minimum thinking duration before showing "thought for Ns" */
 const MIN_THINKING_SHOW_MS = 100;
 
-/** Message refresh cadence. Keep slow; Loader already animates. */
+/** Message refresh cadence. Keep constant so status updates don't stall on long sessions. */
 const WORKING_MESSAGE_INTERVAL_MS = 1_000;
-const WORKING_MESSAGE_SLOW_INTERVAL_MS = 3_000;
 
 /** Completion message linger */
 const TURN_COMPLETION_MS = 2_500;
@@ -382,10 +370,7 @@ export default function (pi: ExtensionAPI) {
 		} catch { /* noop */ }
 	}
 
-	function getWorkingMessageIntervalMs(): number | null {
-		const renderedLines = Array.isArray(activeCtx?.ui?.previousLines) ? activeCtx.ui.previousLines.length : 0;
-		if (renderedLines >= LOADER_FREEZE_THRESHOLD_LINES) return null;
-		if (renderedLines >= LOADER_SLOW_THRESHOLD_LINES) return WORKING_MESSAGE_SLOW_INTERVAL_MS;
+	function getWorkingMessageIntervalMs(): number {
 		return WORKING_MESSAGE_INTERVAL_MS;
 	}
 
@@ -394,10 +379,6 @@ export default function (pi: ExtensionAPI) {
 		syncWorkingMessage(true);
 		const scheduleNext = () => {
 			const intervalMs = getWorkingMessageIntervalMs();
-			if (intervalMs === null) {
-				refreshTimer = null;
-				return;
-			}
 			refreshTimer = setTimeout(() => {
 				refreshTimer = null;
 				syncWorkingMessage();

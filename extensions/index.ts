@@ -203,6 +203,26 @@ function summarizeText(text: string, max = 60): string {
 	return `${oneLine.slice(0, Math.max(0, max - 3))}...`;
 }
 
+function hashText(text: string): string {
+	let hash = 2166136261;
+	for (let i = 0; i < text.length; i++) {
+		hash ^= text.charCodeAt(i);
+		hash = Math.imul(hash, 16777619);
+	}
+	return (hash >>> 0).toString(36);
+}
+
+function expandHint(theme: Theme): string {
+	return theme.fg("muted", " • Ctrl+O to expand");
+}
+
+function clearStateKeys(state: Record<string, unknown> | undefined, ...keys: string[]): void {
+	if (!state) return;
+	for (const key of keys) {
+		delete state[key];
+	}
+}
+
 const ASSISTANT_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-message");
 const TOOL_EXECUTION_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-execution");
 
@@ -262,7 +282,7 @@ class ThinkingParagraph {
 			strikethrough: wrap,
 			underline: wrap,
 			// Override code highlighting to return plain lines (no syntax colors)
-			highlightCode: (code: string, _lang?: string) => code.split("\n"),
+			highlightCode: (code: string, _lang?: string) => code.split("\n").map(line => `${DIM_FG}${ITALIC}${line}`),
 		};
 		// Same dim gray italic as the base style for all inline text
 		const plainStyle: ConstructorParameters<typeof Markdown>[4] = {
@@ -423,21 +443,22 @@ function toolStatusDot(ctx: any, theme: Theme): string {
 // Branch connector — visual tree from header to output
 // ---------------------------------------------------------------------------
 
-function branchIndent(text: string): string {
-	return `   ${text}`;
+function branchIndent(text: string, continued = false): string {
+	return continued ? `${FG_RULE}│${TRANSPARENT_RESET}  ${text}` : `   ${text}`;
 }
 
-function branchLead(text: string): string {
-	return `${FG_RULE}└─${TRANSPARENT_RESET} ${text}`;
+function branchLead(text: string, continued = false): string {
+	return `${FG_RULE}${continued ? "├─" : "└─"}${TRANSPARENT_RESET} ${text}`;
 }
 
-function withBranch(content: string, _theme: Theme, _isError = false): string {
+function withBranch(content: string, _theme: Theme, _isError = false, continued = false): string {
 	if (!content || !content.trim()) return "";
-	const lines = content.split("\n");
+	const contentWidth = Math.max(1, termW() - 3);
+	const lines = content.split("\n").map((line) => clampLineWidth(line, contentWidth));
 	const first = lines[0] ?? "";
-	if (lines.length === 1) return branchLead(first);
-	const rest = lines.slice(1).map((line) => branchIndent(line));
-	return `${branchLead(first)}\n${rest.join("\n")}`;
+	if (lines.length === 1) return branchLead(first, continued);
+	const rest = lines.slice(1).map((line) => branchIndent(line, continued));
+	return `${branchLead(first, continued)}\n${rest.join("\n")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -448,12 +469,8 @@ function withBranch(content: string, _theme: Theme, _isError = false): string {
 // Global blink timer — single timer invalidates all active contexts
 // ---------------------------------------------------------------------------
 
-const ACTIVE_UI_SYMBOL = Symbol.for("pi-claude-style-tools:active-ui");
 const MAX_BLINKING_TOOLS = 5;
-const BLINK_INTERVAL_MS = 600;
-const BLINK_SLOW_INTERVAL_MS = 1_100;
-const BLINK_SLOW_THRESHOLD_LINES = 500;
-const BLINK_FREEZE_THRESHOLD_LINES = 1400;
+const BLINK_INTERVAL_MS = 500;
 
 type BlinkEntry = { key: any; order: number; invalidate: () => void };
 
@@ -462,11 +479,7 @@ let _globalBlinkTimer: ReturnType<typeof setTimeout> | null = null;
 let _blinkOrder = 0;
 let _globalBlinkPhase = true;
 
-function getBlinkIntervalMs(): number | null {
-	const ui = (globalThis as any)[ACTIVE_UI_SYMBOL];
-	const renderedLines = Array.isArray(ui?.previousLines) ? ui.previousLines.length : 0;
-	if (renderedLines >= BLINK_FREEZE_THRESHOLD_LINES) return null;
-	if (renderedLines >= BLINK_SLOW_THRESHOLD_LINES) return BLINK_SLOW_INTERVAL_MS;
+function getBlinkIntervalMs(): number {
 	return BLINK_INTERVAL_MS;
 }
 
@@ -481,8 +494,7 @@ function getBlinkingEntries(): BlinkEntry[] {
 }
 
 function updateBlinkActiveStates(): void {
-	const intervalMs = getBlinkIntervalMs();
-	const activeSet = intervalMs === null ? new Set<any>() : new Set(getBlinkingEntries().map((entry) => entry.key));
+	const activeSet = new Set(getBlinkingEntries().map((entry) => entry.key));
 	for (const entry of _blinkContexts.values()) {
 		const active = activeSet.has(entry.key);
 		if (entry.key?._blinkActive !== active) {
@@ -495,10 +507,10 @@ function updateBlinkActiveStates(): void {
 function _scheduleGlobalBlinkTimer(): void {
 	if (_globalBlinkTimer) return;
 	const intervalMs = getBlinkIntervalMs();
-	if (intervalMs === null || _blinkContexts.size === 0) return;
+	if (_blinkContexts.size === 0) return;
 	_globalBlinkTimer = setTimeout(() => {
 		_globalBlinkTimer = null;
-		if (_blinkContexts.size === 0 || getBlinkIntervalMs() === null) {
+		if (_blinkContexts.size === 0) {
 			updateBlinkActiveStates();
 			return;
 		}
@@ -511,7 +523,7 @@ function _scheduleGlobalBlinkTimer(): void {
 }
 
 function _stopGlobalBlinkTimerIfEmpty(): void {
-	if (_globalBlinkTimer && (_blinkContexts.size === 0 || getBlinkIntervalMs() === null)) {
+	if (_globalBlinkTimer && _blinkContexts.size === 0) {
 		clearTimeout(_globalBlinkTimer);
 		_globalBlinkTimer = null;
 	}
@@ -522,12 +534,13 @@ function setupBlinkTimer(ctx: any): void {
 	if (!key) return;
 	const invalidate = typeof ctx?.invalidate === "function" ? () => ctx.invalidate() : () => {};
 	const existing = _blinkContexts.get(key);
-	if (!existing) {
-		_blinkContexts.set(key, { key, order: ++_blinkOrder, invalidate });
-		key._blinkActive = false;
-	} else {
+	if (existing) {
+		// Already tracked — just refresh the invalidate fn, skip expensive recalc
 		existing.invalidate = invalidate;
+		return;
 	}
+	_blinkContexts.set(key, { key, order: ++_blinkOrder, invalidate });
+	key._blinkActive = false;
 	updateBlinkActiveStates();
 	_stopGlobalBlinkTimerIfEmpty();
 	_scheduleGlobalBlinkTimer();
@@ -546,7 +559,6 @@ function clearBlinkTimer(ctx: any): void {
 function blinkDot(ctx: any, theme: Theme): string {
 	setupBlinkTimer(ctx);
 	const key = getBlinkKey(ctx);
-	if (getBlinkIntervalMs() === null) return theme.fg("muted", "○");
 	if (key?._blinkActive !== true) return theme.fg("muted", "○");
 	return _globalBlinkPhase ? theme.fg("success", "●") : theme.fg("muted", "○");
 }
@@ -625,7 +637,7 @@ function lineCount(text: string): number {
 
 function makeText(last: unknown, text: string): Text {
 	const component = last instanceof Text ? last : new Text("", 0, 0);
-	component.setText(text);
+	if ((component as any).text !== text) component.setText(text);
 	return component;
 }
 
@@ -785,8 +797,8 @@ const MAX_TERM_WIDTH = 210;
 const DEFAULT_TERM_WIDTH = 200;
 const MAX_PREVIEW_LINES = 60;
 const MAX_RENDER_LINES = 150;
-const MAX_HL_CHARS = 80_000;
-const CACHE_LIMIT = 192;
+const MAX_HL_CHARS = 32_000;
+const CACHE_LIMIT = 48;
 const WORD_DIFF_MIN_SIM = 0.15;
 const MAX_WRAP_ROWS_WIDE = 3;
 const MAX_WRAP_ROWS_MED = 2;
@@ -993,7 +1005,7 @@ function termW(): number {
 		(process.stderr as any).columns ||
 		Number.parseInt(process.env.COLUMNS ?? "", 10) ||
 		DEFAULT_TERM_WIDTH;
-	return Math.max(80, Math.min(raw - 4, MAX_TERM_WIDTH));
+	return Math.max(40, Math.min(raw - 4, MAX_TERM_WIDTH));
 }
 
 function adaptiveWrapRows(tw?: number): number {
@@ -1252,6 +1264,10 @@ void codeToANSI("", "typescript", DIFF_THEME).catch(() => {});
 
 const hlCache = new Map<string, string[]>();
 
+function clearHighlightCache(): void {
+	hlCache.clear();
+}
+
 function touchCache(key: string, value: string[]): string[] {
 	hlCache.delete(key);
 	hlCache.set(key, value);
@@ -1390,10 +1406,11 @@ async function renderUnified(
 	language: BundledLanguage | undefined,
 	max = MAX_RENDER_LINES,
 	dc: DiffColors = DEFAULT_DIFF_COLORS,
+	width = termW(),
 ): Promise<string> {
 	if (!diff.lines.length) return "";
 	const vis = diff.lines.slice(0, max);
-	const tw = termW();
+	const tw = width;
 	const nw = Math.max(2, String(Math.max(...vis.map((l) => l.oldNum ?? l.newNum ?? 0), 0)).length);
 	const gw = nw + 5;
 	const cw = Math.max(20, tw - gw);
@@ -1487,9 +1504,10 @@ async function renderSplit(
 	language: BundledLanguage | undefined,
 	max = MAX_PREVIEW_LINES,
 	dc: DiffColors = DEFAULT_DIFF_COLORS,
+	width = termW(),
 ): Promise<string> {
-	const tw = termW();
-	if (!shouldUseSplit(diff, tw, max)) return renderUnified(diff, language, max, dc);
+	const tw = width;
+	if (!shouldUseSplit(diff, tw, max)) return renderUnified(diff, language, max, dc, width);
 	if (!diff.lines.length) return "";
 
 	type Row = { left: DiffLine | null; right: DiffLine | null };
@@ -1775,18 +1793,21 @@ function renderEditPreviewBody(
 	summary: string,
 ): void {
 	const dc = resolveDiffColors(theme);
+	const branchWidth = Math.max(40, termW() - 3);
 	if (operations.length === 1) {
 		const [diff] = diffs;
 		const line = lines[0] ?? getFirstChangedNewLine(diff);
-		renderSplit(diff, language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc)
+		renderSplit(diff, language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, branchWidth)
 			.then((rendered) => {
 				if (ctx.state._pk !== key) return;
 				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}\n${rendered}`;
+				ctx.state._ptDisplay = withBranch(ctx.state._ptBody, theme, false, true);
 				ctx.invalidate();
 			})
 			.catch(() => {
 				if (ctx.state._pk !== key) return;
 				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}`;
+				ctx.state._ptDisplay = withBranch(ctx.state._ptBody, theme, false, true);
 				ctx.invalidate();
 			});
 		return;
@@ -1798,7 +1819,7 @@ function renderEditPreviewBody(
 	Promise.all(
 		diffs.slice(0, maxShown).map((diff, index) => {
 			const line = lines[index] ?? getFirstChangedNewLine(diff);
-			return renderSplit(diff, language, previewLines, dc)
+			return renderSplit(diff, language, previewLines, dc, branchWidth)
 				.then((rendered) => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)}\n${rendered}`)
 				.catch(() => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)} ${summarizeDiff(diff.added, diff.removed)}`);
 		}),
@@ -1810,11 +1831,13 @@ function renderEditPreviewBody(
 				? `\n${theme.fg("muted", `… ${remainder} more edit blocks${ctx.expanded ? "" : " • Ctrl+O to expand"}`)}`
 				: "";
 			ctx.state._ptBody = `${operations.length} edits ${summary}\n\n${sections.join("\n\n")}${suffix}`;
+			ctx.state._ptDisplay = withBranch(ctx.state._ptBody, theme, false, true);
 			ctx.invalidate();
 		})
 		.catch(() => {
 			if (ctx.state._pk !== key) return;
 			ctx.state._ptBody = `${operations.length} edits ${summary}`;
+			ctx.state._ptDisplay = withBranch(ctx.state._ptBody, theme, false, true);
 			ctx.invalidate();
 		});
 }
@@ -1976,6 +1999,43 @@ interface ApplyPatchPreview {
 	totalHunks: number;
 	totalLines: number;
 	summary: string;
+}
+
+interface ApplyPatchResultMeta {
+	changeCount: number;
+	totalAdded: number;
+	totalRemoved: number;
+	totalHunks: number;
+	totalLines: number;
+	firstChange?: {
+		displayPath: string;
+		kind: ApplyPatchChangePreview["kind"];
+		hunks: number;
+		line: number;
+		added: number;
+		removed: number;
+	};
+}
+
+function buildApplyPatchResultMeta(preview: ApplyPatchPreview): ApplyPatchResultMeta {
+	const firstChange = preview.changes[0];
+	return {
+		changeCount: preview.changes.length,
+		totalAdded: preview.totalAdded,
+		totalRemoved: preview.totalRemoved,
+		totalHunks: preview.totalHunks,
+		totalLines: preview.totalLines,
+		firstChange: firstChange
+			? {
+				displayPath: firstChange.displayPath,
+				kind: firstChange.kind,
+				hunks: firstChange.hunks,
+				line: firstChange.line,
+				added: firstChange.diff.added,
+				removed: firstChange.diff.removed,
+			}
+			: undefined,
+	};
 }
 
 function countDiffHunks(diff: ParsedDiff): number {
@@ -2218,32 +2278,58 @@ function formatApplyPatchLine(change: ApplyPatchChangePreview, theme: Theme): st
 	return formatLineMeta(change.line, theme);
 }
 
+function getApplyPatchResultMeta(args: any, ctx: any, sp: (path: string) => string): ApplyPatchResultMeta | null {
+	const patchText = getStringArg(args ?? ctx?.args, "patchText", "patch_text");
+	if (!patchText) return null;
+	const key = `apply-meta:${ctx.cwd ?? process.cwd()}:${hashText(patchText)}`;
+	if (ctx.state?._applyPatchMetaKey === key && ctx.state._applyPatchMeta) {
+		return ctx.state._applyPatchMeta as ApplyPatchResultMeta;
+	}
+	try {
+		const meta = buildApplyPatchResultMeta(parseApplyPatchPreview(patchText, sp, ctx.cwd ?? process.cwd()));
+		if (ctx.state) {
+			ctx.state._applyPatchMetaKey = key;
+			ctx.state._applyPatchMeta = meta;
+		}
+		return meta;
+	} catch {
+		return null;
+	}
+}
+
 function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: string) => string): Text {
 	syncToolCallStatus(ctx);
 	const patchText = getStringArg(args, "patchText", "patch_text");
-	const preview = parseApplyPatchPreview(patchText, sp, ctx.cwd ?? process.cwd());
-	ctx.state._openAiPatchFiles = preview.changes.map((change) => change.displayPath);
-	ctx.state._applyPatchPreview = preview;
+	const files = extractApplyPatchFiles(patchText);
+	ctx.state._openAiPatchFiles = files.map((filePath) => sp(filePath));
 	const hdr = toolHeader("Apply Patch", summarizeOpenAiToolCall("apply_patch", args, theme, sp), theme, toolStatusDot(ctx, theme));
 
-	if (!(ctx.argsComplete && preview.changes.length > 0)) return makeText(ctx.lastComponent, hdr);
+	if (!(ctx.argsComplete && files.length > 0)) return makeText(ctx.lastComponent, hdr);
 
-	const key = JSON.stringify({ patchText, expanded: ctx.expanded });
+	const preview = parseApplyPatchPreview(patchText, sp, ctx.cwd ?? process.cwd());
+	ctx.state._openAiPatchFiles = preview.changes.map((change) => change.displayPath);
+	ctx.state._applyPatchMeta = buildApplyPatchResultMeta(preview);
+	ctx.state._applyPatchMetaKey = `apply-meta:${ctx.cwd ?? process.cwd()}:${hashText(patchText)}`;
+
+	const key = `apply-preview:${hashText(patchText)}:${ctx.expanded ? 1 : 0}`;
 	if (ctx.state._applyPatchPreviewKey !== key) {
 		ctx.state._applyPatchPreviewKey = key;
 		ctx.state._applyPatchPreviewBody = theme.fg("muted", "(rendering…)");
+		ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
 		const dc = resolveDiffColors(theme);
 		if (preview.changes.length === 1) {
 			const [change] = preview.changes;
-			renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc)
+			renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, Math.max(40, termW() - 3))
 				.then((rendered) => {
 					if (ctx.state._applyPatchPreviewKey !== key) return;
 					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`;
+					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
 					ctx.invalidate();
 				})
 				.catch(() => {
 					if (ctx.state._applyPatchPreviewKey !== key) return;
 					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`;
+					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
 					ctx.invalidate();
 				});
 		} else {
@@ -2253,7 +2339,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 				: Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
 			Promise.all(
 				preview.changes.slice(0, maxShown).map((change, index) =>
-					renderSplit(change.diff, change.language, previewLines, dc)
+					renderSplit(change.diff, change.language, previewLines, dc, Math.max(40, termW() - 3))
 						.then((rendered) => `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`)
 						.catch(() => `${index + 1}. ${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`),
 				),
@@ -2266,24 +2352,26 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 						: "";
 					const summary = `${preview.changes.length} files ${preview.summary}`;
 					ctx.state._applyPatchPreviewBody = `${summary}\n\n${sections.join("\n\n")}${suffix}`;
+					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
 					ctx.invalidate();
 				})
 				.catch(() => {
 					if (ctx.state._applyPatchPreviewKey !== key) return;
 					ctx.state._applyPatchPreviewBody = `${preview.changes.length} files ${preview.summary}`;
+					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
 					ctx.invalidate();
 				});
 		}
 	}
 
-	const body = ctx.state._applyPatchPreviewBody as string | undefined;
+	const body = ctx.state._applyPatchPreviewDisplay as string | undefined;
 	return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 }
 
 function renderApplyPatchResult(result: any, isPartial: boolean, theme: Theme, ctx: any): Text {
 	if (isPartial) {
 		setupBlinkTimer(ctx);
-		return makeText(ctx.lastComponent, theme.fg("dim", "Applying Patch..."));
+		return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Applying Patch..."), theme));
 	}
 	clearBlinkTimer(ctx);
 	setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2294,19 +2382,19 @@ function renderApplyPatchResult(result: any, isPartial: boolean, theme: Theme, c
 		return makeText(ctx.lastComponent, withBranch(theme.fg("error", firstLine), theme));
 	}
 
-	const preview = ctx.state?._applyPatchPreview as ApplyPatchPreview | undefined;
-	if (!preview || preview.changes.length === 0) {
+	const meta = getApplyPatchResultMeta(ctx.args, ctx, (path: string) => shortPath(ctx.cwd ?? process.cwd(), path));
+	if (!meta || meta.changeCount === 0) {
 		return makeText(ctx.lastComponent, withBranch(theme.fg("success", "Applied"), theme));
 	}
 
-	if (preview.changes.length === 1) {
-		const [change] = preview.changes;
-		const summary = diffSummaryWithMeta(change.diff.added, change.diff.removed, change.hunks, change.kind === "add" ? "new file" : change.kind === "delete" ? "delete" : "");
-		return makeText(ctx.lastComponent, withBranch(`${theme.fg("success", "Applied")} ${theme.fg("muted", change.displayPath)} ${summary}${formatApplyPatchLine(change, theme)}`, theme));
+	if (meta.changeCount === 1 && meta.firstChange) {
+		const change = meta.firstChange;
+		const summary = diffSummaryWithMeta(change.added, change.removed, change.hunks, change.kind === "add" ? "new file" : change.kind === "delete" ? "delete" : "");
+		return makeText(ctx.lastComponent, withBranch(`${theme.fg("success", "Applied")} ${theme.fg("muted", change.displayPath)} ${summary}${formatLineMeta(change.line, theme)}`, theme));
 	}
 
-	const summary = diffSummaryWithMeta(preview.totalAdded, preview.totalRemoved, preview.totalHunks, "");
-	return makeText(ctx.lastComponent, withBranch(`${theme.fg("success", "Applied")} ${preview.changes.length} files ${summary}${preview.totalLines ? ` ${theme.fg("muted", `(${preview.totalLines} diff lines)`)}` : ""}`, theme));
+	const summary = diffSummaryWithMeta(meta.totalAdded, meta.totalRemoved, meta.totalHunks, "");
+	return makeText(ctx.lastComponent, withBranch(`${theme.fg("success", "Applied")} ${meta.changeCount} files ${summary}${meta.totalLines ? ` ${theme.fg("muted", `(${meta.totalLines} diff lines)`)}` : ""}`, theme));
 }
 
 function summarizeOpenAiToolCall(name: string, args: any, theme: Theme, sp: (path: string) => string): string {
@@ -2490,7 +2578,7 @@ function renderTaskListResult(lines: string[], expanded: boolean, theme: Theme, 
 function renderOpenAiToolResult(name: string, result: any, expanded: boolean, isPartial: boolean, theme: Theme, ctx: any): Text {
 	if (isPartial) {
 		setupBlinkTimer(ctx);
-		return makeText(ctx.lastComponent, theme.fg("dim", `${humanizeToolName(name)}...`));
+		return makeText(ctx.lastComponent, withBranch(theme.fg("dim", `${humanizeToolName(name)}...`), theme));
 	}
 	clearBlinkTimer(ctx);
 	setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2609,7 +2697,7 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
 				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, theme.fg("dim", "Reading..."));
+				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Reading..."), theme));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2646,7 +2734,7 @@ export default function (pi: ExtensionAPI) {
 			const nonEmpty = output.split("\n").filter((line) => line.trim().length > 0);
 			if (isPartial) {
 				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, theme.fg("warning", `Running... (${nonEmpty.length} lines)`));
+				return makeText(ctx.lastComponent, withBranch(theme.fg("warning", `Running... (${nonEmpty.length} lines)`), theme));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2681,7 +2769,7 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
 				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, theme.fg("dim", "Searching..."));
+				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Searching..."), theme));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2716,7 +2804,7 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
 				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, theme.fg("dim", "Finding..."));
+				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Finding..."), theme));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2760,7 +2848,7 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
 				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, theme.fg("dim", "Listing..."));
+				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Listing..."), theme));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2812,7 +2900,7 @@ export default function (pi: ExtensionAPI) {
 				const diff = parseDiff(old, content);
 				(result as any).details = { _type: "diff", summary: summarizeDiff(diff.added, diff.removed), diff, language: lang(fp) };
 			} else if (old === null) {
-				(result as any).details = { _type: "new", lines: lineCount(content), content, filePath: fp };
+				(result as any).details = { _type: "new", lines: lineCount(content), filePath: fp };
 			} else if (old === content) {
 				(result as any).details = { _type: "noChange" };
 			}
@@ -2825,10 +2913,11 @@ export default function (pi: ExtensionAPI) {
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader(label, `${sp(fp)} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}`, theme, toolStatusDot(ctx, theme));
 			if (args?.content && ctx.argsComplete && isNew) {
-				const previewKey = `create:${fp}:${String(args.content).length}:${ctx.expanded}`;
+				const previewKey = `create:${fp}:${hashText(String(args.content))}:${ctx.expanded ? 1 : 0}`;
 				if (ctx.state._previewKey !== previewKey) {
 					ctx.state._previewKey = previewKey;
-					ctx.state._previewBody = "";
+					ctx.state._previewBody = theme.fg("muted", "(rendering…)");
+					ctx.state._previewDisplay = withBranch(ctx.state._previewBody, theme, false, true);
 					const lg = lang(fp);
 					hlBlock(args.content, lg)
 						.then((lines) => {
@@ -2836,13 +2925,14 @@ export default function (pi: ExtensionAPI) {
 							const maxShow = ctx.expanded ? lines.length : 16;
 							let out = theme.fg("success", `${lines.length} lines`);
 							for (const line of lines.slice(0, maxShow)) out += `\n${line}`;
-							if (lines.length > maxShow) out += `\n${theme.fg("muted", `… ${lines.length - maxShow} more lines`)}`;
+							if (lines.length > maxShow) out += `\n${theme.fg("muted", `… ${lines.length - maxShow} more lines`)}${ctx.expanded ? "" : expandHint(theme)}`;
 							ctx.state._previewBody = out;
+							ctx.state._previewDisplay = withBranch(ctx.state._previewBody, theme, false, true);
 							ctx.invalidate();
 						})
 						.catch(() => {});
 				}
-				const body = ctx.state._previewBody as string | undefined;
+				const body = ctx.state._previewDisplay as string | undefined;
 				return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 			}
 			return makeText(ctx.lastComponent, hdr);
@@ -2850,7 +2940,7 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { isPartial }, theme, ctx) {
 			if (isPartial) {
 				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, theme.fg("dim", "Writing..."));
+				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Writing..."), theme));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2860,19 +2950,20 @@ export default function (pi: ExtensionAPI) {
 						?.filter((c: any) => c.type === "text")
 						.map((c: any) => c.text || "")
 						.join("\n") ?? "Error";
-				return makeText(ctx.lastComponent, theme.fg("error", e));
+				return makeText(ctx.lastComponent, withBranch(theme.fg("error", e), theme));
 			}
 			const d = (result as any).details;
 			if (d?._type === "diff") {
+				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
 				const hunks = d.diff?.lines?.filter((l: any) => l.type === "sep").length + (d.diff?.lines?.length ? 1 : 0);
-				const mode = shouldUseSplit(d.diff, termW(), ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit()) ? "split" : "unified";
+				const mode = shouldUseSplit(d.diff, termW(), previewLines) ? "split" : "unified";
 				const richSummary = diffSummaryWithMeta(d.diff.added, d.diff.removed, hunks, mode);
-				const key = `wd:${termW()}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}:${ctx.expanded}`;
+				const key = `wd:${termW()}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}:${ctx.expanded ? 1 : 0}`;
 				if (ctx.state._wdk !== key) {
 					ctx.state._wdk = key;
 					ctx.state._wdt = withBranch(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
 					const dc = resolveDiffColors(theme);
-					renderSplit(d.diff, d.language, ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit(), dc)
+					renderSplit(d.diff, d.language, previewLines, dc, Math.max(40, termW() - 3))
 						.then((rendered) => {
 							if (ctx.state._wdk !== key) return;
 							ctx.state._wdt = withBranch(`${richSummary}\n${rendered}`, theme);
@@ -2888,16 +2979,17 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (d?._type === "noChange") return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "✓ no changes"), theme));
 			if (d?._type === "new") {
-				// New file: render as all-green diff (every line is +)
-				const syntheticDiff = parseDiff("", d.content);
-				const hunks = 1;
-				const richSummary = diffSummaryWithMeta(syntheticDiff.added, 0, hunks, "new file");
-				const pk = `nf:${d.filePath}:${d.lines}:${ctx.expanded}:${termW()}`;
+				const content = typeof ctx.args?.content === "string" ? ctx.args.content : "";
+				const lineTotal = typeof d.lines === "number" ? d.lines : lineCount(content);
+				const syntheticDiff = parseDiff("", content);
+				const richSummary = diffSummaryWithMeta(syntheticDiff.added, 0, 1, "new file");
+				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
+				const pk = `nf:${d.filePath}:${hashText(content)}:${termW()}:${ctx.expanded ? 1 : 0}`;
 				if (ctx.state._nfk !== pk) {
 					ctx.state._nfk = pk;
 					ctx.state._nft = withBranch(`${theme.fg("success", `✓ new file`)} ${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
 					const dc = resolveDiffColors(theme);
-					renderSplit(syntheticDiff, lang(d.filePath), ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit(), dc)
+					renderSplit(syntheticDiff, lang(d.filePath), previewLines, dc, Math.max(40, termW() - 3))
 						.then((rendered) => {
 							if (ctx.state._nfk !== pk) return;
 							ctx.state._nft = withBranch(`${theme.fg("success", `✓ new file`)} ${richSummary}\n${rendered}`, theme);
@@ -2909,7 +3001,7 @@ export default function (pi: ExtensionAPI) {
 							ctx.invalidate();
 						});
 				}
-				return makeText(ctx.lastComponent, ctx.state._nft ?? withBranch(`${theme.fg("success", `✓ new file (${d.lines} lines)`)}`, theme));
+				return makeText(ctx.lastComponent, ctx.state._nft ?? withBranch(`${theme.fg("success", `✓ new file (${lineTotal} lines)`)}`, theme));
 			}
 			return makeText(ctx.lastComponent, withBranch(theme.fg("success", "Written"), theme));
 		},
@@ -2924,7 +3016,7 @@ export default function (pi: ExtensionAPI) {
 		async execute(toolCallId, params, signal, onUpdate, _ctx) {
 			const fp = params.path ?? (params as any).file_path ?? "";
 			const operations = getEditOperations(params);
-			const localizedDiffs = await computeLocalizedEditDiffs(fp, operations, cwd);
+			const localizedDiffs = operations.length === 1 ? await computeLocalizedEditDiffs(fp, operations, cwd) : null;
 			const result = await editTool.execute(toolCallId, params, signal, onUpdate);
 			if (operations.length === 0) return result;
 			const { diffs, summary, totalLines, totalHunks } = summarizeEditOperations(operations);
@@ -2964,10 +3056,11 @@ export default function (pi: ExtensionAPI) {
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader("Edit", summary, theme, toolStatusDot(ctx, theme));
 			if (!(ctx.argsComplete && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
-			const key = JSON.stringify({ fp, operations, expanded: ctx.expanded });
+			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${ctx.expanded ? 1 : 0}`;
 			if (ctx.state._pk !== key) {
 				ctx.state._pk = key;
 				ctx.state._ptBody = theme.fg("muted", "(rendering…)");
+				ctx.state._ptDisplay = withBranch(ctx.state._ptBody, theme, false, true);
 				const lg = lang(fp);
 				void computeLocalizedEditDiffs(fp, operations, cwd)
 					.then((localizedDiffs) => {
@@ -2981,13 +3074,13 @@ export default function (pi: ExtensionAPI) {
 						renderEditPreviewBody(ctx, key, theme, lg, operations, fallbackDiffs, fallbackDiffs.map((diff) => getFirstChangedNewLine(diff)), editSummary);
 					});
 			}
-			const body = ctx.state._ptBody as string | undefined;
+			const body = ctx.state._ptDisplay as string | undefined;
 			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 		},
 		renderResult(result, { isPartial }, theme, ctx) {
 			if (isPartial) {
 				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, theme.fg("dim", "Editing..."));
+				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Editing..."), theme));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2997,7 +3090,7 @@ export default function (pi: ExtensionAPI) {
 						?.filter((c: any) => c.type === "text")
 						.map((c: any) => c.text || "")
 						.join("\n") ?? "Error";
-				return makeText(ctx.lastComponent, theme.fg("error", e));
+				return makeText(ctx.lastComponent, withBranch(theme.fg("error", e), theme));
 			}
 			if ((result as any).details?._type === "editInfo") {
 				const { editLine, hunks, added, removed } = (result as any).details;
@@ -3095,7 +3188,7 @@ export default function (pi: ExtensionAPI) {
 					return makeText(ctx.lastComponent, `${theme.fg("toolTitle", theme.bold("MCP"))} ${theme.fg("accent", target)}`);
 				},
 				renderResult(result: any, { expanded, isPartial }: any, theme: Theme, ctx: any) {
-					if (isPartial) return makeText(ctx.lastComponent, theme.fg("dim", "running..."));
+					if (isPartial) return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "running..."), theme));
 					const mode = getMode(readSettings().mcpOutputMode, ["hidden", "summary", "preview"] as const, "preview");
 					if (mode === "hidden") return makeText(ctx.lastComponent, "");
 					const raw = result.content?.filter((c: any) => c.type === "text").map((c: any) => c.text || "").join("\n") ?? "";
@@ -3125,6 +3218,7 @@ export default function (pi: ExtensionAPI) {
 			entry.key._blinkActive = false;
 		}
 		_blinkContexts.clear();
+		clearHighlightCache();
 		if (_globalBlinkTimer) {
 			clearTimeout(_globalBlinkTimer);
 			_globalBlinkTimer = null;
@@ -3135,6 +3229,7 @@ export default function (pi: ExtensionAPI) {
 			entry.key._blinkActive = false;
 		}
 		_blinkContexts.clear();
+		clearHighlightCache();
 		if (_globalBlinkTimer) {
 			clearTimeout(_globalBlinkTimer);
 			_globalBlinkTimer = null;
