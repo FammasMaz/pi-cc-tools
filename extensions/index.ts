@@ -966,7 +966,10 @@ function applyDiffPalette(): void {
 
 	DIVIDER = `${FG_RULE}│${D_RST}`;
 	DEFAULT_DIFF_COLORS = { fgAdd: FG_ADD, fgDel: FG_DEL, fgCtx: FG_DIM };
-	autoDerivePending = true;
+	// Only trigger auto-derive when the user did NOT supply an explicit
+	// preset or per-color override; otherwise we would overwrite their config
+	// with the hardcoded dark palette on first render.
+	autoDerivePending = !hasExplicitBgConfig;
 }
 
 function resolveDiffColors(theme?: any): DiffColors {
