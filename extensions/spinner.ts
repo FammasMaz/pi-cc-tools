@@ -303,15 +303,6 @@ const WORKING_MESSAGE_INTERVAL_MS = 1_000;
 /** Completion message linger */
 const TURN_COMPLETION_MS = 2_500;
 
-/** Past-tense verbs for turn completion messages */
-const TURN_COMPLETION_VERBS = [
-	"Baked", "Brewed", "Churned", "Cogitated", "Cooked",
-	"Crunched", "Sautéed", "Worked",
-];
-
-function pickCompletionVerb(): string {
-	return TURN_COMPLETION_VERBS[Math.floor(Math.random() * TURN_COMPLETION_VERBS.length)];
-}
 
 export default function (pi: ExtensionAPI) {
 	let turnStartTime = 0;
@@ -546,7 +537,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (activeCtx?.hasUI && elapsed >= 1000) {
-			const message = `${STATUS_DIM}✱ ${pickCompletionVerb()} for ${formatDuration(elapsed)}${RESET}`;
+			const message = `${STATUS_DIM}✻ Worked for ${formatDuration(elapsed)}${RESET}`;
 			lastWorkingMessage = message;
 			try {
 				activeCtx.ui.setWorkingMessage(message);

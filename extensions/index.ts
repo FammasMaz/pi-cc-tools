@@ -246,6 +246,40 @@ function clearToolRenderCache(value: unknown): void {
 
 const ASSISTANT_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-message");
 const TOOL_EXECUTION_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-execution");
+const WORKED_DURATION_KEY = "_piClaudeStyleWorkedDurationMs";
+const WORKED_START_KEY = "_piClaudeStyleWorkedStartMs";
+const WORKED_LINE_FG = "\x1b[38;2;140;140;140m";
+let currentAssistantMessageStartMs: number | undefined;
+
+function formatWorkedDuration(ms: number): string {
+	const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
+	if (safeMs < 60_000) {
+		return `${Math.max(0, Math.floor(safeMs / 1000))}s`;
+	}
+	let days = Math.floor(safeMs / 86_400_000);
+	let hours = Math.floor((safeMs % 86_400_000) / 3_600_000);
+	let minutes = Math.floor((safeMs % 3_600_000) / 60_000);
+	let seconds = Math.round((safeMs % 60_000) / 1000);
+	if (seconds === 60) {
+		seconds = 0;
+		minutes++;
+	}
+	if (minutes === 60) {
+		minutes = 0;
+		hours++;
+	}
+	if (hours === 24) {
+		hours = 0;
+		days++;
+	}
+	if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+	return `${minutes}m ${seconds}s`;
+}
+
+function workedDurationText(ms: number): string {
+	return `${WORKED_LINE_FG}✻ Worked for ${formatWorkedDuration(ms)}${RESET}`;
+}
 
 class DottedParagraph {
 	private md: InstanceType<typeof Markdown>;
@@ -384,6 +418,12 @@ function patchAssistantMessages(): void {
 					container.children[i] = new DottedParagraph(text, mdTheme);
 				}
 			}
+		}
+		const workedDuration = (message as any)[WORKED_DURATION_KEY];
+		const hasAssistantText = message.content.some((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim());
+		if (typeof workedDuration === "number" && hasAssistantText) {
+			const insertAt = container.children[0] instanceof Spacer ? 1 : 0;
+			container.children.splice(insertAt, 0, new Text(workedDurationText(workedDuration), 1, 0), new Spacer(1));
 		}
 	};
 	proto[ASSISTANT_PATCH_FLAG] = true;
@@ -1957,8 +1997,25 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			}
 		}
 	};
+	pi.on("message_start", async (event: any) => {
+		const message = event?.message;
+		if (message?.role === "assistant") {
+			currentAssistantMessageStartMs = Date.now();
+			(message as any)[WORKED_START_KEY] = currentAssistantMessageStartMs;
+		}
+	});
 	pi.on("message_update", async (event, ctx) => patchMessage(event, ctx.ui?.theme));
-	pi.on("message_end", async (event, ctx) => patchMessage(event, ctx.ui?.theme));
+	pi.on("message_end", async (event, ctx) => {
+		const message = (event as any)?.message;
+		if (message?.role === "assistant") {
+			const started = typeof (message as any)[WORKED_START_KEY] === "number" ? (message as any)[WORKED_START_KEY] : currentAssistantMessageStartMs;
+			if (started !== undefined) {
+				(message as any)[WORKED_DURATION_KEY] = Date.now() - started;
+			}
+			currentAssistantMessageStartMs = undefined;
+		}
+		patchMessage(event, ctx.ui?.theme);
+	});
 	pi.on("context", async (event) => {
 		if (!Array.isArray((event as any).messages)) return;
 		for (const msg of (event as any).messages) {
