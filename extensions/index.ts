@@ -281,6 +281,36 @@ function workedDurationText(ms: number): string {
 	return `${WORKED_LINE_FG}✻ Worked for ${formatWorkedDuration(ms)}${RESET}`;
 }
 
+function inlineWorkedDurationText(ms: number): string {
+	return `${WORKED_LINE_FG}✻ Worked for ${formatWorkedDuration(ms)}${RESET}`;
+}
+
+function isWorkedDurationLine(line: string): boolean {
+	return /^✻ Worked for [^\r\n]+$/.test(stripAnsi(line).trim());
+}
+
+function stripWorkedDurationLine(text: string): string {
+	return text
+		.split(/\r?\n/)
+		.filter((line) => !isWorkedDurationLine(line))
+		.join("\n")
+		.replace(/\n{3,}/g, "\n\n");
+}
+
+function hasWorkedDurationLine(message: any): boolean {
+	return Array.isArray(message?.content) && message.content.some((block: any) => (
+		block?.type === "text" && typeof block.text === "string" && block.text.split(/\r?\n/).some(isWorkedDurationLine)
+	));
+}
+
+function appendWorkedDurationLine(message: any, durationMs: number): void {
+	if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return;
+	const textBlocks = message.content.filter((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim());
+	const lastText = textBlocks[textBlocks.length - 1];
+	if (!lastText) return;
+	lastText.text = `${stripWorkedDurationLine(lastText.text).trimEnd()}\n\n${inlineWorkedDurationText(durationMs)}`;
+}
+
 class DottedParagraph {
 	private md: InstanceType<typeof Markdown>;
 	private cachedWidth?: number;
@@ -396,6 +426,9 @@ function patchAssistantMessages(): void {
 	if (proto[ASSISTANT_PATCH_FLAG]) return;
 	const originalUpdateContent = proto.updateContent;
 	proto.updateContent = function patchedUpdateContent(message: any) {
+		if (!(this as any)[WORKED_START_KEY]) {
+			(this as any)[WORKED_START_KEY] = Date.now();
+		}
 		if (!message || !Array.isArray(message.content)) {
 			return originalUpdateContent.call(this, message);
 		}
@@ -419,11 +452,17 @@ function patchAssistantMessages(): void {
 				}
 			}
 		}
-		const workedDuration = (message as any)[WORKED_DURATION_KEY];
+		const explicitDuration = (message as any)[WORKED_DURATION_KEY];
+		const componentStart = (this as any)[WORKED_START_KEY];
+		const isFinished = typeof message.stopReason === "string" && message.stopReason.length > 0;
+		const workedDuration = typeof explicitDuration === "number"
+			? explicitDuration
+			: isFinished && typeof componentStart === "number"
+				? Date.now() - componentStart
+				: undefined;
 		const hasAssistantText = message.content.some((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim());
-		if (typeof workedDuration === "number" && hasAssistantText) {
-			const insertAt = container.children[0] instanceof Spacer ? 1 : 0;
-			container.children.splice(insertAt, 0, new Text(workedDurationText(workedDuration), 1, 0), new Spacer(1));
+		if (typeof workedDuration === "number" && hasAssistantText && !hasWorkedDurationLine(message)) {
+			container.children.push(new Spacer(1), new Text(workedDurationText(workedDuration), 1, 0));
 		}
 	};
 	proto[ASSISTANT_PATCH_FLAG] = true;
@@ -2010,7 +2049,13 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		if (message?.role === "assistant") {
 			const started = typeof (message as any)[WORKED_START_KEY] === "number" ? (message as any)[WORKED_START_KEY] : currentAssistantMessageStartMs;
 			if (started !== undefined) {
-				(message as any)[WORKED_DURATION_KEY] = Date.now() - started;
+				const durationMs = Date.now() - started;
+				(message as any)[WORKED_DURATION_KEY] = durationMs;
+				// Mutate the message itself before pi renders/persists it. This is more
+				// reliable than the spinner because pi removes the loader on agent_end,
+				// and more reliable than component monkey-patching when extensions are
+				// loaded from a different package instance than the running TUI.
+				appendWorkedDurationLine(message, durationMs);
 			}
 			currentAssistantMessageStartMs = undefined;
 		}
@@ -2023,6 +2068,9 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			for (const block of msg.content) {
 				if (block && block.type === "thinking" && typeof block.thinking === "string") {
 					block.thinking = stripThinkingPresentationArtifacts(block.thinking);
+				}
+				if (block && block.type === "text" && typeof block.text === "string") {
+					block.text = stripWorkedDurationLine(block.text);
 				}
 			}
 		}

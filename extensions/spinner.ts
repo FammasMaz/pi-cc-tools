@@ -536,7 +536,7 @@ export default function (pi: ExtensionAPI) {
 			clearThoughtStatusTimer();
 		}
 
-		if (activeCtx?.hasUI && elapsed >= 1000) {
+		if (activeCtx?.hasUI) {
 			const message = `${STATUS_DIM}✻ Worked for ${formatDuration(elapsed)}${RESET}`;
 			lastWorkingMessage = message;
 			try {
@@ -557,6 +557,10 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_end", async () => {
 		turnActive = false;
+		// Preserve the just-finished "Worked for …" line. Pi emits agent_end
+		// immediately after the final turn, so clearing here made the completion
+		// status disappear before users could see it.
+		if (completionTimer) return;
 		clearDisplay();
 	});
 

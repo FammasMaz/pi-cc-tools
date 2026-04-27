@@ -1,6 +1,6 @@
 {
   "name": "pi-claude-style-tools",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "Claude Code-style tool rows for pi (bash, read, grep, find, ls, edit, write) with Shiki-powered diff rendering",
   "keywords": [
     "pi-package",
