@@ -305,6 +305,7 @@ const TURN_COMPLETION_MS = 2_500;
 
 
 export default function (pi: ExtensionAPI) {
+	let agentStartTime = 0;
 	let turnStartTime = 0;
 	let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 	let completionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -331,7 +332,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function buildWorkingMessage(): string {
-		const elapsed = Date.now() - turnStartTime;
+		const elapsed = Date.now() - (agentStartTime || turnStartTime);
 		const tokenCount = Math.max(0, Math.round(responseLength / 4));
 		const statusParts: string[] = [];
 
@@ -451,6 +452,8 @@ export default function (pi: ExtensionAPI) {
 		stopRefreshLoop();
 		clearCompletionTimer();
 		clearThoughtStatusTimer();
+		agentStartTime = 0;
+		turnStartTime = 0;
 		thinkingStatus = null;
 		thoughtForSetAt = 0;
 		resetResponseTracking();
@@ -470,11 +473,22 @@ export default function (pi: ExtensionAPI) {
 		scheduleThoughtStatusClear();
 	}
 
+	pi.on("before_agent_start", async () => {
+		// Start once per top-level request. Steering/follow-up messages while the
+		// agent is active must not reset the timer.
+		if (!agentStartTime) agentStartTime = Date.now();
+	});
+
+	pi.on("agent_start", async () => {
+		if (!agentStartTime) agentStartTime = Date.now();
+	});
+
 	pi.on("turn_start", async (_event, ctx) => {
 		activeTurnId++;
 		turnActive = true;
 		activeCtx = ctx;
 		turnStartTime = Date.now();
+		if (!agentStartTime) agentStartTime = turnStartTime;
 		currentVerb = pickVerb();
 		resetResponseTracking();
 		clearCompletionTimer();
@@ -527,7 +541,7 @@ export default function (pi: ExtensionAPI) {
 		turnActive = false;
 		activeCtx = ctx;
 		const turnId = activeTurnId;
-		const elapsed = Date.now() - turnStartTime;
+		const elapsed = Date.now() - (agentStartTime || turnStartTime);
 		stopRefreshLoop();
 		clearCompletionTimer();
 
@@ -557,6 +571,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_end", async () => {
 		turnActive = false;
+		agentStartTime = 0;
 		// Preserve the just-finished "Worked for …" line. Pi emits agent_end
 		// immediately after the final turn, so clearing here made the completion
 		// status disappear before users could see it.

@@ -248,7 +248,9 @@ const ASSISTANT_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant
 const TOOL_EXECUTION_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-execution");
 const WORKED_DURATION_KEY = "_piClaudeStyleWorkedDurationMs";
 const WORKED_START_KEY = "_piClaudeStyleWorkedStartMs";
+const WORKED_DURATION_MARKER = "Worked for";
 const WORKED_LINE_FG = "\x1b[38;2;140;140;140m";
+let currentAgentWorkStartMs: number | undefined;
 let currentAssistantMessageStartMs: number | undefined;
 
 function formatWorkedDuration(ms: number): string {
@@ -286,10 +288,11 @@ function inlineWorkedDurationText(ms: number): string {
 }
 
 function isWorkedDurationLine(line: string): boolean {
-	return /^✻ Worked for [^\r\n]+$/.test(stripAnsi(line).trim());
+	return line.includes(WORKED_DURATION_MARKER) && /^✻ Worked for [^\r\n]+$/.test(stripAnsi(line).trim());
 }
 
 function stripWorkedDurationLine(text: string): string {
+	if (!text.includes(WORKED_DURATION_MARKER)) return text;
 	return text
 		.split(/\r?\n/)
 		.filter((line) => !isWorkedDurationLine(line))
@@ -298,9 +301,11 @@ function stripWorkedDurationLine(text: string): string {
 }
 
 function hasWorkedDurationLine(message: any): boolean {
-	return Array.isArray(message?.content) && message.content.some((block: any) => (
-		block?.type === "text" && typeof block.text === "string" && block.text.split(/\r?\n/).some(isWorkedDurationLine)
-	));
+	if (!Array.isArray(message?.content)) return false;
+	return message.content.some((block: any) => {
+		if (block?.type !== "text" || typeof block.text !== "string" || !block.text.includes(WORKED_DURATION_MARKER)) return false;
+		return block.text.split(/\r?\n/).some(isWorkedDurationLine);
+	});
 }
 
 function appendWorkedDurationLine(message: any, durationMs: number): void {
@@ -308,7 +313,8 @@ function appendWorkedDurationLine(message: any, durationMs: number): void {
 	const textBlocks = message.content.filter((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim());
 	const lastText = textBlocks[textBlocks.length - 1];
 	if (!lastText) return;
-	lastText.text = `${stripWorkedDurationLine(lastText.text).trimEnd()}\n\n${inlineWorkedDurationText(durationMs)}`;
+	const text = lastText.text.includes(WORKED_DURATION_MARKER) ? stripWorkedDurationLine(lastText.text) : lastText.text;
+	lastText.text = `${text.trimEnd()}\n\n${inlineWorkedDurationText(durationMs)}`;
 }
 
 class DottedParagraph {
@@ -455,13 +461,15 @@ function patchAssistantMessages(): void {
 		const explicitDuration = (message as any)[WORKED_DURATION_KEY];
 		const componentStart = (this as any)[WORKED_START_KEY];
 		const isFinished = typeof message.stopReason === "string" && message.stopReason.length > 0;
+		const isFinalAssistantMessage = isFinished && message.stopReason !== "toolUse";
+		const fallbackStart = typeof currentAgentWorkStartMs === "number" ? currentAgentWorkStartMs : componentStart;
 		const workedDuration = typeof explicitDuration === "number"
 			? explicitDuration
-			: isFinished && typeof componentStart === "number"
-				? Date.now() - componentStart
+			: isFinalAssistantMessage && typeof fallbackStart === "number"
+				? Date.now() - fallbackStart
 				: undefined;
 		const hasAssistantText = message.content.some((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim());
-		if (typeof workedDuration === "number" && hasAssistantText && !hasWorkedDurationLine(message)) {
+		if (typeof workedDuration === "number" && isFinalAssistantMessage && hasAssistantText && !hasWorkedDurationLine(message)) {
 			container.children.push(new Spacer(1), new Text(workedDurationText(workedDuration), 1, 0));
 		}
 	};
@@ -2036,8 +2044,26 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			}
 		}
 	};
+	pi.on("before_agent_start", async () => {
+		// Start once per top-level request. Steering/follow-up messages can be
+		// injected while the agent is already active; those must not reset the
+		// request timer.
+		if (currentAgentWorkStartMs === undefined) {
+			currentAgentWorkStartMs = Date.now();
+		}
+		currentAssistantMessageStartMs = undefined;
+	});
+	pi.on("agent_start", async () => {
+		if (currentAgentWorkStartMs === undefined) {
+			currentAgentWorkStartMs = Date.now();
+		}
+		currentAssistantMessageStartMs = undefined;
+	});
 	pi.on("message_start", async (event: any) => {
 		const message = event?.message;
+		if (message?.role === "user" && currentAgentWorkStartMs === undefined) {
+			currentAgentWorkStartMs = Date.now();
+		}
 		if (message?.role === "assistant") {
 			currentAssistantMessageStartMs = Date.now();
 			(message as any)[WORKED_START_KEY] = currentAssistantMessageStartMs;
@@ -2047,8 +2073,13 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 	pi.on("message_end", async (event, ctx) => {
 		const message = (event as any)?.message;
 		if (message?.role === "assistant") {
-			const started = typeof (message as any)[WORKED_START_KEY] === "number" ? (message as any)[WORKED_START_KEY] : currentAssistantMessageStartMs;
-			if (started !== undefined) {
+			const started = typeof currentAgentWorkStartMs === "number"
+				? currentAgentWorkStartMs
+				: typeof (message as any)[WORKED_START_KEY] === "number"
+					? (message as any)[WORKED_START_KEY]
+					: currentAssistantMessageStartMs;
+			const isFinalAssistantMessage = message.stopReason !== "toolUse";
+			if (started !== undefined && isFinalAssistantMessage) {
 				const durationMs = Date.now() - started;
 				(message as any)[WORKED_DURATION_KEY] = durationMs;
 				// Mutate the message itself before pi renders/persists it. This is more
@@ -2060,6 +2091,10 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			currentAssistantMessageStartMs = undefined;
 		}
 		patchMessage(event, ctx.ui?.theme);
+	});
+	pi.on("agent_end", async () => {
+		currentAgentWorkStartMs = undefined;
+		currentAssistantMessageStartMs = undefined;
 	});
 	pi.on("context", async (event) => {
 		if (!Array.isArray((event as any).messages)) return;
