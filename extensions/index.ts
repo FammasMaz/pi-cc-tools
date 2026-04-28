@@ -38,11 +38,23 @@ const TOOL_CACHE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-cac
 
 let toolBackgroundMode: "default" | "transparent" | "outlines" = "outlines";
 
+type CustomToolOutputMode = "hidden" | "summary" | "preview";
+
+interface CustomToolRenderRule {
+	name?: string;
+	prefix?: string;
+	title?: string;
+	summaryArgs?: string[];
+	summaryArg?: string;
+	outputMode?: CustomToolOutputMode;
+}
+
 interface SettingsFile {
 	toolBackground?: "default" | "transparent" | "outlines" | "border";
 	readOutputMode?: "hidden" | "summary" | "preview";
 	searchOutputMode?: "hidden" | "count" | "preview";
 	mcpOutputMode?: "hidden" | "summary" | "preview";
+	customToolRenderers?: CustomToolRenderRule[];
 	previewLines?: number;
 	expandedPreviewMaxLines?: number;
 	bashOutputMode?: "opencode" | "summary" | "preview";
@@ -78,6 +90,41 @@ function readSettings(): SettingsFile {
 	const empty: SettingsFile = {};
 	_settingsCache = { value: empty, timestamp: now };
 	return empty;
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function normalizeCustomToolRenderRule(value: unknown): CustomToolRenderRule | null {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+	const record = value as Record<string, unknown>;
+	const name = asNonEmptyString(record.name);
+	const prefix = asNonEmptyString(record.prefix);
+	if ((name ? 1 : 0) + (prefix ? 1 : 0) !== 1) return null;
+
+	const title = asNonEmptyString(record.title);
+	const summaryArgs = Array.isArray(record.summaryArgs)
+		? record.summaryArgs.map(asNonEmptyString).filter((arg): arg is string => arg !== undefined)
+		: [];
+	const legacySummaryArg = asNonEmptyString(record.summaryArg);
+	if (summaryArgs.length === 0 && legacySummaryArg) summaryArgs.push(legacySummaryArg);
+	const outputMode = getMode(record.outputMode, ["hidden", "summary", "preview"] as const, "preview");
+	return {
+		...(name ? { name } : {}),
+		...(prefix ? { prefix } : {}),
+		...(title ? { title } : {}),
+		...(summaryArgs.length > 0 ? { summaryArgs } : {}),
+		outputMode,
+	};
+}
+
+function customToolRenderRules(): CustomToolRenderRule[] {
+	const rules = readSettings().customToolRenderers;
+	if (!Array.isArray(rules)) return [];
+	return rules
+		.map(normalizeCustomToolRenderRule)
+		.filter((rule): rule is CustomToolRenderRule => rule !== null);
 }
 
 function writeSettingsKey(key: string, value: unknown): void {
@@ -512,6 +559,15 @@ function patchToolExecutionRenderers(): void {
 
 	const originalGetCallRenderer = proto.getCallRenderer;
 	const originalGetResultRenderer = proto.getResultRenderer;
+	const originalHasRendererDefinition = proto.hasRendererDefinition;
+
+	if (typeof originalHasRendererDefinition === "function") {
+		proto.hasRendererDefinition = function patchedHasRendererDefinition() {
+			if (originalHasRendererDefinition.call(this)) return true;
+			const toolName = typeof this?.toolName === "string" ? this.toolName : "";
+			return findCustomToolRenderRule(toolName) !== undefined;
+		};
+	}
 
 	proto.getCallRenderer = function patchedGetCallRenderer() {
 		const toolName = typeof this?.toolName === "string" ? this.toolName : "";
@@ -534,7 +590,13 @@ function patchToolExecutionRenderers(): void {
 				);
 			};
 		}
-		return originalGetCallRenderer.call(this);
+		const originalRenderer = originalGetCallRenderer.call(this);
+		if (originalRenderer) return originalRenderer;
+		const customRule = findCustomToolRenderRule(toolName);
+		if (customRule) {
+			return (args: any, theme: Theme, ctx: any) => renderCustomToolCall(customRule, toolName, args, theme, ctx);
+		}
+		return originalRenderer;
 	};
 
 	proto.getResultRenderer = function patchedGetResultRenderer() {
@@ -554,7 +616,14 @@ function patchToolExecutionRenderers(): void {
 					ctx,
 				);
 		}
-		return originalGetResultRenderer.call(this);
+		const originalRenderer = originalGetResultRenderer.call(this);
+		if (originalRenderer) return originalRenderer;
+		const customRule = findCustomToolRenderRule(toolName);
+		if (customRule) {
+			return (result: any, options: any, theme: Theme, ctx: any) =>
+				renderCustomToolResult(customRule, toolName, result, options.expanded, options.isPartial, theme, ctx);
+		}
+		return originalRenderer;
 	};
 
 	proto[TOOL_EXECUTION_PATCH_FLAG] = true;
@@ -2166,6 +2235,27 @@ function isOpenAiToolCandidate(tool: unknown): boolean {
 	return OPENAI_STYLE_TOOL_NAMES.has(name);
 }
 
+function isReservedToolName(toolName: string): boolean {
+	return !toolName || toolName === "mcp" || CORE_TOOL_OVERRIDES.has(toolName) || OPENAI_STYLE_TOOL_NAMES.has(toolName);
+}
+
+function customRuleMatchesToolName(rule: CustomToolRenderRule, toolName: string): boolean {
+	if (rule.name) return rule.name === toolName;
+	return !!rule.prefix && toolName.startsWith(rule.prefix);
+}
+
+function findCustomToolRenderRule(toolName: string): CustomToolRenderRule | undefined {
+	if (isReservedToolName(toolName)) return undefined;
+	let bestPrefixRule: CustomToolRenderRule | undefined;
+	for (const rule of customToolRenderRules()) {
+		if (rule.name && rule.name === toolName) return rule;
+		if (rule.prefix && toolName.startsWith(rule.prefix) && rule.prefix.length > (bestPrefixRule?.prefix?.length ?? -1)) {
+			bestPrefixRule = rule;
+		}
+	}
+	return bestPrefixRule;
+}
+
 function humanizeToolName(name: string): string {
 	return name
 		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -2197,6 +2287,292 @@ function getStringArrayArg(args: any, ...keys: string[]): string[] {
 		if (items.length > 0) return items;
 	}
 	return [];
+}
+
+function getArgPathValue(args: any, path: string): unknown {
+	let value: unknown = args;
+	for (const segment of path.split(".")) {
+		if (!segment || value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+		value = (value as Record<string, unknown>)[segment];
+	}
+	return value;
+}
+
+function summarizeArgValue(value: unknown): string {
+	if (typeof value === "string") return value.trim();
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	if (Array.isArray(value)) {
+		const items = value
+			.map((item) => summarizeArgValue(item))
+			.filter((item) => item.length > 0);
+		return items.join(", ");
+	}
+	if (value && typeof value === "object") {
+		try {
+			return JSON.stringify(value);
+		} catch {
+			return "";
+		}
+	}
+	return "";
+}
+
+function customToolTitle(rule: CustomToolRenderRule, toolName: string): string {
+	return rule.title || humanizeToolName(toolName);
+}
+
+function summarizeCustomToolCall(rule: CustomToolRenderRule, toolName: string, args: any, theme: Theme): string {
+	for (const summaryArg of rule.summaryArgs ?? []) {
+		const summary = summarizeArgValue(getArgPathValue(args, summaryArg));
+		if (summary) return summarizeText(summary, 72);
+	}
+	const fallback = getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt");
+	return fallback ? summarizeText(fallback, 72) : theme.fg("muted", "custom tool");
+}
+
+function renderCustomToolCall(rule: CustomToolRenderRule, toolName: string, args: any, theme: Theme, ctx: any): Text {
+	syncToolCallStatus(ctx);
+	return makeText(
+		ctx.lastComponent,
+		toolHeader(
+			customToolTitle(rule, toolName),
+			summarizeCustomToolCall(rule, toolName, args, theme),
+			theme,
+			toolStatusDot(ctx, theme),
+		),
+	);
+}
+
+function renderCustomToolResult(
+	rule: CustomToolRenderRule,
+	toolName: string,
+	result: any,
+	expanded: boolean,
+	isPartial: boolean,
+	theme: Theme,
+	ctx: any,
+): Text {
+	if (isPartial) {
+		setupBlinkTimer(ctx);
+		return makeText(ctx.lastComponent, withBranch(theme.fg("dim", `${customToolTitle(rule, toolName)}...`), theme));
+	}
+	clearBlinkTimer(ctx);
+	setToolStatus(ctx, ctx.isError ? "error" : "success");
+
+	const mode = getMode(rule.outputMode, ["hidden", "summary", "preview"] as const, "preview");
+	if (mode === "hidden") return makeText(ctx.lastComponent, "");
+
+	const raw = getTextContent(result).trim();
+	const lines = raw ? raw.split("\n") : [];
+	if (lines.length === 0) {
+		return makeText(ctx.lastComponent, withBranch(theme.fg(ctx.isError ? "error" : "success", ctx.isError ? "Failed" : "Done"), theme));
+	}
+
+	const statusText = ctx.isError
+		? theme.fg("error", lines[0])
+		: theme.fg("muted", `${lines.length} line${lines.length === 1 ? "" : "s"} returned`);
+	if (mode === "summary") return makeText(ctx.lastComponent, withBranch(statusText, theme));
+
+	if (!expanded) {
+		if (lines.length === 1) {
+			return makeText(ctx.lastComponent, withBranch(theme.fg(ctx.isError ? "error" : "muted", lines[0]), theme));
+		}
+		return makeText(ctx.lastComponent, withBranch(`${statusText}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+	}
+
+	const preview = buildPreviewText(lines.map((line) => theme.fg(ctx.isError ? "error" : "dim", line || " ")), true, theme, previewLimit());
+	return makeText(ctx.lastComponent, withBranch(`${statusText}\n${preview}`, theme));
+}
+
+const SUMMARY_ARG_PRIORITY = [
+	"query",
+	"input.query",
+	"request.query",
+	"path",
+	"file_path",
+	"input.path",
+	"input.file_path",
+	"request.path",
+	"url",
+	"input.url",
+	"request.url",
+	"name",
+	"title",
+	"subject",
+	"prompt",
+	"description",
+	"environment",
+	"server",
+	"tool",
+	"id",
+];
+
+interface ToolInfoLike {
+	name?: string;
+	description?: string;
+	parameters?: unknown;
+}
+
+function selectorKey(rule: CustomToolRenderRule): string {
+	return rule.name ? `name:${rule.name}` : `prefix:${rule.prefix ?? ""}`;
+}
+
+function ruleTarget(rule: CustomToolRenderRule): string {
+	return rule.name ?? rule.prefix ?? "";
+}
+
+function settingsRule(rule: CustomToolRenderRule): CustomToolRenderRule {
+	return {
+		...(rule.name ? { name: rule.name } : {}),
+		...(rule.prefix ? { prefix: rule.prefix } : {}),
+		...(rule.title ? { title: rule.title } : {}),
+		...((rule.summaryArgs?.length ?? 0) > 0 ? { summaryArgs: rule.summaryArgs } : {}),
+		outputMode: getMode(rule.outputMode, ["hidden", "summary", "preview"] as const, "preview"),
+	};
+}
+
+function formatCustomRule(rule: CustomToolRenderRule): string {
+	const target = rule.name ?? rule.prefix ?? "";
+	const title = rule.title ?? humanizeToolName(target);
+	const args = rule.summaryArgs?.length ? rule.summaryArgs.join(", ") : "";
+	const mode = rule.outputMode ?? "preview";
+	return `${target} -> ${title}, summaryArgs=[${args}], outputMode=${mode}`;
+}
+
+function diffCustomToolRules(before: CustomToolRenderRule[], after: CustomToolRenderRule[]): string {
+	const beforeMap = new Map(before.map((rule) => [selectorKey(rule), rule]));
+	const afterMap = new Map(after.map((rule) => [selectorKey(rule), rule]));
+	const lines: string[] = [];
+	for (const [key, rule] of afterMap) {
+		const previous = beforeMap.get(key);
+		if (!previous) {
+			lines.push(`+ ${formatCustomRule(rule)}`);
+			continue;
+		}
+		const prevText = formatCustomRule(previous);
+		const nextText = formatCustomRule(rule);
+		if (prevText !== nextText) lines.push(`~ ${prevText} => ${nextText}`);
+	}
+	for (const [key, rule] of beforeMap) {
+		if (!afterMap.has(key)) lines.push(`- ${formatCustomRule(rule)}`);
+	}
+	return lines.join("\n") || "No custom tool renderer changes.";
+}
+
+function collectSchemaArgPaths(schema: unknown, prefix = "", depth = 0): string[] {
+	if (!schema || typeof schema !== "object" || Array.isArray(schema) || depth > 2) return [];
+	const record = schema as Record<string, unknown>;
+	const properties = record.properties;
+	if (!properties || typeof properties !== "object" || Array.isArray(properties)) return [];
+	const paths: string[] = [];
+	for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+		const path = prefix ? `${prefix}.${key}` : key;
+		paths.push(path);
+		if (value && typeof value === "object" && !Array.isArray(value)) {
+			const child = value as Record<string, unknown>;
+			if (child.type === "object" || child.properties) {
+				paths.push(...collectSchemaArgPaths(child, path, depth + 1));
+			}
+		}
+	}
+	return paths;
+}
+
+function summaryArgScore(path: string): number {
+	const exact = SUMMARY_ARG_PRIORITY.indexOf(path);
+	if (exact !== -1) return exact;
+	const last = path.split(".").pop() ?? path;
+	const lastExact = SUMMARY_ARG_PRIORITY.indexOf(last);
+	if (lastExact !== -1) return lastExact + 100;
+	if (/query|search/i.test(path)) return 300;
+	if (/path|file/i.test(path)) return 320;
+	if (/url|uri|link/i.test(path)) return 340;
+	if (/name|title|subject/i.test(path)) return 360;
+	if (/prompt|description/i.test(path)) return 380;
+	if (/id$/i.test(path)) return 420;
+	return 900;
+}
+
+function inferSummaryArgs(tools: ToolInfoLike[]): string[] {
+	const seen = new Set<string>();
+	for (const tool of tools) {
+		for (const path of collectSchemaArgPaths(tool.parameters)) {
+			seen.add(path);
+		}
+	}
+	return [...seen]
+		.sort((a, b) => summaryArgScore(a) - summaryArgScore(b) || a.length - b.length || a.localeCompare(b))
+		.slice(0, 5);
+}
+
+function inferToolPrefix(name: string): string | null {
+	const match = name.match(/^([A-Za-z][A-Za-z0-9]*[_.-])/);
+	return match ? match[1] : null;
+}
+
+function getCustomToolInfos(pi: ExtensionAPI): ToolInfoLike[] {
+	let allTools: unknown[] = [];
+	try {
+		allTools = typeof (pi as any).getAllTools === "function" ? (pi as any).getAllTools() : [];
+	} catch {
+		allTools = [];
+	}
+	return allTools
+		.map((tool) => tool as ToolInfoLike)
+		.filter((tool) => typeof tool.name === "string" && !isReservedToolName(tool.name) && !isMcpToolCandidate(tool));
+}
+
+function suggestCustomToolRules(pi: ExtensionAPI, existingRules = customToolRenderRules()): CustomToolRenderRule[] {
+	const existingMatchers = existingRules.map(settingsRule);
+	const uncoveredTools = getCustomToolInfos(pi).filter((tool) =>
+		typeof tool.name === "string" && !existingMatchers.some((rule) => customRuleMatchesToolName(rule, tool.name!)));
+	const byPrefix = new Map<string, ToolInfoLike[]>();
+	const singles: ToolInfoLike[] = [];
+	for (const tool of uncoveredTools) {
+		const prefix = inferToolPrefix(tool.name ?? "");
+		if (!prefix) {
+			singles.push(tool);
+			continue;
+		}
+		const group = byPrefix.get(prefix) ?? [];
+		group.push(tool);
+		byPrefix.set(prefix, group);
+	}
+
+	const suggestions: CustomToolRenderRule[] = [];
+	for (const [prefix, tools] of [...byPrefix].sort((a, b) => a[0].localeCompare(b[0]))) {
+		if (tools.length < 2) {
+			singles.push(...tools);
+			continue;
+		}
+		suggestions.push(settingsRule({
+			prefix,
+			title: humanizeToolName(prefix.replace(/[_.-]+$/, "")),
+			summaryArgs: inferSummaryArgs(tools),
+			outputMode: "summary",
+		}));
+	}
+	for (const tool of singles.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""))) {
+		const name = tool.name ?? "";
+		suggestions.push(settingsRule({
+			name,
+			title: humanizeToolName(name),
+			summaryArgs: inferSummaryArgs([tool]),
+			outputMode: "preview",
+		}));
+	}
+	return suggestions;
+}
+
+function mergeCustomToolRules(existingRules: CustomToolRenderRule[], additions: CustomToolRenderRule[]): CustomToolRenderRule[] {
+	const result = existingRules.map(settingsRule);
+	const existingKeys = new Set(result.map(selectorKey));
+	for (const rule of additions.map(settingsRule)) {
+		if (existingKeys.has(selectorKey(rule))) continue;
+		result.push(rule);
+		existingKeys.add(selectorKey(rule));
+	}
+	return result;
 }
 
 function extractApplyPatchFiles(patchText: string): string[] {
@@ -2847,6 +3223,71 @@ function renderOpenAiToolResult(name: string, result: any, expanded: boolean, is
 // Extension
 // ===========================================================================
 
+function parseSummaryArgsInput(value: string): string[] {
+	return value
+		.split(",")
+		.map((part) => part.trim())
+		.filter((part) => part.length > 0);
+}
+
+async function notifyOrConfirmCustomToolChanges(
+	ctx: any,
+	title: string,
+	diff: string,
+): Promise<boolean> {
+	if (!ctx.hasUI) return false;
+	return await ctx.ui.confirm(title, diff);
+}
+
+function cloneCustomToolRule(rule: CustomToolRenderRule): CustomToolRenderRule {
+	return {
+		...(rule.name ? { name: rule.name } : {}),
+		...(rule.prefix ? { prefix: rule.prefix } : {}),
+		...(rule.title ? { title: rule.title } : {}),
+		...((rule.summaryArgs?.length ?? 0) > 0 ? { summaryArgs: [...(rule.summaryArgs ?? [])] } : {}),
+		outputMode: rule.outputMode,
+	};
+}
+
+async function editCustomToolRule(ctx: any, rule: CustomToolRenderRule): Promise<CustomToolRenderRule | null> {
+	const edited = cloneCustomToolRule(rule);
+	const target = ruleTarget(edited);
+	const currentTitle = edited.title ?? humanizeToolName(target);
+	const titleChoice = await ctx.ui.select(`Display title: ${target}`, [
+		`Keep title: ${currentTitle}`,
+		"Custom title",
+		"Cancel",
+	]);
+	if (!titleChoice || titleChoice === "Cancel") return null;
+	if (titleChoice === "Custom title") {
+		const title = await ctx.ui.input("Display title", currentTitle);
+		if (typeof title === "string" && title.trim()) edited.title = title.trim();
+	}
+
+	const currentArgs = (edited.summaryArgs ?? []).join(", ");
+	const argsChoice = await ctx.ui.select(`Summary args: ${target}`, [
+		`Keep summaryArgs: ${currentArgs || "(none)"}`,
+		"Edit summaryArgs",
+		"Cancel",
+	]);
+	if (!argsChoice || argsChoice === "Cancel") return null;
+	if (argsChoice === "Edit summaryArgs") {
+		const argsText = await ctx.ui.editor("Summary args (comma separated)", currentArgs);
+		if (typeof argsText === "string") edited.summaryArgs = parseSummaryArgsInput(argsText);
+	}
+
+	const currentMode = edited.outputMode ?? "preview";
+	const modeChoice = await ctx.ui.select("Output mode", [
+		`Keep outputMode: ${currentMode}`,
+		"summary",
+		"preview",
+		"hidden",
+	]);
+	if (!modeChoice) return null;
+	if (modeChoice === "summary" || modeChoice === "preview" || modeChoice === "hidden") edited.outputMode = modeChoice;
+	return settingsRule(edited);
+}
+
 export default function (pi: ExtensionAPI) {
 	patchToolRenderCacheInvalidation();
 	patchGlobalToolBorders();
@@ -2857,22 +3298,208 @@ export default function (pi: ExtensionAPI) {
 
 	// /cc-tools command — toggle tool border style at runtime
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
+	const CC_TOOLS_COMPLETIONS = [
+		...TOOL_MODES.map((mode) => ({
+			value: mode,
+			label: mode,
+			description:
+				mode === "outlines" ? "Horizontal rules around each tool (default)"
+				: mode === "transparent" ? "No borders or backgrounds"
+				: "Pi built-in tool backgrounds",
+		})),
+		{ value: "custom", label: "custom", description: "Configure custom tool renderers" },
+		{ value: "custom dry-run", label: "custom dry-run", description: "Preview suggested custom renderer rules" },
+		{ value: "custom edit", label: "custom edit", description: "Edit configured custom renderer rules" },
+		{ value: "custom list", label: "custom list", description: "Show configured custom renderer rules" },
+		{ value: "custom clear", label: "custom clear", description: "Remove custom renderer rules" },
+	];
+
+	const handleCustomToolsCommand = async (rawArgs: string, ctx: any): Promise<void> => {
+		if (!ctx.hasUI) return;
+		const parts = rawArgs.trim().split(/\s+/).filter(Boolean);
+		const subcommand = parts[1]?.toLowerCase() ?? "";
+		const isDryRun = parts.includes("--dry-run") || subcommand === "dry-run";
+		const existingRules = customToolRenderRules().map(settingsRule);
+
+		if (subcommand === "list") {
+			const text = existingRules.length > 0
+				? existingRules.map((rule) => formatCustomRule(rule)).join("\n")
+				: "No custom tool renderer rules configured.";
+			ctx.ui.notify(text, "info");
+			return;
+		}
+
+		if (subcommand === "clear") {
+			if (existingRules.length === 0) {
+				ctx.ui.notify("No custom tool renderer rules configured.", "info");
+				return;
+			}
+			const confirmed = await notifyOrConfirmCustomToolChanges(
+				ctx,
+				"Clear custom tool renderers?",
+				diffCustomToolRules(existingRules, []),
+			);
+			if (!confirmed) return;
+			writeSettingsKey("customToolRenderers", []);
+			ctx.ui.notify("Custom tool renderer rules cleared.", "info");
+			return;
+		}
+
+		if (subcommand === "edit") {
+			if (existingRules.length === 0) {
+				ctx.ui.notify("No custom tool renderer rules configured.", "info");
+				return;
+			}
+			let rules = existingRules;
+			while (true) {
+				const options = [
+					...rules.map((rule, index) => `${index + 1}. ${formatCustomRule(rule)}`),
+					"Add suggested rules",
+					"Cancel",
+				];
+				const selected = await ctx.ui.select("Edit custom tool renderers", options);
+				if (!selected || selected === "Cancel") return;
+				if (selected === "Add suggested rules") {
+					const suggestions = suggestCustomToolRules(pi, rules);
+					if (suggestions.length === 0) {
+						ctx.ui.notify("No new custom tools found for renderer suggestions.", "info");
+						continue;
+					}
+					const nextRules = mergeCustomToolRules(rules, suggestions);
+					const diff = diffCustomToolRules(rules, nextRules);
+					const confirmed = await notifyOrConfirmCustomToolChanges(ctx, "Apply custom tool renderer changes?", diff);
+					if (!confirmed) continue;
+					writeSettingsKey("customToolRenderers", nextRules);
+					rules = nextRules;
+					ctx.ui.notify("Custom tool renderer rules updated.", "info");
+					continue;
+				}
+
+				const index = Number.parseInt(selected, 10) - 1;
+				if (!Number.isInteger(index) || index < 0 || index >= rules.length) continue;
+				const rule = rules[index];
+				const action = await ctx.ui.select(`Edit ${ruleTarget(rule)}`, [
+					"Edit rule",
+					"Delete rule",
+					"Back",
+				]);
+				if (!action || action === "Back") continue;
+				const nextRules = [...rules];
+				if (action === "Delete rule") {
+					nextRules.splice(index, 1);
+				} else {
+					const edited = await editCustomToolRule(ctx, rule);
+					if (!edited) continue;
+					nextRules[index] = edited;
+				}
+				const diff = diffCustomToolRules(rules, nextRules);
+				const confirmed = await notifyOrConfirmCustomToolChanges(ctx, "Apply custom tool renderer changes?", diff);
+				if (!confirmed) continue;
+				writeSettingsKey("customToolRenderers", nextRules);
+				rules = nextRules;
+				ctx.ui.notify("Custom tool renderer rules updated.", "info");
+				if (rules.length === 0) return;
+			}
+		}
+
+		const suggestions = suggestCustomToolRules(pi, existingRules);
+		const proposedRules = mergeCustomToolRules(existingRules, suggestions);
+		const diff = diffCustomToolRules(existingRules, proposedRules);
+
+		if (isDryRun) {
+			ctx.ui.notify(`Custom tool renderer dry run\n${diff}`, "info");
+			return;
+		}
+
+		ctx.ui.notify(`Custom tool renderer dry run\n${diff}`, "info");
+
+		if (suggestions.length === 0 && existingRules.length === 0) {
+			ctx.ui.notify("No new custom tools found for renderer suggestions.", "info");
+			return;
+		}
+
+		const options = suggestions.length > 0
+			? ["Apply suggested", "Review one by one", "Edit existing", "Cancel"]
+			: ["Edit existing", "Cancel"];
+		const choice = await ctx.ui.select("Configure custom tool renderers", options);
+		if (choice === "Cancel" || !choice) return;
+		if (choice === "Edit existing") {
+			await handleCustomToolsCommand("custom edit", ctx);
+			return;
+		}
+
+		if (choice === "Apply suggested") {
+			const confirmed = await notifyOrConfirmCustomToolChanges(ctx, "Apply custom tool renderer changes?", diff);
+			if (!confirmed) return;
+			writeSettingsKey("customToolRenderers", proposedRules);
+			ctx.ui.notify("Custom tool renderer rules updated.", "info");
+			return;
+		}
+
+		const accepted: CustomToolRenderRule[] = [];
+		for (const suggestion of suggestions) {
+			const action = await ctx.ui.select(`Custom renderer: ${ruleTarget(suggestion)}`, [
+				`Accept ${formatCustomRule(suggestion)}`,
+				"Edit",
+				"Skip",
+				"Stop review",
+			]);
+			if (!action || action === "Stop review") break;
+			if (action === "Skip") continue;
+			if (action.startsWith("Accept ")) {
+				accepted.push(suggestion);
+				continue;
+			}
+
+			let edited = { ...suggestion, summaryArgs: [...(suggestion.summaryArgs ?? [])] };
+			if (suggestion.prefix) {
+				const targetChoice = await ctx.ui.select(`Match ${suggestion.prefix}`, [
+					`Keep prefix ${suggestion.prefix}`,
+					"Use exact names instead",
+				]);
+				if (targetChoice === "Use exact names instead") {
+					const matchingTools = getCustomToolInfos(pi)
+						.filter((tool) => typeof tool.name === "string" && tool.name.startsWith(suggestion.prefix!));
+					for (const tool of matchingTools) {
+						accepted.push(settingsRule({
+							name: tool.name,
+							title: humanizeToolName(tool.name ?? ""),
+							summaryArgs: inferSummaryArgs([tool]),
+							outputMode: suggestion.outputMode,
+						}));
+					}
+					continue;
+				}
+			}
+
+			const reviewed = await editCustomToolRule(ctx, edited);
+			if (reviewed) accepted.push(reviewed);
+		}
+
+		if (accepted.length === 0) {
+			ctx.ui.notify("No custom tool renderer rules selected.", "info");
+			return;
+		}
+		const reviewedRules = mergeCustomToolRules(existingRules, accepted);
+		const reviewedDiff = diffCustomToolRules(existingRules, reviewedRules);
+		const confirmed = await notifyOrConfirmCustomToolChanges(ctx, "Apply custom tool renderer changes?", reviewedDiff);
+		if (!confirmed) return;
+		writeSettingsKey("customToolRenderers", reviewedRules);
+		ctx.ui.notify("Custom tool renderer rules updated.", "info");
+	};
+
 	pi.registerCommand("cc-tools", {
-		description: "Switch tool display style: outlines (lines around tools), transparent (no chrome), default (pi built-in backgrounds)",
+		description: "Configure cc tool rendering: outlines/transparent/default or custom renderer rules",
 		getArgumentCompletions(prefix) {
-			return TOOL_MODES
-				.filter((m) => m.startsWith(prefix))
-				.map((m) => ({
-					value: m,
-					label: m,
-					description:
-						m === "outlines" ? "Horizontal rules around each tool (default)"
-						: m === "transparent" ? "No borders or backgrounds"
-						: "Pi built-in tool backgrounds",
-				}));
+			const normalized = prefix.trimStart().toLowerCase();
+			return CC_TOOLS_COMPLETIONS.filter((item) => item.value.startsWith(normalized));
 		},
 		async handler(args, ctx) {
 			const mode = args.trim().toLowerCase();
+			if (mode === "custom" || mode.startsWith("custom ")) {
+				await handleCustomToolsCommand(mode, ctx);
+				return;
+			}
 			if (!mode) {
 				if (ctx.hasUI) ctx.ui.notify(`Tool style: ${toolBackgroundMode}`, "info");
 				return;
