@@ -21,7 +21,18 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Markdown, Spacer, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import {
+	Box,
+	Container,
+	getCapabilities,
+	getImageDimensions,
+	imageFallback,
+	Markdown,
+	Spacer,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+} from "@mariozechner/pi-tui";
 
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
@@ -35,6 +46,9 @@ const ANSI_PRESENT_RE = /\x1b\[[0-9;]*m/;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
 const TOOL_RENDER_CACHE = Symbol.for("pi-claude-style-tools:tool-render-cache");
 const TOOL_CACHE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-cache-invalidation");
+const TOOL_IMAGE_EXPAND_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-read-image-expansion");
+const KITTY_IMAGE_PREFIX = "\x1b_G";
+const ITERM2_IMAGE_PREFIX = "\x1b]1337;File=";
 
 let toolBackgroundMode: "default" | "transparent" | "outlines" = "outlines";
 
@@ -166,6 +180,26 @@ function isToolExecutionLike(value: unknown): value is { toolName: string; toolC
 	return typeof candidate.toolName === "string" && typeof candidate.toolCallId === "string";
 }
 
+function isTerminalImageLine(line: string): boolean {
+	return line.includes(KITTY_IMAGE_PREFIX) || line.includes(ITERM2_IMAGE_PREFIX);
+}
+
+function firstImageBlockStart(lines: string[]): number {
+	const imageLineIndex = lines.findIndex(isTerminalImageLine);
+	if (imageLineIndex === -1) return -1;
+	let start = imageLineIndex;
+	while (start > 0 && isBlankLine(lines[start - 1])) start--;
+	return start;
+}
+
+function splitRenderedImageBlock(lines: string[]): { textLines: string[]; imageLines: string[] } {
+	const imageStart = firstImageBlockStart(lines);
+	if (imageStart === -1) return { textLines: lines, imageLines: [] };
+	const textLines = lines.slice(0, imageStart);
+	while (textLines.length > 0 && isBlankLine(textLines[textLines.length - 1])) textLines.pop();
+	return { textLines, imageLines: lines.slice(imageStart) };
+}
+
 function patchGlobalToolBorders(): void {
 	const proto = Container.prototype as any;
 	if (proto[PATCH_FLAG]) return;
@@ -187,23 +221,23 @@ function patchGlobalToolBorders(): void {
 			return rendered;
 		}
 
-		// Strip leading/trailing blank lines for both border and transparent modes
 		let start = 0;
 		while (start < rendered.length && isBlankLine(rendered[start])) start++;
 		let end = rendered.length - 1;
 		while (end >= start && isBlankLine(rendered[end])) end--;
 		if (start > end) return rendered;
 
-		const core = rendered.slice(start, end + 1).map((line) => clampLineWidth(line, width));
+		const { textLines, imageLines } = splitRenderedImageBlock(rendered.slice(start, end + 1));
+		const core = textLines.map((line) => clampLineWidth(line, width));
 		const spacerLine = " ".repeat(width);
 		let result: string[];
 
 		if (toolBackgroundMode === "outlines") {
 			const ruleWidth = Math.max(1, width);
-			result = [spacerLine, borderLine(ruleWidth), ...core, borderLine(ruleWidth)];
+			const framed = core.length > 0 ? [borderLine(ruleWidth), ...core, borderLine(ruleWidth)] : [];
+			result = [spacerLine, ...framed, ...imageLines];
 		} else {
-			// transparent: just the core content with top spacer
-			result = [spacerLine, ...core];
+			result = [spacerLine, ...core, ...imageLines];
 		}
 
 		(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: result };
@@ -506,12 +540,48 @@ function patchToolRenderCacheInvalidation(): void {
 	proto[TOOL_CACHE_PATCH_FLAG] = true;
 }
 
+function removeImageChildren(component: any): void {
+	const children = [
+		...(Array.isArray(component.imageComponents) ? component.imageComponents : []),
+		...(Array.isArray(component.imageSpacers) ? component.imageSpacers : []),
+	];
+	for (const child of children) {
+		try { component.removeChild?.(child); } catch { /* noop */ }
+	}
+	component.imageComponents = [];
+	component.imageSpacers = [];
+}
+
+function patchReadImageExpansion(): void {
+	const proto = ToolExecutionComponent.prototype as any;
+	if (proto[TOOL_IMAGE_EXPAND_PATCH_FLAG]) return;
+	const originalUpdateDisplay = proto.updateDisplay;
+	if (typeof originalUpdateDisplay !== "function") return;
+	proto.updateDisplay = function patchedReadImageUpdateDisplay(...args: any[]) {
+		const result = originalUpdateDisplay.apply(this, args);
+		const hasImage = Array.isArray(this.result?.content) && this.result.content.some((block: any) => block?.type === "image");
+		if (this.toolName === "read" && hasImage && this.expanded !== true) {
+			removeImageChildren(this);
+			clearToolRenderCache(this);
+		}
+		return result;
+	};
+	proto[TOOL_IMAGE_EXPAND_PATCH_FLAG] = true;
+}
+
 function patchToolExecutionRenderers(): void {
 	const proto = ToolExecutionComponent.prototype as any;
 	if (proto[TOOL_EXECUTION_PATCH_FLAG]) return;
 
+	const originalHasRendererDefinition = proto.hasRendererDefinition;
 	const originalGetCallRenderer = proto.getCallRenderer;
 	const originalGetResultRenderer = proto.getResultRenderer;
+
+	if (typeof originalHasRendererDefinition === "function") {
+		proto.hasRendererDefinition = function patchedHasRendererDefinition() {
+			return originalHasRendererDefinition.call(this) || shouldUseGenericToolRenderer(this?.toolName);
+		};
+	}
 
 	proto.getCallRenderer = function patchedGetCallRenderer() {
 		const toolName = typeof this?.toolName === "string" ? this.toolName : "";
@@ -519,22 +589,15 @@ function patchToolExecutionRenderers(): void {
 			return (args: any, theme: Theme, ctx: any) =>
 				renderApplyPatchCall(args, theme, ctx, (path: string) => shortPath(ctx.cwd ?? process.cwd(), path));
 		}
-		if (OPENAI_STYLE_TOOL_NAMES.has(toolName) && !CORE_TOOL_OVERRIDES.has(toolName)) {
-			return (args: any, theme: Theme, ctx: any) => {
-				syncToolCallStatus(ctx);
-				ctx.state._openAiPatchFiles = [];
-				return makeText(
-					ctx.lastComponent,
-					toolHeader(
-						humanizeToolName(toolName),
-						summarizeOpenAiToolCall(toolName, args, theme, (path: string) => shortPath(ctx.cwd ?? process.cwd(), path)),
-						theme,
-						toolStatusDot(ctx, theme),
-					),
-				);
-			};
+		if (shouldForceGenericToolRenderer(toolName) || (OPENAI_STYLE_TOOL_NAMES.has(toolName) && !CORE_TOOL_OVERRIDES.has(toolName))) {
+			return (args: any, theme: Theme, ctx: any) => renderGenericToolCall(toolName, args, theme, ctx);
 		}
-		return originalGetCallRenderer.call(this);
+		const original = typeof originalGetCallRenderer === "function" ? originalGetCallRenderer.call(this) : undefined;
+		if (original) return original;
+		if (shouldUseGenericToolRenderer(toolName)) {
+			return (args: any, theme: Theme, ctx: any) => renderGenericToolCall(toolName, args, theme, ctx);
+		}
+		return original;
 	};
 
 	proto.getResultRenderer = function patchedGetResultRenderer() {
@@ -543,18 +606,17 @@ function patchToolExecutionRenderers(): void {
 			return (result: any, options: any, theme: Theme, ctx: any) =>
 				renderApplyPatchResult({ content: result.content, details: result.details }, options.isPartial, theme, ctx);
 		}
-		if (OPENAI_STYLE_TOOL_NAMES.has(toolName) && !CORE_TOOL_OVERRIDES.has(toolName)) {
+		if (shouldForceGenericToolRenderer(toolName) || (OPENAI_STYLE_TOOL_NAMES.has(toolName) && !CORE_TOOL_OVERRIDES.has(toolName))) {
 			return (result: any, options: any, theme: Theme, ctx: any) =>
-				renderOpenAiToolResult(
-					toolName,
-					{ content: result.content, details: result.details },
-					options.expanded,
-					options.isPartial,
-					theme,
-					ctx,
-				);
+				renderGenericToolResult(toolName, result, options, theme, ctx);
 		}
-		return originalGetResultRenderer.call(this);
+		const original = typeof originalGetResultRenderer === "function" ? originalGetResultRenderer.call(this) : undefined;
+		if (original) return original;
+		if (shouldUseGenericToolRenderer(toolName)) {
+			return (result: any, options: any, theme: Theme, ctx: any) =>
+				renderGenericToolResult(toolName, result, options, theme, ctx);
+		}
+		return original;
 	};
 
 	proto[TOOL_EXECUTION_PATCH_FLAG] = true;
@@ -2173,6 +2235,44 @@ function humanizeToolName(name: string): string {
 		.replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function isMcpToolName(name: string): boolean {
+	return name === "mcp" || /^mcp[_:-]/i.test(name) || /[_:-]mcp[_:-]/i.test(name);
+}
+
+function shouldUseGenericToolRenderer(name: unknown): boolean {
+	return typeof name === "string" && name.length > 0 && !CORE_TOOL_OVERRIDES.has(name);
+}
+
+function shouldForceGenericToolRenderer(name: string): boolean {
+	return isMcpToolName(name);
+}
+
+function genericToolLabel(name: string): string {
+	return isMcpToolName(name) ? "MCP" : humanizeToolName(name);
+}
+
+function renderGenericToolCall(name: string, args: any, theme: Theme, ctx: any): Text {
+	syncToolCallStatus(ctx);
+	ctx.state._openAiPatchFiles = [];
+	const sp = (path: string) => shortPath(ctx.cwd ?? process.cwd(), path);
+	const summary = summarizeGenericToolCall(name, args, theme, sp);
+	return makeText(ctx.lastComponent, toolHeader(genericToolLabel(name), summary, theme, toolStatusDot(ctx, theme)));
+}
+
+function renderGenericToolResult(name: string, result: any, options: any, theme: Theme, ctx: any): Text {
+	if (isMcpToolName(name)) {
+		return renderMcpToolResult(result, !!options?.expanded, !!options?.isPartial, theme, ctx);
+	}
+	return renderOpenAiToolResult(
+		name,
+		{ content: result.content, details: result.details },
+		!!options?.expanded,
+		!!options?.isPartial,
+		theme,
+		ctx,
+	);
+}
+
 function getTextContent(result: any): string {
 	if (!Array.isArray(result?.content)) return "";
 	return result.content
@@ -2626,6 +2726,44 @@ function renderApplyPatchResult(result: any, isPartial: boolean, theme: Theme, c
 	return makeText(ctx.lastComponent, withBranch(`${theme.fg("success", "Applied")} ${meta.changeCount} files ${summary}${meta.totalLines ? ` ${theme.fg("muted", `(${meta.totalLines} diff lines)`)}` : ""}`, theme));
 }
 
+function summarizeMcpToolCall(args: any, theme: Theme): string {
+	const tool = getStringArg(args, "tool");
+	if (tool) return args?.server ? `${args.server}:${tool}` : tool;
+	const connect = getStringArg(args, "connect");
+	if (connect) return `connect ${connect}`;
+	const search = getStringArg(args, "search", "describe", "server", "action");
+	if (search) return summarizeText(search, 72);
+	return theme.fg("muted", "status");
+}
+
+function summarizeGenericToolCall(name: string, args: any, theme: Theme, sp: (path: string) => string): string {
+	if (isMcpToolName(name)) return summarizeMcpToolCall(args, theme);
+	return summarizeOpenAiToolCall(name, args, theme, sp);
+}
+
+function renderMcpToolResult(result: any, expanded: boolean, isPartial: boolean, theme: Theme, ctx: any): Text {
+	if (isPartial) {
+		setupBlinkTimer(ctx);
+		return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "MCP running..."), theme));
+	}
+	clearBlinkTimer(ctx);
+	setToolStatus(ctx, ctx.isError ? "error" : "success");
+
+	const mode = getMode(readSettings().mcpOutputMode, ["hidden", "summary", "preview"] as const, "preview");
+	if (mode === "hidden") return makeText(ctx.lastComponent, "");
+
+	const raw = getTextContent(result).trim();
+	const lines = raw ? raw.split("\n") : [];
+	if (lines.length === 0) {
+		return makeText(ctx.lastComponent, withBranch(theme.fg(ctx.isError ? "error" : "success", ctx.isError ? "Failed" : "Done"), theme));
+	}
+
+	const statusText = ctx.isError ? theme.fg("error", lines[0]) : theme.fg("muted", `${lines.length} line${lines.length === 1 ? "" : "s"} returned`);
+	if (mode === "summary") return makeText(ctx.lastComponent, withBranch(statusText, theme));
+	const preview = buildPreviewText(lines.map((line) => theme.fg(ctx.isError ? "error" : "toolOutput", line || " ")), expanded, theme, previewLimit());
+	return makeText(ctx.lastComponent, withBranch(`${statusText}\n${preview}`, theme));
+}
+
 function summarizeOpenAiToolCall(name: string, args: any, theme: Theme, sp: (path: string) => string): string {
 	switch (name) {
 		case "apply_patch": {
@@ -2804,6 +2942,45 @@ function renderTaskListResult(lines: string[], expanded: boolean, theme: Theme, 
 	return makeText(ctx.lastComponent, withBranch(`${summary}\n${preview.join("\n")}`, theme));
 }
 
+function getFirstImageBlock(result: any): { data: string; mimeType: string } | undefined {
+	if (!Array.isArray(result?.content)) return undefined;
+	return result.content.find((block: any) => block?.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string");
+}
+
+function getReadImageFallback(result: any, ctx: any): string {
+	const image = getFirstImageBlock(result);
+	if (!image) return "";
+	let dimensions;
+	try {
+		dimensions = getImageDimensions(image.data, image.mimeType) ?? undefined;
+	} catch {
+		dimensions = undefined;
+	}
+	const path = getStringArg(ctx.args, "path", "file_path");
+	const filename = path ? shortPath(ctx.cwd ?? process.cwd(), path) : undefined;
+	return imageFallback(image.mimeType, dimensions, filename);
+}
+
+function renderReadImageResult(result: any, expanded: boolean, theme: Theme, ctx: any): Text {
+	const image = getFirstImageBlock(result);
+	const mimeType = image?.mimeType ?? "image";
+	const summary = `${theme.fg("success", "Image loaded")} ${theme.fg("muted", `[${mimeType}]`)}`;
+	if (!expanded) {
+		return makeText(ctx.lastComponent, withBranch(`${summary}${theme.fg("muted", " • Ctrl+O to show")}`, theme));
+	}
+
+	const noteLines = getTextContent(result)
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line && !/^Read image file\b/i.test(line));
+	const lines = [summary, ...noteLines.map((line) => theme.fg("dim", line))];
+	if (!getCapabilities().images || !ctx.showImages) {
+		const fallback = getReadImageFallback(result, ctx);
+		if (fallback) lines.push(theme.fg("toolOutput", fallback));
+	}
+	return makeText(ctx.lastComponent, withBranch(lines.join("\n"), theme));
+}
+
 function renderOpenAiToolResult(name: string, result: any, expanded: boolean, isPartial: boolean, theme: Theme, ctx: any): Text {
 	if (isPartial) {
 		setupBlinkTimer(ctx);
@@ -2849,6 +3026,7 @@ function renderOpenAiToolResult(name: string, result: any, expanded: boolean, is
 
 export default function (pi: ExtensionAPI) {
 	patchToolRenderCacheInvalidation();
+	patchReadImageExpansion();
 	patchGlobalToolBorders();
 	patchAssistantMessages();
 	patchToolExecutionRenderers();
@@ -2931,9 +3109,9 @@ export default function (pi: ExtensionAPI) {
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
+			if (getFirstImageBlock(result)) return renderReadImageResult(result, expanded, theme, ctx);
 			const details = result.details as ReadToolDetails | undefined;
-			const content = result.content[0];
-			if (content?.type === "image") return makeText(ctx.lastComponent, withBranch(theme.fg("success", "Image loaded"), theme));
+			const content = result.content.find((block: any) => block?.type === "text");
 			if (content?.type !== "text") return makeText(ctx.lastComponent, withBranch(theme.fg("error", "No text content"), theme));
 			const lines = content.text.split("\n");
 			let text = theme.fg("muted", `${lines.length} lines loaded`);
@@ -3406,27 +3584,10 @@ export default function (pi: ExtensionAPI) {
 					return await Promise.resolve(execute(toolCallId, params, signal, onUpdate, ctx));
 				},
 				renderCall(args: any, theme: Theme, ctx: any) {
-					const target = name === "mcp"
-						? typeof args?.tool === "string"
-							? `${args.server ? `${args.server}:` : ""}${args.tool}`
-							: typeof args?.connect === "string"
-								? `connect ${args.connect}`
-								: typeof args?.search === "string"
-									? `search ${JSON.stringify(args.search)}`
-									: "status"
-						: label;
-					return makeText(ctx.lastComponent, `${theme.fg("toolTitle", theme.bold("MCP"))} ${theme.fg("accent", target)}`);
+					return renderGenericToolCall(name, args, theme, ctx);
 				},
 				renderResult(result: any, { expanded, isPartial }: any, theme: Theme, ctx: any) {
-					if (isPartial) return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "running..."), theme));
-					const mode = getMode(readSettings().mcpOutputMode, ["hidden", "summary", "preview"] as const, "preview");
-					if (mode === "hidden") return makeText(ctx.lastComponent, "");
-					const raw = result.content?.filter((c: any) => c.type === "text").map((c: any) => c.text || "").join("\n") ?? "";
-					const lines = raw.split("\n").filter((line: string) => line.trim().length > 0);
-					let text = theme.fg("muted", `${lines.length} line${lines.length === 1 ? "" : "s"} returned`);
-					if (mode === "summary") return makeText(ctx.lastComponent, text);
-					text += `\n${buildPreviewText(lines.map((line: string) => theme.fg("toolOutput", line)), expanded, theme, previewLimit())}`;
-					return makeText(ctx.lastComponent, text);
+					return renderMcpToolResult(result, expanded, isPartial, theme, ctx);
 				},
 			});
 			wrappedMcpTools.add(name);
