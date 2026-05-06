@@ -707,6 +707,23 @@ function withBranch(content: string, _theme: Theme, _isError = false, continued 
 	return `${branchLead(first, continued)}\n${rest.join("\n")}`;
 }
 
+function withFinalBranchBlock(content: string, theme: Theme, isError = false): string {
+	if (!content || !content.trim()) return "";
+	const lines = content.split("\n");
+	const first = lines[0] ?? "";
+	if (lines.length === 1) return branchLead(first, false);
+	const middle = lines.slice(1, -1).map((line) => branchIndent(line, true));
+	const last = lines[lines.length - 1] ?? "";
+	return [branchLead(first, true), ...middle, branchLead(last, false)].join("\n");
+}
+
+function indentBranchBlock(block: string): string {
+	return block
+		.split("\n")
+		.map((line) => (line ? ` ${line}` : line))
+		.join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Blink timer for partial (running) states
 // ---------------------------------------------------------------------------
@@ -888,8 +905,9 @@ function padToWidth(line: string, width: number): string {
 
 function markedContinuationPrefix(prefix: string): string {
 	const plain = stripAnsi(prefix);
-	if (plain.startsWith("│  ") || plain.startsWith("├─ ") || plain.startsWith("└─ ")) {
-		return `${TOOL_RULE}│${TRANSPARENT_RESET}  `;
+	const branchMatch = /^(\s*)(?:│  |├─ |└─ )/.exec(plain);
+	if (branchMatch) {
+		return `${branchMatch[1]}${TOOL_RULE}│${TRANSPARENT_RESET}  `;
 	}
 	return " ".repeat(visibleWidth(prefix));
 }
@@ -1137,7 +1155,7 @@ let FG_DEL = "\x1b[38;2;200;100;100m";
 let FG_DIM = "\x1b[38;2;80;80;80m";
 let FG_LNUM = "\x1b[38;2;100;100;100m";
 let FG_RULE = "\x1b[38;2;50;50;50m";
-let TOOL_RULE = "\x1b[38;2;32;32;32m";
+let TOOL_RULE = "\x1b[38;2;153;153;153m";
 let FG_SAFE_MUTED = "\x1b[38;2;139;148;158m";
 let FG_STRIPE = "\x1b[38;2;40;40;40m";
 
@@ -1323,6 +1341,10 @@ function termW(): number {
 		Number.parseInt(process.env.COLUMNS ?? "", 10) ||
 		DEFAULT_TERM_WIDTH;
 	return Math.max(40, Math.min(raw - 4, MAX_TERM_WIDTH));
+}
+
+function branchDiffWidth(): number {
+	return Math.max(40, termW() - 8);
 }
 
 function adaptiveWrapRows(tw?: number): number {
@@ -2116,7 +2138,7 @@ function renderEditPreviewBody(
 	summary: string,
 ): void {
 	const dc = resolveDiffColors(theme);
-	const branchWidth = Math.max(40, termW() - 3);
+	const branchWidth = branchDiffWidth();
 	if (operations.length === 1) {
 		const [diff] = diffs;
 		const line = lines[0] ?? getFirstChangedNewLine(diff);
@@ -2124,13 +2146,13 @@ function renderEditPreviewBody(
 			.then((rendered) => {
 				if (ctx.state._pk !== key) return;
 				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}\n${rendered}`;
-				ctx.state._ptDisplay = withBranch(ctx.state._ptBody, theme, false, true);
+				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
 				ctx.invalidate();
 			})
 			.catch(() => {
 				if (ctx.state._pk !== key) return;
 				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}`;
-				ctx.state._ptDisplay = withBranch(ctx.state._ptBody, theme, false, true);
+				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
 				ctx.invalidate();
 			});
 		return;
@@ -2154,13 +2176,13 @@ function renderEditPreviewBody(
 				? `\n${theme.fg("muted", `… ${remainder} more edit blocks${ctx.expanded ? "" : " • Ctrl+O to expand"}`)}`
 				: "";
 			ctx.state._ptBody = `${operations.length} edits ${summary}\n\n${sections.join("\n\n")}${suffix}`;
-			ctx.state._ptDisplay = withBranch(ctx.state._ptBody, theme, false, true);
+			ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
 			ctx.invalidate();
 		})
 		.catch(() => {
 			if (ctx.state._pk !== key) return;
 			ctx.state._ptBody = `${operations.length} edits ${summary}`;
-			ctx.state._ptDisplay = withBranch(ctx.state._ptBody, theme, false, true);
+			ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
 			ctx.invalidate();
 		});
 }
@@ -2733,7 +2755,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 		const dc = resolveDiffColors(theme);
 		if (preview.changes.length === 1) {
 			const [change] = preview.changes;
-			renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, Math.max(40, termW() - 3))
+			renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, branchDiffWidth())
 				.then((rendered) => {
 					if (ctx.state._applyPatchPreviewKey !== key) return;
 					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`;
@@ -2753,7 +2775,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 				: Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
 			Promise.all(
 				preview.changes.slice(0, maxShown).map((change, index) =>
-					renderSplit(change.diff, change.language, previewLines, dc, Math.max(40, termW() - 3))
+					renderSplit(change.diff, change.language, previewLines, dc, branchDiffWidth())
 						.then((rendered) => `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`)
 						.catch(() => `${index + 1}. ${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`),
 				),
@@ -3405,33 +3427,11 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			const fp = args?.path ?? (args as any)?.file_path ?? "";
-			const isNew = !fp || !existsSync(fp);
+			if (ctx.state._writeWasNewFile === undefined) ctx.state._writeWasNewFile = !fp || !existsSync(fp);
+			const isNew = ctx.state._writeWasNewFile === true;
 			const label = isNew ? "Create" : "Write";
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader(label, `${sp(fp)} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}`, theme, toolStatusDot(ctx, theme));
-			if (args?.content && ctx.argsComplete && isNew) {
-				const previewKey = `create:${fp}:${hashText(String(args.content))}:${ctx.expanded ? 1 : 0}`;
-				if (ctx.state._previewKey !== previewKey) {
-					ctx.state._previewKey = previewKey;
-					ctx.state._previewBody = theme.fg("muted", "(rendering…)");
-					ctx.state._previewDisplay = withBranch(ctx.state._previewBody, theme, false, true);
-					const lg = lang(fp);
-					hlBlock(args.content, lg)
-						.then((lines) => {
-							if (ctx.state._previewKey !== previewKey) return;
-							const maxShow = ctx.expanded ? lines.length : 16;
-							let out = theme.fg("success", `${lines.length} lines`);
-							for (const line of lines.slice(0, maxShow)) out += `\n${line}`;
-							if (lines.length > maxShow) out += `\n${theme.fg("muted", `… ${lines.length - maxShow} more lines`)}${ctx.expanded ? "" : expandHint(theme)}`;
-							ctx.state._previewBody = out;
-							ctx.state._previewDisplay = withBranch(ctx.state._previewBody, theme, false, true);
-							ctx.invalidate();
-						})
-						.catch(() => {});
-				}
-				const body = ctx.state._previewDisplay as string | undefined;
-				return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
-			}
 			return makeText(ctx.lastComponent, hdr);
 		},
 		renderResult(result, { isPartial }, theme, ctx) {
@@ -3453,17 +3453,18 @@ export default function (pi: ExtensionAPI) {
 			if (d?._type === "diff") {
 				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
 				const hunks = d.diff?.lines?.filter((l: any) => l.type === "sep").length + (d.diff?.lines?.length ? 1 : 0);
-				const mode = shouldUseSplit(d.diff, termW(), previewLines) ? "split" : "unified";
+				const diffWidth = branchDiffWidth();
+				const mode = shouldUseSplit(d.diff, diffWidth, previewLines) ? "split" : "unified";
 				const richSummary = diffSummaryWithMeta(d.diff.added, d.diff.removed, hunks, mode);
-				const key = `wd:${termW()}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}:${ctx.expanded ? 1 : 0}`;
+				const key = `wd:${diffWidth}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}:${ctx.expanded ? 1 : 0}`;
 				if (ctx.state._wdk !== key) {
 					ctx.state._wdk = key;
-					ctx.state._wdt = withBranch(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
+					ctx.state._wdt = withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
 					const dc = resolveDiffColors(theme);
-					renderSplit(d.diff, d.language, previewLines, dc, Math.max(40, termW() - 3))
+					renderSplit(d.diff, d.language, previewLines, dc, diffWidth)
 						.then((rendered) => {
 							if (ctx.state._wdk !== key) return;
-							ctx.state._wdt = withBranch(`${richSummary}\n${rendered}`, theme);
+							ctx.state._wdt = withFinalBranchBlock(`${richSummary}\n${rendered}`, theme);
 							ctx.invalidate();
 						})
 						.catch(() => {
@@ -3481,24 +3482,25 @@ export default function (pi: ExtensionAPI) {
 				const syntheticDiff = parseDiff("", content);
 				const richSummary = diffSummaryWithMeta(syntheticDiff.added, 0, 1, "new file");
 				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
-				const pk = `nf:${d.filePath}:${hashText(content)}:${termW()}:${ctx.expanded ? 1 : 0}`;
+				const diffWidth = branchDiffWidth();
+				const pk = `nf:${d.filePath}:${hashText(content)}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 				if (ctx.state._nfk !== pk) {
 					ctx.state._nfk = pk;
-					ctx.state._nft = withBranch(`${theme.fg("success", `✓ new file`)} ${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
+					ctx.state._nft = withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
 					const dc = resolveDiffColors(theme);
-					renderSplit(syntheticDiff, lang(d.filePath), previewLines, dc, Math.max(40, termW() - 3))
+					renderUnified(syntheticDiff, lang(d.filePath), previewLines, dc, diffWidth)
 						.then((rendered) => {
 							if (ctx.state._nfk !== pk) return;
-							ctx.state._nft = withBranch(`${theme.fg("success", `✓ new file`)} ${richSummary}\n${rendered}`, theme);
+							ctx.state._nft = withFinalBranchBlock(`${richSummary}\n${rendered}`, theme);
 							ctx.invalidate();
 						})
 						.catch(() => {
 							if (ctx.state._nfk !== pk) return;
-							ctx.state._nft = withBranch(`${theme.fg("success", `✓ new file`)} ${richSummary}`, theme);
+							ctx.state._nft = withBranch(`${richSummary} ${theme.fg("muted", `(${lineTotal} lines)`)}`, theme);
 							ctx.invalidate();
 						});
 				}
-				return makeText(ctx.lastComponent, ctx.state._nft ?? withBranch(`${theme.fg("success", `✓ new file (${lineTotal} lines)`)}`, theme));
+				return makeText(ctx.lastComponent, ctx.state._nft ?? withBranch(`${richSummary} ${theme.fg("muted", `(${lineTotal} lines)`)}`, theme));
 			}
 			return makeText(ctx.lastComponent, withBranch(theme.fg("success", "Written"), theme));
 		},
@@ -3551,13 +3553,13 @@ export default function (pi: ExtensionAPI) {
 			const summary = operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp);
 			const { diffs: fallbackDiffs, summary: editSummary } = summarizeEditOperations(operations);
 			syncToolCallStatus(ctx);
-			const hdr = toolHeader("Edit", summary, theme, toolStatusDot(ctx, theme));
+			const hdr = toolHeader("Edit", summary, theme, ` ${toolStatusDot(ctx, theme)}`);
 			if (!(ctx.argsComplete && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
 			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${ctx.expanded ? 1 : 0}`;
 			if (ctx.state._pk !== key) {
 				ctx.state._pk = key;
 				ctx.state._ptBody = theme.fg("muted", "(rendering…)");
-				ctx.state._ptDisplay = withBranch(ctx.state._ptBody, theme, false, true);
+				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
 				const lg = lang(fp);
 				void computeLocalizedEditDiffs(fp, operations, cwd)
 					.then((localizedDiffs) => {
@@ -3577,7 +3579,7 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { isPartial }, theme, ctx) {
 			if (isPartial) {
 				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Editing..."), theme));
+				return makeText(ctx.lastComponent, indentBranchBlock(withBranch(theme.fg("dim", "Editing..."), theme)));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -3587,20 +3589,20 @@ export default function (pi: ExtensionAPI) {
 						?.filter((c: any) => c.type === "text")
 						.map((c: any) => c.text || "")
 						.join("\n") ?? "Error";
-				return makeText(ctx.lastComponent, withBranch(theme.fg("error", e), theme));
+				return makeText(ctx.lastComponent, indentBranchBlock(withBranch(theme.fg("error", e), theme)));
 			}
 			if ((result as any).details?._type === "editInfo") {
 				const { editLine, hunks, added, removed } = (result as any).details;
 				const loc = formatLineMeta(editLine ?? 0, theme);
 				const summary = diffSummaryWithMeta(added ?? 0, removed ?? 0, hunks ?? 0, "");
-				return makeText(ctx.lastComponent, withBranch(`${summary}${loc}`, theme));
+				return makeText(ctx.lastComponent, indentBranchBlock(withBranch(`${summary}${loc}`, theme)));
 			}
 			if ((result as any).details?._type === "multiEditInfo") {
 				const { editCount, diffLineCount, hunks, totalAdded, totalRemoved } = (result as any).details;
 				const summary = diffSummaryWithMeta(totalAdded ?? 0, totalRemoved ?? 0, hunks ?? 0, "");
-				return makeText(ctx.lastComponent, withBranch(`${editCount} edits ${summary}${typeof diffLineCount === "number" ? ` ${theme.fg("muted", `(${diffLineCount} diff lines)`)}` : ""}`, theme));
+				return makeText(ctx.lastComponent, indentBranchBlock(withBranch(`${editCount} edits ${summary}${typeof diffLineCount === "number" ? ` ${theme.fg("muted", `(${diffLineCount} diff lines)`)}` : ""}`, theme)));
 			}
-			return makeText(ctx.lastComponent, withBranch(theme.fg("success", "Applied"), theme));
+			return makeText(ctx.lastComponent, indentBranchBlock(withBranch(theme.fg("success", "Applied"), theme)));
 		},
 	});
 
