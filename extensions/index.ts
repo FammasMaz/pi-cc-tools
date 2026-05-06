@@ -679,7 +679,10 @@ function syncToolCallStatus(ctx: any): void {
 }
 
 function shouldRevealCallArgs(ctx: any): boolean {
-	return ctx?.argsComplete === true || ctx?.executionStarted === true;
+	if (ctx?.argsComplete === true || ctx?.executionStarted === true) return true;
+	const args = ctx?.args;
+	if (!args || typeof args !== "object") return false;
+	return Object.keys(args).some((key) => args[key] !== undefined && args[key] !== null && args[key] !== "");
 }
 
 function stableCallSummary(ctx: any, key: string, build: () => string, reveal = shouldRevealCallArgs(ctx)): string {
