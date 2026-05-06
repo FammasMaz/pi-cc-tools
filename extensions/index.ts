@@ -190,7 +190,7 @@ function isTerminalImageLine(line: string): boolean {
 }
 
 function normalizeLeadingCheckGlyph(line: string): string {
-	return line.replace(/^((?:\x1b\[[0-9;]*m|[ \t])*)[✓✔](?=\s)/, "$1○");
+	return line.replace(/^((?:\x1b\[[0-9;]*m|[ \t])*)[✓✔](?=\s)/, "$1●");
 }
 
 function firstImageBlockStart(lines: string[]): number {
@@ -680,8 +680,8 @@ function syncToolCallStatus(ctx: any): void {
 
 function toolStatusDot(ctx: any, theme: Theme): string {
 	const status = ctx.state?._toolStatus as "pending" | "success" | "error" | undefined;
-	if (status === "success") return `${theme.fg("success", "○")} `;
-	if (status === "error") return `${theme.fg("error", "○")} `;
+	if (status === "success") return `${theme.fg("success", "●")} `;
+	if (status === "error") return `${theme.fg("error", "●")} `;
 	return `${blinkDot(ctx, theme)} `;
 }
 
@@ -886,6 +886,14 @@ function padToWidth(line: string, width: number): string {
 	return `${line}${" ".repeat(padding)}`;
 }
 
+function markedContinuationPrefix(prefix: string): string {
+	const plain = stripAnsi(prefix);
+	if (plain.startsWith("│  ") || plain.startsWith("├─ ") || plain.startsWith("└─ ")) {
+		return `${TOOL_RULE}│${TRANSPARENT_RESET}  `;
+	}
+	return " ".repeat(visibleWidth(prefix));
+}
+
 function wrapMarkedLine(line: string, width: number): string[] {
 	const markerIndex = line.indexOf(WRAP_MARK);
 	if (markerIndex === -1) return wrapTextWithAnsi(line, width);
@@ -894,7 +902,7 @@ function wrapMarkedLine(line: string, width: number): string[] {
 	const prefixWidth = visibleWidth(prefix);
 	const bodyWidth = Math.max(1, width - prefixWidth);
 	const wrapped = wrapTextWithAnsi(body, bodyWidth);
-	const continuation = " ".repeat(prefixWidth);
+	const continuation = markedContinuationPrefix(prefix);
 	return wrapped.map((part, index) => (index === 0 ? `${prefix}${part}` : `${continuation}${part}`));
 }
 
