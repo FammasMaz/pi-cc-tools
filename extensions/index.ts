@@ -678,6 +678,44 @@ function syncToolCallStatus(ctx: any): void {
 	setToolStatus(ctx, ctx.isError ? "error" : "success");
 }
 
+function shouldRevealCallArgs(ctx: any): boolean {
+	return ctx?.argsComplete === true || ctx?.executionStarted === true;
+}
+
+function stableCallSummary(ctx: any, key: string, build: () => string, reveal = shouldRevealCallArgs(ctx)): string {
+	const state = ctx?.state;
+	const cached = state?.[key];
+	if (!reveal) return typeof cached === "string" ? cached : "";
+	if (!shouldRevealCallArgs(ctx) && typeof cached === "string" && cached) return cached;
+	const summary = build();
+	if (state) state[key] = summary;
+	return summary;
+}
+
+function hasOwnArg(args: any, key: string): boolean {
+	return !!args && Object.prototype.hasOwnProperty.call(args, key);
+}
+
+function fileExistsForTool(cwd: string, filePath: string): boolean {
+	if (!filePath) return false;
+	try {
+		return existsSync(resolve(cwd, filePath));
+	} catch {
+		return false;
+	}
+}
+
+const WRITE_EXISTED_BEFORE = new Map<string, boolean>();
+
+function getWriteWasNewFile(ctx: any, cwd: string, filePath: string, reveal = shouldRevealCallArgs(ctx)): boolean | undefined {
+	if (typeof ctx?.state?._writeWasNewFile === "boolean") return ctx.state._writeWasNewFile;
+	if (!filePath || !reveal) return undefined;
+	const existedBefore = typeof ctx?.toolCallId === "string" ? WRITE_EXISTED_BEFORE.get(ctx.toolCallId) : undefined;
+	const wasNew = existedBefore === undefined ? !fileExistsForTool(cwd, filePath) : !existedBefore;
+	if (ctx?.state) ctx.state._writeWasNewFile = wasNew;
+	return wasNew;
+}
+
 function toolStatusDot(ctx: any, theme: Theme): string {
 	const status = ctx.state?._toolStatus as "pending" | "success" | "error" | undefined;
 	if (status === "success") return `${theme.fg("success", "●")} `;
@@ -2362,7 +2400,7 @@ function renderGenericToolCall(name: string, args: any, theme: Theme, ctx: any):
 	syncToolCallStatus(ctx);
 	ctx.state._openAiPatchFiles = [];
 	const sp = (path: string) => shortPath(ctx.cwd ?? process.cwd(), path);
-	const summary = summarizeGenericToolCall(name, args, theme, sp);
+	const summary = stableCallSummary(ctx, "_callSummary", () => summarizeGenericToolCall(name, args, theme, sp));
 	return makeText(ctx.lastComponent, toolHeader(genericToolLabel(name), summary, theme, toolStatusDot(ctx, theme)));
 }
 
@@ -2736,9 +2774,10 @@ function getApplyPatchResultMeta(args: any, ctx: any, sp: (path: string) => stri
 function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: string) => string): Text {
 	syncToolCallStatus(ctx);
 	const patchText = getStringArg(args, "patchText", "patch_text");
-	const files = extractApplyPatchFiles(patchText);
-	ctx.state._openAiPatchFiles = files.map((filePath) => sp(filePath));
-	const hdr = toolHeader("Apply Patch", summarizeOpenAiToolCall("apply_patch", args, theme, sp), theme, toolStatusDot(ctx, theme));
+	const files = ctx.argsComplete ? extractApplyPatchFiles(patchText) : [];
+	if (ctx.argsComplete) ctx.state._openAiPatchFiles = files.map((filePath) => sp(filePath));
+	const summary = stableCallSummary(ctx, "_callSummary", () => summarizeOpenAiToolCall("apply_patch", args, theme, sp));
+	const hdr = toolHeader("Apply Patch", summary, theme, toolStatusDot(ctx, theme));
 
 	if (!(ctx.argsComplete && files.length > 0)) return makeText(ctx.lastComponent, hdr);
 
@@ -3204,13 +3243,16 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
-			let summary = sp(args.path ?? "");
-			if (args.offset || args.limit) {
-				const parts: string[] = [];
-				if (args.offset) parts.push(`offset=${args.offset}`);
-				if (args.limit) parts.push(`limit=${args.limit}`);
-				summary += ` ${theme.fg("muted", `(${parts.join(", ")})`)}`;
-			}
+			const summary = stableCallSummary(ctx, "_callSummary", () => {
+				let value = sp(args.path ?? "");
+				if (args.offset || args.limit) {
+					const parts: string[] = [];
+					if (args.offset) parts.push(`offset=${args.offset}`);
+					if (args.limit) parts.push(`limit=${args.limit}`);
+					value += ` ${theme.fg("muted", `(${parts.join(", ")})`)}`;
+				}
+				return value;
+			});
 			return makeText(ctx.lastComponent, toolHeader("Read", summary, theme, toolStatusDot(ctx, theme)));
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
@@ -3245,7 +3287,8 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
-			return makeText(ctx.lastComponent, toolHeader("Bash", summarizeText(args.command, 72), theme, toolStatusDot(ctx, theme)));
+			const summary = stableCallSummary(ctx, "_callSummary", () => summarizeText(args.command, 72));
+			return makeText(ctx.lastComponent, toolHeader("Bash", summary, theme, toolStatusDot(ctx, theme)));
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			const details = result.details as BashToolDetails | undefined;
@@ -3281,8 +3324,11 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
-			let summary = `\"${summarizeText(args.pattern, 40)}\"`;
-			if (args.path) summary += ` in ${args.path}`;
+			const summary = stableCallSummary(ctx, "_callSummary", () => {
+				let value = `\"${summarizeText(args.pattern, 40)}\"`;
+				if (args.path) value += ` in ${args.path}`;
+				return value;
+			});
 			return makeText(ctx.lastComponent, toolHeader("Grep", summary, theme, toolStatusDot(ctx, theme)));
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
@@ -3316,8 +3362,11 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
-			let summary = `\"${summarizeText(args.pattern, 40)}\"`;
-			if (args.path) summary += ` in ${args.path}`;
+			const summary = stableCallSummary(ctx, "_callSummary", () => {
+				let value = `\"${summarizeText(args.pattern, 40)}\"`;
+				if (args.path) value += ` in ${args.path}`;
+				return value;
+			});
 			return makeText(ctx.lastComponent, toolHeader("Find", summary, theme, toolStatusDot(ctx, theme)));
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
@@ -3362,7 +3411,8 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
-			return makeText(ctx.lastComponent, toolHeader("List", sp(args.path ?? "."), theme, toolStatusDot(ctx, theme)));
+			const summary = stableCallSummary(ctx, "_callSummary", () => sp(args.path ?? "."));
+			return makeText(ctx.lastComponent, toolHeader("List", summary, theme, toolStatusDot(ctx, theme)));
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
@@ -3407,9 +3457,12 @@ export default function (pi: ExtensionAPI) {
 		parameters: writeTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, _ctx) {
 			const fp = params.path ?? (params as any).file_path ?? "";
+			const fullPath = fp ? resolve(cwd, fp) : "";
+			const existedBefore = !!fullPath && fileExistsForTool(cwd, fp);
+			WRITE_EXISTED_BEFORE.set(toolCallId, existedBefore);
 			let old: string | null = null;
 			try {
-				if (fp && existsSync(fp)) old = readFileSync(fp, "utf-8");
+				if (fullPath && existedBefore) old = readFileSync(fullPath, "utf-8");
 			} catch {
 				old = null;
 			}
@@ -3427,11 +3480,15 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			const fp = args?.path ?? (args as any)?.file_path ?? "";
-			if (ctx.state._writeWasNewFile === undefined) ctx.state._writeWasNewFile = !fp || !existsSync(fp);
-			const isNew = ctx.state._writeWasNewFile === true;
-			const label = isNew ? "Create" : "Write";
+			const revealSummary = shouldRevealCallArgs(ctx) || (!!fp && hasOwnArg(args, "content"));
 			syncToolCallStatus(ctx);
-			const hdr = toolHeader(label, `${sp(fp)} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}`, theme, toolStatusDot(ctx, theme));
+			const wasNew = getWriteWasNewFile(ctx, cwd, fp, revealSummary);
+			const label = wasNew === true ? "Create" : "Write";
+			const summary = stableCallSummary(ctx, "_callSummary", () => {
+				const base = sp(fp);
+				return shouldRevealCallArgs(ctx) ? `${base} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}` : base;
+			}, revealSummary);
+			const hdr = toolHeader(label, summary, theme, toolStatusDot(ctx, theme));
 			return makeText(ctx.lastComponent, hdr);
 		},
 		renderResult(result, { isPartial }, theme, ctx) {
@@ -3441,6 +3498,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
+			if (typeof ctx?.toolCallId === "string") WRITE_EXISTED_BEFORE.delete(ctx.toolCallId);
 			if (ctx.isError) {
 				const e =
 					result.content
@@ -3550,7 +3608,8 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, ctx) {
 			const fp = args?.path ?? (args as any)?.file_path ?? "";
 			const operations = getEditOperations(args);
-			const summary = operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp);
+			const revealSummary = shouldRevealCallArgs(ctx) || (!!fp && hasOwnArg(args, "edits"));
+			const summary = stableCallSummary(ctx, "_callSummary", () => shouldRevealCallArgs(ctx) && operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp), revealSummary);
 			const { diffs: fallbackDiffs, summary: editSummary } = summarizeEditOperations(operations);
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader("Edit", summary, theme, ` ${toolStatusDot(ctx, theme)}`);
@@ -3637,7 +3696,8 @@ export default function (pi: ExtensionAPI) {
 					if (name === "apply_patch") return renderApplyPatchCall(args, theme, ctx, sp);
 					syncToolCallStatus(ctx);
 					ctx.state._openAiPatchFiles = [];
-					return makeText(ctx.lastComponent, toolHeader(label, summarizeOpenAiToolCall(name, args, theme, sp), theme, toolStatusDot(ctx, theme)));
+					const summary = stableCallSummary(ctx, "_callSummary", () => summarizeOpenAiToolCall(name, args, theme, sp));
+					return makeText(ctx.lastComponent, toolHeader(label, summary, theme, toolStatusDot(ctx, theme)));
 				},
 				renderResult(result: any, { expanded, isPartial }: any, theme: Theme, ctx: any) {
 					if (name === "apply_patch") return renderApplyPatchResult(result, isPartial, theme, ctx);
