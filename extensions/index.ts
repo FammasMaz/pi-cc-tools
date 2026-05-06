@@ -22,8 +22,11 @@ import {
 	createWriteTool,
 } from "@mariozechner/pi-coding-agent";
 import {
+	allocateImageId,
 	Box,
 	Container,
+	deleteAllKittyImages,
+	deleteKittyImage,
 	getCapabilities,
 	getImageDimensions,
 	imageFallback,
@@ -32,6 +35,7 @@ import {
 	Text,
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
 
 import * as Diff from "diff";
@@ -540,7 +544,42 @@ function patchToolRenderCacheInvalidation(): void {
 	proto[TOOL_CACHE_PATCH_FLAG] = true;
 }
 
+function getImageComponentId(component: any): number | undefined {
+	try {
+		const id = typeof component?.getImageId === "function" ? component.getImageId() : component?.imageId;
+		return typeof id === "number" && Number.isFinite(id) ? id : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function assignImageIds(component: any): void {
+	if (getCapabilities().images !== "kitty" || !Array.isArray(component.imageComponents)) return;
+	for (const image of component.imageComponents) {
+		if (getImageComponentId(image) !== undefined) continue;
+		try { image.imageId = allocateImageId(); } catch { /* noop */ }
+	}
+	component._ccReadImageHadIds = component.imageComponents.some((image: any) => getImageComponentId(image) !== undefined);
+}
+
+function deleteRenderedKittyImages(component: any): void {
+	if (!process.stdout.isTTY || getCapabilities().images !== "kitty" || !Array.isArray(component.imageComponents) || component.imageComponents.length === 0) return;
+	let deleted = false;
+	for (const image of component.imageComponents) {
+		const id = getImageComponentId(image);
+		if (id === undefined) continue;
+		try {
+			process.stdout.write(deleteKittyImage(id));
+			deleted = true;
+		} catch { /* noop */ }
+	}
+	if (!deleted && component._ccReadImageHadIds === true) {
+		try { process.stdout.write(deleteAllKittyImages()); } catch { /* noop */ }
+	}
+}
+
 function removeImageChildren(component: any): void {
+	deleteRenderedKittyImages(component);
 	const children = [
 		...(Array.isArray(component.imageComponents) ? component.imageComponents : []),
 		...(Array.isArray(component.imageSpacers) ? component.imageSpacers : []),
@@ -560,6 +599,9 @@ function patchReadImageExpansion(): void {
 	proto.updateDisplay = function patchedReadImageUpdateDisplay(...args: any[]) {
 		const result = originalUpdateDisplay.apply(this, args);
 		const hasImage = Array.isArray(this.result?.content) && this.result.content.some((block: any) => block?.type === "image");
+		if (this.toolName === "read" && hasImage && this.expanded === true) {
+			assignImageIds(this);
+		}
 		if (this.toolName === "read" && hasImage && this.expanded !== true) {
 			removeImageChildren(this);
 			clearToolRenderCache(this);
@@ -589,15 +631,10 @@ function patchToolExecutionRenderers(): void {
 			return (args: any, theme: Theme, ctx: any) =>
 				renderApplyPatchCall(args, theme, ctx, (path: string) => shortPath(ctx.cwd ?? process.cwd(), path));
 		}
-		if (shouldForceGenericToolRenderer(toolName) || (OPENAI_STYLE_TOOL_NAMES.has(toolName) && !CORE_TOOL_OVERRIDES.has(toolName))) {
-			return (args: any, theme: Theme, ctx: any) => renderGenericToolCall(toolName, args, theme, ctx);
-		}
-		const original = typeof originalGetCallRenderer === "function" ? originalGetCallRenderer.call(this) : undefined;
-		if (original) return original;
 		if (shouldUseGenericToolRenderer(toolName)) {
 			return (args: any, theme: Theme, ctx: any) => renderGenericToolCall(toolName, args, theme, ctx);
 		}
-		return original;
+		return typeof originalGetCallRenderer === "function" ? originalGetCallRenderer.call(this) : undefined;
 	};
 
 	proto.getResultRenderer = function patchedGetResultRenderer() {
@@ -606,17 +643,11 @@ function patchToolExecutionRenderers(): void {
 			return (result: any, options: any, theme: Theme, ctx: any) =>
 				renderApplyPatchResult({ content: result.content, details: result.details }, options.isPartial, theme, ctx);
 		}
-		if (shouldForceGenericToolRenderer(toolName) || (OPENAI_STYLE_TOOL_NAMES.has(toolName) && !CORE_TOOL_OVERRIDES.has(toolName))) {
-			return (result: any, options: any, theme: Theme, ctx: any) =>
-				renderGenericToolResult(toolName, result, options, theme, ctx);
-		}
-		const original = typeof originalGetResultRenderer === "function" ? originalGetResultRenderer.call(this) : undefined;
-		if (original) return original;
 		if (shouldUseGenericToolRenderer(toolName)) {
 			return (result: any, options: any, theme: Theme, ctx: any) =>
 				renderGenericToolResult(toolName, result, options, theme, ctx);
 		}
-		return original;
+		return typeof originalGetResultRenderer === "function" ? originalGetResultRenderer.call(this) : undefined;
 	};
 
 	proto[TOOL_EXECUTION_PATCH_FLAG] = true;
@@ -640,8 +671,16 @@ function isBlinkOn(): boolean {
 
 function toolHeader(tool: string, summary: string, theme: Theme, prefix = ""): string {
 	const label = theme.fg("toolTitle", theme.bold(tool));
-	const suffix = summary ? ` ${theme.fg("accent", summary)}` : "";
-	return `${prefix}${label}${suffix}`;
+	if (!summary) return `${prefix}${label}`;
+
+	const firstPrefix = `${prefix}${label} `;
+	const headerWidth = Math.min(68, Math.max(24, termW() - 6));
+	const summaryWidth = Math.max(8, headerWidth - visibleWidth(firstPrefix));
+	const wrapped = wrapTextWithAnsi(theme.fg("accent", summary), summaryWidth);
+	const continuationPrefix = " ".repeat(visibleWidth(firstPrefix));
+	return wrapped
+		.map((line, index) => (index === 0 ? `${firstPrefix}${line}` : `${continuationPrefix}${line}`))
+		.join("\n");
 }
 
 function setToolStatus(ctx: any, status: "pending" | "success" | "error"): void {
@@ -668,11 +707,11 @@ function toolStatusDot(ctx: any, theme: Theme): string {
 // ---------------------------------------------------------------------------
 
 function branchIndent(text: string, continued = false): string {
-	return continued ? `${FG_RULE}│${TRANSPARENT_RESET}  ${text}` : `   ${text}`;
+	return continued ? `${TOOL_RULE}│${TRANSPARENT_RESET}  ${text}` : `   ${text}`;
 }
 
 function branchLead(text: string, continued = false): string {
-	return `${FG_RULE}${continued ? "├─" : "└─"}${TRANSPARENT_RESET} ${text}`;
+	return `${TOOL_RULE}${continued ? "├─" : "└─"}${TRANSPARENT_RESET} ${text}`;
 }
 
 function withBranch(content: string, _theme: Theme, _isError = false, continued = false): string {
@@ -1049,6 +1088,7 @@ let FG_DEL = "\x1b[38;2;200;100;100m";
 let FG_DIM = "\x1b[38;2;80;80;80m";
 let FG_LNUM = "\x1b[38;2;100;100;100m";
 let FG_RULE = "\x1b[38;2;50;50;50m";
+let TOOL_RULE = "\x1b[38;2;32;32;32m";
 let FG_SAFE_MUTED = "\x1b[38;2;139;148;158m";
 let FG_STRIPE = "\x1b[38;2;40;40;40m";
 
@@ -2243,10 +2283,6 @@ function shouldUseGenericToolRenderer(name: unknown): boolean {
 	return typeof name === "string" && name.length > 0 && !CORE_TOOL_OVERRIDES.has(name);
 }
 
-function shouldForceGenericToolRenderer(name: string): boolean {
-	return isMcpToolName(name);
-}
-
 function genericToolLabel(name: string): string {
 	return isMcpToolName(name) ? "MCP" : humanizeToolName(name);
 }
@@ -2760,7 +2796,8 @@ function renderMcpToolResult(result: any, expanded: boolean, isPartial: boolean,
 
 	const statusText = ctx.isError ? theme.fg("error", lines[0]) : theme.fg("muted", `${lines.length} line${lines.length === 1 ? "" : "s"} returned`);
 	if (mode === "summary") return makeText(ctx.lastComponent, withBranch(statusText, theme));
-	const preview = buildPreviewText(lines.map((line) => theme.fg(ctx.isError ? "error" : "toolOutput", line || " ")), expanded, theme, previewLimit());
+	if (!expanded) return makeText(ctx.lastComponent, withBranch(`${statusText}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+	const preview = buildPreviewText(lines.map((line) => theme.fg(ctx.isError ? "error" : "toolOutput", line || " ")), true, theme, previewLimit());
 	return makeText(ctx.lastComponent, withBranch(`${statusText}\n${preview}`, theme));
 }
 
@@ -3005,15 +3042,17 @@ function renderOpenAiToolResult(name: string, result: any, expanded: boolean, is
 		return renderTaskListResult(lines, expanded, theme, ctx);
 	}
 
+	const statusText = ctx.isError
+		? theme.fg("error", lines[0])
+		: theme.fg("muted", `${lines.length} line${lines.length === 1 ? "" : "s"} returned`);
+	if (!expanded) {
+		return makeText(ctx.lastComponent, withBranch(`${statusText}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+	}
+
 	if (!ctx.isError && lines.length === 1) {
 		return makeText(ctx.lastComponent, withBranch(formatOpenAiSuccessLine(name, lines[0], theme), theme));
 	}
 
-	const statusText = ctx.isError ? theme.fg("error", lines[0]) : theme.fg("muted", `${lines.length} lines returned`);
-	if (!expanded) {
-		const suffix = lines.length > 1 ? theme.fg("muted", " • Ctrl+O to expand") : "";
-		return makeText(ctx.lastComponent, withBranch(`${statusText}${suffix}`, theme));
-	}
 	const preview = lines.length === 1
 		? theme.fg(ctx.isError ? "error" : "dim", lines[0])
 		: buildPreviewText(lines.map((line) => theme.fg(ctx.isError ? "error" : "dim", line || " ")), true, theme, previewLimit());
