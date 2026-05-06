@@ -12,6 +12,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import {
 	AssistantMessageComponent,
+	CustomMessageComponent,
 	ToolExecutionComponent,
 	createBashTool,
 	createEditTool,
@@ -22,11 +23,9 @@ import {
 	createWriteTool,
 } from "@mariozechner/pi-coding-agent";
 import {
-	allocateImageId,
 	Box,
 	Container,
 	deleteAllKittyImages,
-	deleteKittyImage,
 	getCapabilities,
 	getImageDimensions,
 	imageFallback,
@@ -51,6 +50,8 @@ const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
 const TOOL_RENDER_CACHE = Symbol.for("pi-claude-style-tools:tool-render-cache");
 const TOOL_CACHE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-cache-invalidation");
 const TOOL_IMAGE_EXPAND_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-read-image-expansion");
+const CUSTOM_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-custom-message-render");
+const WRAP_MARK = "\uE000";
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_IMAGE_PREFIX = "\x1b]1337;File=";
 
@@ -188,6 +189,10 @@ function isTerminalImageLine(line: string): boolean {
 	return line.includes(KITTY_IMAGE_PREFIX) || line.includes(ITERM2_IMAGE_PREFIX);
 }
 
+function normalizeLeadingCheckGlyph(line: string): string {
+	return line.replace(/^((?:\x1b\[[0-9;]*m|[ \t])*)[✓✔](?=\s)/, "$1○");
+}
+
 function firstImageBlockStart(lines: string[]): number {
 	const imageLineIndex = lines.findIndex(isTerminalImageLine);
 	if (imageLineIndex === -1) return -1;
@@ -232,7 +237,11 @@ function patchGlobalToolBorders(): void {
 		if (start > end) return rendered;
 
 		const { textLines, imageLines } = splitRenderedImageBlock(rendered.slice(start, end + 1));
-		const core = textLines.map((line) => clampLineWidth(line, width));
+		if (imageLines.length > 0) {
+			(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: rendered };
+			return rendered;
+		}
+		const core = textLines.map((line) => clampLineWidth(normalizeLeadingCheckGlyph(line), width));
 		const spacerLine = " ".repeat(width);
 		let result: string[];
 
@@ -380,8 +389,10 @@ class DottedParagraph {
 			return this.cachedLines;
 		}
 		const lines = sanitizeRenderedTextBlockLines(this.md.render(width - PREFIX_W));
+		const looksLikeTaskStatus = lines.some((line) => /\b(?:transcript:|No output\.|Wrapped up)/.test(stripAnsi(line)));
+		const displayLines = looksLikeTaskStatus ? lines.map(normalizeLeadingCheckGlyph) : lines;
 		let dotPlaced = false;
-		const rendered = lines.map((line: string) => {
+		const rendered = displayLines.map((line: string) => {
 			if (!dotPlaced && stripAnsi(line).trim()) {
 				dotPlaced = true;
 				return ` ● ${line}`;
@@ -465,6 +476,18 @@ class ThinkingParagraph {
 	}
 }
 
+function patchCustomMessageRender(): void {
+	const proto = CustomMessageComponent.prototype as any;
+	if (proto[CUSTOM_MESSAGE_PATCH_FLAG]) return;
+	const originalRender = proto.render;
+	if (typeof originalRender !== "function") return;
+	proto.render = function patchedCustomMessageRender(width: number) {
+		const lines = originalRender.call(this, width);
+		return Array.isArray(lines) ? lines.map(normalizeLeadingCheckGlyph) : lines;
+	};
+	proto[CUSTOM_MESSAGE_PATCH_FLAG] = true;
+}
+
 function patchAssistantMessages(): void {
 	const proto = AssistantMessageComponent.prototype as any;
 	if (proto[ASSISTANT_PATCH_FLAG]) return;
@@ -544,38 +567,9 @@ function patchToolRenderCacheInvalidation(): void {
 	proto[TOOL_CACHE_PATCH_FLAG] = true;
 }
 
-function getImageComponentId(component: any): number | undefined {
-	try {
-		const id = typeof component?.getImageId === "function" ? component.getImageId() : component?.imageId;
-		return typeof id === "number" && Number.isFinite(id) ? id : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function assignImageIds(component: any): void {
-	if (getCapabilities().images !== "kitty" || !Array.isArray(component.imageComponents)) return;
-	for (const image of component.imageComponents) {
-		if (getImageComponentId(image) !== undefined) continue;
-		try { image.imageId = allocateImageId(); } catch { /* noop */ }
-	}
-	component._ccReadImageHadIds = component.imageComponents.some((image: any) => getImageComponentId(image) !== undefined);
-}
-
 function deleteRenderedKittyImages(component: any): void {
 	if (!process.stdout.isTTY || getCapabilities().images !== "kitty" || !Array.isArray(component.imageComponents) || component.imageComponents.length === 0) return;
-	let deleted = false;
-	for (const image of component.imageComponents) {
-		const id = getImageComponentId(image);
-		if (id === undefined) continue;
-		try {
-			process.stdout.write(deleteKittyImage(id));
-			deleted = true;
-		} catch { /* noop */ }
-	}
-	if (!deleted && component._ccReadImageHadIds === true) {
-		try { process.stdout.write(deleteAllKittyImages()); } catch { /* noop */ }
-	}
+	try { process.stdout.write(deleteAllKittyImages()); } catch { /* noop */ }
 }
 
 function removeImageChildren(component: any): void {
@@ -599,9 +593,6 @@ function patchReadImageExpansion(): void {
 	proto.updateDisplay = function patchedReadImageUpdateDisplay(...args: any[]) {
 		const result = originalUpdateDisplay.apply(this, args);
 		const hasImage = Array.isArray(this.result?.content) && this.result.content.some((block: any) => block?.type === "image");
-		if (this.toolName === "read" && hasImage && this.expanded === true) {
-			assignImageIds(this);
-		}
 		if (this.toolName === "read" && hasImage && this.expanded !== true) {
 			removeImageChildren(this);
 			clearToolRenderCache(this);
@@ -672,15 +663,7 @@ function isBlinkOn(): boolean {
 function toolHeader(tool: string, summary: string, theme: Theme, prefix = ""): string {
 	const label = theme.fg("toolTitle", theme.bold(tool));
 	if (!summary) return `${prefix}${label}`;
-
-	const firstPrefix = `${prefix}${label} `;
-	const headerWidth = Math.min(68, Math.max(24, termW() - 6));
-	const summaryWidth = Math.max(8, headerWidth - visibleWidth(firstPrefix));
-	const wrapped = wrapTextWithAnsi(theme.fg("accent", summary), summaryWidth);
-	const continuationPrefix = " ".repeat(visibleWidth(firstPrefix));
-	return wrapped
-		.map((line, index) => (index === 0 ? `${firstPrefix}${line}` : `${continuationPrefix}${line}`))
-		.join("\n");
+	return `${prefix}${label} ${WRAP_MARK}${theme.fg("accent", summary)}`;
 }
 
 function setToolStatus(ctx: any, status: "pending" | "success" | "error"): void {
@@ -697,8 +680,8 @@ function syncToolCallStatus(ctx: any): void {
 
 function toolStatusDot(ctx: any, theme: Theme): string {
 	const status = ctx.state?._toolStatus as "pending" | "success" | "error" | undefined;
-	if (status === "success") return `${theme.fg("success", "●")} `;
-	if (status === "error") return `${theme.fg("error", "●")} `;
+	if (status === "success") return `${theme.fg("success", "○")} `;
+	if (status === "error") return `${theme.fg("error", "○")} `;
 	return `${blinkDot(ctx, theme)} `;
 }
 
@@ -707,17 +690,17 @@ function toolStatusDot(ctx: any, theme: Theme): string {
 // ---------------------------------------------------------------------------
 
 function branchIndent(text: string, continued = false): string {
-	return continued ? `${TOOL_RULE}│${TRANSPARENT_RESET}  ${text}` : `   ${text}`;
+	const prefix = continued ? `${TOOL_RULE}│${TRANSPARENT_RESET}  ` : "   ";
+	return `${prefix}${WRAP_MARK}${text}`;
 }
 
 function branchLead(text: string, continued = false): string {
-	return `${TOOL_RULE}${continued ? "├─" : "└─"}${TRANSPARENT_RESET} ${text}`;
+	return `${TOOL_RULE}${continued ? "├─" : "└─"}${TRANSPARENT_RESET} ${WRAP_MARK}${text}`;
 }
 
 function withBranch(content: string, _theme: Theme, _isError = false, continued = false): string {
 	if (!content || !content.trim()) return "";
-	const contentWidth = Math.max(1, termW() - 3);
-	const lines = content.split("\n").map((line) => clampLineWidth(line, contentWidth));
+	const lines = content.split("\n");
 	const first = lines[0] ?? "";
 	if (lines.length === 1) return branchLead(first, continued);
 	const rest = lines.slice(1).map((line) => branchIndent(line, continued));
@@ -898,9 +881,67 @@ function lineCount(text: string): number {
 	return text.split("\n").length;
 }
 
+function padToWidth(line: string, width: number): string {
+	const padding = Math.max(0, width - visibleWidth(line));
+	return `${line}${" ".repeat(padding)}`;
+}
+
+function wrapMarkedLine(line: string, width: number): string[] {
+	const markerIndex = line.indexOf(WRAP_MARK);
+	if (markerIndex === -1) return wrapTextWithAnsi(line, width);
+	const prefix = line.slice(0, markerIndex);
+	const body = line.slice(markerIndex + WRAP_MARK.length);
+	const prefixWidth = visibleWidth(prefix);
+	const bodyWidth = Math.max(1, width - prefixWidth);
+	const wrapped = wrapTextWithAnsi(body, bodyWidth);
+	const continuation = " ".repeat(prefixWidth);
+	return wrapped.map((part, index) => (index === 0 ? `${prefix}${part}` : `${continuation}${part}`));
+}
+
+class ToolText extends Text {
+	private value = "";
+	private toolCachedValue?: string;
+	private toolCachedWidth?: number;
+	private toolCachedLines?: string[];
+
+	constructor(text = "") {
+		super("", 0, 0);
+		this.value = text;
+	}
+
+	setText(text: string): void {
+		if (this.value === text) return;
+		this.value = text;
+		this.invalidate();
+	}
+
+	invalidate(): void {
+		this.toolCachedValue = undefined;
+		this.toolCachedWidth = undefined;
+		this.toolCachedLines = undefined;
+	}
+
+	render(width: number): string[] {
+		if (this.toolCachedLines && this.toolCachedValue === this.value && this.toolCachedWidth === width) return this.toolCachedLines;
+		if (!this.value || this.value.trim() === "") {
+			this.toolCachedValue = this.value;
+			this.toolCachedWidth = width;
+			this.toolCachedLines = [];
+			return this.toolCachedLines;
+		}
+		const contentWidth = Math.max(1, width);
+		const lines = this.value.replace(/\t/g, "   ").split("\n");
+		const rendered = lines.flatMap((line) => wrapMarkedLine(line, contentWidth)).map((line) => padToWidth(line, width));
+		this.toolCachedValue = this.value;
+		this.toolCachedWidth = width;
+		this.toolCachedLines = rendered;
+		return rendered;
+	}
+}
+
 function makeText(last: unknown, text: string): Text {
-	const component = last instanceof Text ? last : new Text("", 0, 0);
-	if ((component as any).text !== text) component.setText(text);
+	const component = last instanceof ToolText ? last : new ToolText();
+	component.setText(text);
 	return component;
 }
 
@@ -3067,6 +3108,7 @@ export default function (pi: ExtensionAPI) {
 	patchToolRenderCacheInvalidation();
 	patchReadImageExpansion();
 	patchGlobalToolBorders();
+	patchCustomMessageRender();
 	patchAssistantMessages();
 	patchToolExecutionRenderers();
 	applyDiffPalette();
