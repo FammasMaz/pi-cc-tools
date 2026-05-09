@@ -15,10 +15,16 @@ const CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
 const STATUS_DIM = "\x1b[38;2;153;153;153m";
 const LOADER_INTERVAL_MS = 250;
 const LOADER_LAST_TEXT = Symbol.for("pi-claude-style-tools:loader-last-text");
+const LOADER_ACTIVE = Symbol.for("pi-claude-style-tools:loader-active");
+const LOADER_GENERATION = Symbol.for("pi-claude-style-tools:loader-generation");
 const ACTIVE_UI_SYMBOL = Symbol.for("pi-claude-style-tools:active-ui");
 
 function getLoaderIntervalMs(_loader: any): number {
 	return LOADER_INTERVAL_MS;
+}
+
+function unrefTimer(timer: ReturnType<typeof setTimeout> | null | undefined): void {
+	(timer as any)?.unref?.();
 }
 
 (Loader.prototype as any).updateDisplay = function patchedUpdateDisplay() {
@@ -30,7 +36,7 @@ function getLoaderIntervalMs(_loader: any): number {
 	if ((this as any)[LOADER_LAST_TEXT] === nextText) return;
 	(this as any)[LOADER_LAST_TEXT] = nextText;
 	this.setText(nextText);
-	if (this.ui) {
+	if (this.ui && !(this.ui as any).stopped) {
 		(globalThis as any)[ACTIVE_UI_SYMBOL] = this.ui;
 		this.ui.requestRender();
 	}
@@ -38,16 +44,34 @@ function getLoaderIntervalMs(_loader: any): number {
 
 Loader.prototype.start = function patchedStart() {
 	this.stop();
+	(this as any)[LOADER_ACTIVE] = true;
+	const generation = ((this as any)[LOADER_GENERATION] ?? 0) + 1;
+	(this as any)[LOADER_GENERATION] = generation;
+	delete (this as any)[LOADER_LAST_TEXT];
 	(this as any).updateDisplay();
 	const scheduleNext = () => {
+		if ((this as any)[LOADER_ACTIVE] !== true || (this as any)[LOADER_GENERATION] !== generation) return;
 		const intervalMs = getLoaderIntervalMs(this);
-		(this as any).intervalId = setTimeout(() => {
+		const timer = setTimeout(() => {
+			(this as any).intervalId = null;
+			if ((this as any)[LOADER_ACTIVE] !== true || (this as any)[LOADER_GENERATION] !== generation) return;
 			(this as any).currentFrame = ((this as any).currentFrame + 1) % OB_FRAMES.length;
 			(this as any).updateDisplay();
 			scheduleNext();
 		}, intervalMs);
+		unrefTimer(timer);
+		(this as any).intervalId = timer;
 	};
 	scheduleNext();
+};
+
+Loader.prototype.stop = function patchedStop() {
+	(this as any)[LOADER_ACTIVE] = false;
+	(this as any)[LOADER_GENERATION] = ((this as any)[LOADER_GENERATION] ?? 0) + 1;
+	if ((this as any).intervalId) {
+		clearTimeout((this as any).intervalId);
+		(this as any).intervalId = null;
+	}
 };
 
 // ---------------------------------------------------------------------------
@@ -387,21 +411,35 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function getWorkingMessageIntervalMs(): number {
-		return WORKING_MESSAGE_INTERVAL_MS;
+		const elapsed = Date.now() - (agentStartTime || turnStartTime);
+		const tokenCount = Math.max(0, Math.round(responseLength / 4));
+		if (thinkingStatus === null && tokenCount === 0 && elapsed <= SHOW_TIMER_AFTER_MS) {
+			return Math.max(250, SHOW_TIMER_AFTER_MS - elapsed + 1);
+		}
+		return Math.max(250, WORKING_MESSAGE_INTERVAL_MS - (elapsed % WORKING_MESSAGE_INTERVAL_MS));
+	}
+
+	function scheduleRefreshTick(): void {
+		if (!turnActive || refreshTimer) return;
+		const intervalMs = getWorkingMessageIntervalMs();
+		refreshTimer = setTimeout(() => {
+			refreshTimer = null;
+			syncWorkingMessage();
+			scheduleRefreshTick();
+		}, intervalMs);
+		unrefTimer(refreshTimer);
 	}
 
 	function startRefreshLoop(): void {
 		stopRefreshLoop();
 		syncWorkingMessage(true);
-		const scheduleNext = () => {
-			const intervalMs = getWorkingMessageIntervalMs();
-			refreshTimer = setTimeout(() => {
-				refreshTimer = null;
-				syncWorkingMessage();
-				scheduleNext();
-			}, intervalMs);
-		};
-		scheduleNext();
+		scheduleRefreshTick();
+	}
+
+	function rescheduleRefreshLoop(): void {
+		if (!turnActive) return;
+		stopRefreshLoop();
+		scheduleRefreshTick();
 	}
 
 	function stopRefreshLoop(): void {
@@ -446,6 +484,7 @@ export default function (pi: ExtensionAPI) {
 			if (turnActive) syncWorkingMessage(true);
 			else if (!completionTimer) restoreDefaultWorkingMessage();
 		}, remaining);
+		unrefTimer(thoughtStatusTimer);
 	}
 
 	function clearDisplay(): void {
@@ -505,6 +544,7 @@ export default function (pi: ExtensionAPI) {
 		activeCtx = ctx;
 		const evt = event.assistantMessageEvent;
 		let statusChanged = false;
+		const previousTokenCount = Math.max(0, Math.round(responseLength / 4));
 
 		if (evt.type === "start") {
 			resetResponseTracking();
@@ -534,6 +574,13 @@ export default function (pi: ExtensionAPI) {
 
 		if (statusChanged) {
 			syncWorkingMessage(true);
+			rescheduleRefreshLoop();
+			return;
+		}
+
+		const nextTokenCount = Math.max(0, Math.round(responseLength / 4));
+		if (previousTokenCount === 0 && nextTokenCount > 0) {
+			rescheduleRefreshLoop();
 		}
 	});
 
@@ -561,6 +608,7 @@ export default function (pi: ExtensionAPI) {
 				if (activeTurnId !== turnId) return;
 				restoreDefaultWorkingMessage();
 			}, TURN_COMPLETION_MS);
+			unrefTimer(completionTimer);
 		} else if (typeof thinkingStatus !== "number") {
 			restoreDefaultWorkingMessage();
 		}

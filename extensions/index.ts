@@ -14,6 +14,7 @@ import {
 	AssistantMessageComponent,
 	CustomMessageComponent,
 	ToolExecutionComponent,
+	UserMessageComponent,
 	createBashTool,
 	createEditTool,
 	createFindTool,
@@ -51,6 +52,7 @@ const TOOL_RENDER_CACHE = Symbol.for("pi-claude-style-tools:tool-render-cache");
 const TOOL_CACHE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-cache-invalidation");
 const TOOL_IMAGE_EXPAND_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-read-image-expansion");
 const CUSTOM_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-custom-message-render");
+const USER_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-user-message-render");
 const WRAP_MARK = "\uE000";
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_IMAGE_PREFIX = "\x1b]1337;File=";
@@ -129,20 +131,23 @@ function syncToolBackgroundMode(): void {
 	toolBackgroundMode = raw ?? "outlines";
 }
 
-function applyToolBackgroundMode(theme: unknown): void {
-	syncToolBackgroundMode();
-	if (toolBackgroundMode === "default") return;
-
+function setThemeBg(theme: unknown, key: string, value: string): void {
 	const themeAny = theme as any;
 	if (themeAny.bgColors instanceof Map) {
-		themeAny.bgColors.set("toolPendingBg", TRANSPARENT_BG);
-		themeAny.bgColors.set("toolSuccessBg", TRANSPARENT_BG);
-		themeAny.bgColors.set("toolErrorBg", TRANSPARENT_BG);
+		themeAny.bgColors.set(key, value);
 	} else if (themeAny.bgColors && typeof themeAny.bgColors === "object") {
-		themeAny.bgColors.toolPendingBg = TRANSPARENT_BG;
-		themeAny.bgColors.toolSuccessBg = TRANSPARENT_BG;
-		themeAny.bgColors.toolErrorBg = TRANSPARENT_BG;
+		themeAny.bgColors[key] = value;
 	}
+}
+
+function applyToolBackgroundMode(theme: unknown): void {
+	syncToolBackgroundMode();
+	setThemeBg(theme, "userMessageBg", TRANSPARENT_BG);
+	if (toolBackgroundMode === "default") return;
+
+	setThemeBg(theme, "toolPendingBg", TRANSPARENT_BG);
+	setThemeBg(theme, "toolSuccessBg", TRANSPARENT_BG);
+	setThemeBg(theme, "toolErrorBg", TRANSPARENT_BG);
 }
 
 function stripAnsi(text: string): string {
@@ -291,8 +296,15 @@ function clearToolRenderCache(value: unknown): void {
 	delete (value as any)[TOOL_RENDER_CACHE];
 }
 
+function unrefTimer(timer: ReturnType<typeof setTimeout> | null | undefined): void {
+	(timer as any)?.unref?.();
+}
+
 const ASSISTANT_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-message");
 const TOOL_EXECUTION_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-execution");
+const OSC133_ZONE_START = "\x1b]133;A\x07";
+const OSC133_ZONE_END = "\x1b]133;B\x07";
+const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 const WORKED_DURATION_KEY = "_piClaudeStyleWorkedDurationMs";
 const WORKED_START_KEY = "_piClaudeStyleWorkedStartMs";
 const WORKED_DURATION_MARKER = "Worked for";
@@ -486,6 +498,92 @@ function patchCustomMessageRender(): void {
 		return Array.isArray(lines) ? lines.map(normalizeLeadingCheckGlyph) : lines;
 	};
 	proto[CUSTOM_MESSAGE_PATCH_FLAG] = true;
+}
+
+function stripOsc133Zones(line: string): string {
+	return line
+		.replace(OSC133_ZONE_START, "")
+		.replace(OSC133_ZONE_END, "")
+		.replace(OSC133_ZONE_FINAL, "");
+}
+
+function stripBackgroundAnsi(text: string): string {
+	return text.replace(/\x1b\[([0-9;]*)m/g, (match, paramsText: string) => {
+		const params = paramsText === "" ? ["0"] : paramsText.split(";");
+		const kept: string[] = [];
+		for (let i = 0; i < params.length; i++) {
+			const code = Number(params[i] || "0");
+			if (code === 48) {
+				const mode = Number(params[i + 1] || "0");
+				i += mode === 2 ? 4 : mode === 5 ? 2 : 0;
+				continue;
+			}
+			if (code === 49 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107)) continue;
+			kept.push(params[i]);
+		}
+		return kept.length === 0 ? "" : `\x1b[${kept.join(";")}m`;
+	});
+}
+
+function roundedUserBorder(width: number, top: boolean): string {
+	if (width <= 1) return `${BORDER_COLOR}│${TRANSPARENT_RESET}`;
+	const left = top ? "╭" : "╰";
+	const right = top ? "╮" : "╯";
+	if (!top || width < 10) {
+		return `${BORDER_COLOR}${left}${"─".repeat(Math.max(0, width - 2))}${right}${TRANSPARENT_RESET}`;
+	}
+	const label = " User ";
+	const prefix = "─";
+	const suffixWidth = Math.max(0, width - 2 - visibleWidth(prefix) - visibleWidth(label));
+	return `${BORDER_COLOR}${left}${prefix}${TRANSPARENT_RESET}${label}${BORDER_COLOR}${"─".repeat(suffixWidth)}${right}${TRANSPARENT_RESET}`;
+}
+
+function trimAnsiRight(text: string): string {
+	let trimmed = text;
+	while (true) {
+		const next = trimmed.replace(/[ \t]+((?:\x1b\[[0-9;]*m)*)$/g, "$1");
+		if (next === trimmed) return trimmed;
+		trimmed = next;
+	}
+}
+
+function cleanUserMessageLine(line: string): string {
+	return `${TRANSPARENT_BG}${trimAnsiRight(stripBackgroundAnsi(stripOsc133Zones(line)))}${TRANSPARENT_BG}`;
+}
+
+function borderedUserMessageLine(line: string, width: number): string {
+	const innerWidth = Math.max(1, width - 4);
+	const content = clampLineWidth(cleanUserMessageLine(line), innerWidth);
+	const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
+	return `${BORDER_COLOR}│${TRANSPARENT_RESET} ${content}${padding} ${BORDER_COLOR}│${TRANSPARENT_RESET}`;
+}
+
+function patchUserMessageRender(): void {
+	const proto = UserMessageComponent.prototype as any;
+	if (proto[USER_MESSAGE_PATCH_FLAG]) return;
+	const originalRender = proto.render;
+	if (typeof originalRender !== "function") return;
+	proto.render = function patchedUserMessageRender(width: number) {
+		for (const child of (this as any).children ?? []) {
+			if (child instanceof Markdown && child.defaultTextStyle?.bgColor) {
+				child.defaultTextStyle.bgColor = undefined;
+				child.invalidate?.();
+			}
+		}
+		const borderWidth = Math.max(1, width);
+		const contentWidth = Math.max(1, borderWidth - 4);
+		const lines = originalRender.call(this, contentWidth);
+		if (!Array.isArray(lines) || lines.length === 0) return lines;
+		const rendered = [
+			roundedUserBorder(borderWidth, true),
+			...lines.map((line: string) => borderedUserMessageLine(line, borderWidth)),
+			roundedUserBorder(borderWidth, false),
+		];
+		rendered[0] = OSC133_ZONE_START + rendered[0];
+		rendered[rendered.length - 1] += OSC133_ZONE_END + OSC133_ZONE_FINAL;
+		return rendered;
+	};
+	proto[USER_MESSAGE_PATCH_FLAG] = true;
 }
 
 function patchAssistantMessages(): void {
@@ -688,10 +786,16 @@ function shouldRevealCallArgs(ctx: any): boolean {
 function stableCallSummary(ctx: any, key: string, build: () => string, reveal = shouldRevealCallArgs(ctx)): string {
 	const state = ctx?.state;
 	const cached = state?.[key];
+	const completeKey = `${key}Complete`;
 	if (!reveal) return typeof cached === "string" ? cached : "";
+	if (ctx?.argsComplete === true && state?.[completeKey] === true && typeof cached === "string") return cached;
 	if (!shouldRevealCallArgs(ctx) && typeof cached === "string" && cached) return cached;
 	const summary = build();
-	if (state) state[key] = summary;
+	if (state) {
+		state[key] = summary;
+		if (ctx?.argsComplete === true) state[completeKey] = true;
+		else delete state[completeKey];
+	}
 	return summary;
 }
 
@@ -824,6 +928,7 @@ function _scheduleGlobalBlinkTimer(): void {
 		}
 		_scheduleGlobalBlinkTimer();
 	}, intervalMs);
+	unrefTimer(_globalBlinkTimer);
 }
 
 function _stopGlobalBlinkTimerIfEmpty(): void {
@@ -1712,6 +1817,18 @@ function parseDiff(oldContent: string, newContent: string, ctxLines = 3): Parsed
 	return { lines, added, removed, chars: oldContent.length + newContent.length };
 }
 
+function getCachedParsedDiff(ctx: any, key: string, oldContent: string, newContent: string): ParsedDiff {
+	if (ctx.state?._parsedDiffKey === key && ctx.state._parsedDiff) {
+		return ctx.state._parsedDiff as ParsedDiff;
+	}
+	const diff = parseDiff(oldContent, newContent);
+	if (ctx.state) {
+		ctx.state._parsedDiffKey = key;
+		ctx.state._parsedDiff = diff;
+	}
+	return diff;
+}
+
 function wordDiffAnalysis(
 	oldText: string,
 	newText: string,
@@ -2043,6 +2160,20 @@ function summarizeEditOperations(operations: Array<{ oldText: string; newText: s
 	const totalLines = diffs.reduce((sum, diff) => sum + diff.lines.length, 0);
 	const totalHunks = diffs.reduce((sum, diff) => sum + diff.lines.filter((l) => l.type === "sep").length + (diff.lines.length ? 1 : 0), 0);
 	return { diffs, totalAdded, totalRemoved, totalLines, totalHunks, summary: summarizeDiff(totalAdded, totalRemoved) };
+}
+
+type EditOperationSummary = ReturnType<typeof summarizeEditOperations>;
+
+function getCachedEditOperationSummary(ctx: any, key: string, operations: Array<{ oldText: string; newText: string }>): EditOperationSummary {
+	if (ctx.state?._editSummaryKey === key && ctx.state._editSummary) {
+		return ctx.state._editSummary as EditOperationSummary;
+	}
+	const summary = summarizeEditOperations(operations);
+	if (ctx.state) {
+		ctx.state._editSummaryKey = key;
+		ctx.state._editSummary = summary;
+	}
+	return summary;
 }
 
 function normalizeToLf(text: string): string {
@@ -2755,41 +2886,48 @@ function formatApplyPatchLine(change: ApplyPatchChangePreview, theme: Theme): st
 	return formatLineMeta(change.line, theme);
 }
 
-function getApplyPatchResultMeta(args: any, ctx: any, sp: (path: string) => string): ApplyPatchResultMeta | null {
-	const patchText = getStringArg(args ?? ctx?.args, "patchText", "patch_text");
+function getCachedApplyPatchPreview(patchText: string, sp: (path: string) => string, ctx: any): ApplyPatchPreview | null {
 	if (!patchText) return null;
 	const key = `apply-meta:${ctx.cwd ?? process.cwd()}:${hashText(patchText)}`;
-	if (ctx.state?._applyPatchMetaKey === key && ctx.state._applyPatchMeta) {
-		return ctx.state._applyPatchMeta as ApplyPatchResultMeta;
+	if (ctx.state?._applyPatchMetaKey === key && ctx.state._applyPatchPreview) {
+		return ctx.state._applyPatchPreview as ApplyPatchPreview;
 	}
 	try {
-		const meta = buildApplyPatchResultMeta(parseApplyPatchPreview(patchText, sp, ctx.cwd ?? process.cwd()));
+		const preview = parseApplyPatchPreview(patchText, sp, ctx.cwd ?? process.cwd());
 		if (ctx.state) {
 			ctx.state._applyPatchMetaKey = key;
-			ctx.state._applyPatchMeta = meta;
+			ctx.state._applyPatchPreview = preview;
+			ctx.state._applyPatchMeta = buildApplyPatchResultMeta(preview);
 		}
-		return meta;
+		return preview;
 	} catch {
 		return null;
 	}
 }
 
+function getApplyPatchResultMeta(args: any, ctx: any, sp: (path: string) => string): ApplyPatchResultMeta | null {
+	const patchText = getStringArg(args ?? ctx?.args, "patchText", "patch_text");
+	if (!patchText) return null;
+	const preview = getCachedApplyPatchPreview(patchText, sp, ctx);
+	return preview && ctx.state?._applyPatchMeta ? (ctx.state._applyPatchMeta as ApplyPatchResultMeta) : null;
+}
+
 function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: string) => string): Text {
 	syncToolCallStatus(ctx);
 	const patchText = getStringArg(args, "patchText", "patch_text");
-	const files = ctx.argsComplete ? extractApplyPatchFiles(patchText) : [];
-	if (ctx.argsComplete) ctx.state._openAiPatchFiles = files.map((filePath) => sp(filePath));
 	const summary = stableCallSummary(ctx, "_callSummary", () => summarizeOpenAiToolCall("apply_patch", args, theme, sp));
 	const hdr = toolHeader("Apply Patch", summary, theme, toolStatusDot(ctx, theme));
 
-	if (!(ctx.argsComplete && files.length > 0)) return makeText(ctx.lastComponent, hdr);
-
-	const preview = parseApplyPatchPreview(patchText, sp, ctx.cwd ?? process.cwd());
+	if (!ctx.argsComplete) return makeText(ctx.lastComponent, hdr);
+	const preview = getCachedApplyPatchPreview(patchText, sp, ctx);
+	if (!preview || preview.changes.length === 0) {
+		ctx.state._openAiPatchFiles = [];
+		return makeText(ctx.lastComponent, hdr);
+	}
 	ctx.state._openAiPatchFiles = preview.changes.map((change) => change.displayPath);
-	ctx.state._applyPatchMeta = buildApplyPatchResultMeta(preview);
-	ctx.state._applyPatchMetaKey = `apply-meta:${ctx.cwd ?? process.cwd()}:${hashText(patchText)}`;
 
-	const key = `apply-preview:${hashText(patchText)}:${ctx.expanded ? 1 : 0}`;
+	const diffWidth = branchDiffWidth();
+	const key = `apply-preview:${ctx.state._applyPatchMetaKey ?? hashText(patchText)}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 	if (ctx.state._applyPatchPreviewKey !== key) {
 		ctx.state._applyPatchPreviewKey = key;
 		ctx.state._applyPatchPreviewBody = theme.fg("muted", "(rendering…)");
@@ -2797,7 +2935,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 		const dc = resolveDiffColors(theme);
 		if (preview.changes.length === 1) {
 			const [change] = preview.changes;
-			renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, branchDiffWidth())
+			renderSplit(change.diff, change.language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, diffWidth)
 				.then((rendered) => {
 					if (ctx.state._applyPatchPreviewKey !== key) return;
 					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`;
@@ -2817,7 +2955,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 				: Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
 			Promise.all(
 				preview.changes.slice(0, maxShown).map((change, index) =>
-					renderSplit(change.diff, change.language, previewLines, dc, branchDiffWidth())
+					renderSplit(change.diff, change.language, previewLines, dc, diffWidth)
 						.then((rendered) => `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`)
 						.catch(() => `${index + 1}. ${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`),
 				),
@@ -3181,6 +3319,7 @@ export default function (pi: ExtensionAPI) {
 	patchReadImageExpansion();
 	patchGlobalToolBorders();
 	patchCustomMessageRender();
+	patchUserMessageRender();
 	patchAssistantMessages();
 	patchToolExecutionRenderers();
 	applyDiffPalette();
@@ -3540,11 +3679,12 @@ export default function (pi: ExtensionAPI) {
 			if (d?._type === "new") {
 				const content = typeof ctx.args?.content === "string" ? ctx.args.content : "";
 				const lineTotal = typeof d.lines === "number" ? d.lines : lineCount(content);
-				const syntheticDiff = parseDiff("", content);
+				const contentHash = hashText(content);
+				const syntheticDiff = getCachedParsedDiff(ctx, `nf-diff:${d.filePath}:${contentHash}`, "", content);
 				const richSummary = diffSummaryWithMeta(syntheticDiff.added, 0, 1, "new file");
 				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
 				const diffWidth = branchDiffWidth();
-				const pk = `nf:${d.filePath}:${hashText(content)}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
+				const pk = `nf:${d.filePath}:${contentHash}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 				if (ctx.state._nfk !== pk) {
 					ctx.state._nfk = pk;
 					ctx.state._nft = withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
@@ -3613,11 +3753,12 @@ export default function (pi: ExtensionAPI) {
 			const operations = getEditOperations(args);
 			const revealSummary = shouldRevealCallArgs(ctx) || (!!fp && hasOwnArg(args, "edits"));
 			const summary = stableCallSummary(ctx, "_callSummary", () => shouldRevealCallArgs(ctx) && operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp), revealSummary);
-			const { diffs: fallbackDiffs, summary: editSummary } = summarizeEditOperations(operations);
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader("Edit", summary, theme, ` ${toolStatusDot(ctx, theme)}`);
 			if (!(ctx.argsComplete && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
-			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${ctx.expanded ? 1 : 0}`;
+			const diffWidth = branchDiffWidth();
+			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
+			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, key, operations);
 			if (ctx.state._pk !== key) {
 				ctx.state._pk = key;
 				ctx.state._ptBody = theme.fg("muted", "(rendering…)");
