@@ -466,11 +466,12 @@ class ThinkingParagraph {
 
 	render(width: number): string[] {
 		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-		// " ✽ " = 1 margin + symbol + space = 3 visible chars
+		// " ✻ " = 1 margin + symbol + space = 3 visible chars
 		const PREFIX_W = 3;
+		const prefix = `${WORKED_LINE_FG}✻${RESET}`;
 		if (width <= PREFIX_W) {
 			this.cachedWidth = width;
-			this.cachedLines = [" ✽ "];
+			this.cachedLines = [` ${prefix} `];
 			return this.cachedLines;
 		}
 		const lines = sanitizeRenderedTextBlockLines(this.md.render(width - PREFIX_W));
@@ -478,7 +479,7 @@ class ThinkingParagraph {
 		const rendered = lines.map((line: string) => {
 			if (!symbolPlaced && stripAnsi(line).trim()) {
 				symbolPlaced = true;
-				return ` ✽ ${line}`;
+				return ` ${prefix} ${line}`;
 			}
 			return `   ${line}`;
 		});

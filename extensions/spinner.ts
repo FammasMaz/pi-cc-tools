@@ -7,12 +7,24 @@ import { Loader } from "@mariozechner/pi-tui";
 // or freeze as the session grows.
 // ---------------------------------------------------------------------------
 
-const SPINNER_CHARS = ["·", "✢", "✳", "✶", "✻", "✽"];
-const OB_FRAMES = [...SPINNER_CHARS, ...[...SPINNER_CHARS].reverse()];
 const RAW_ANSI_RE = /\x1b\[[0-9;]*m/;
 const RESET = "\x1b[0m";
 const CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
 const STATUS_DIM = "\x1b[38;2;153;153;153m";
+
+// Match OpenBrawd's spinner glyph set, with the final Ghostty frame restored
+// to ✽ because the user's font-codepoint-map now centers it correctly.
+function getDefaultSpinnerCharacters(): string[] {
+	if (process.env.TERM === "xterm-ghostty") {
+		return ["·", "✢", "✳", "✶", "✻", "✽"];
+	}
+	return process.platform === "darwin"
+		? ["·", "✢", "✳", "✶", "✻", "✽"]
+		: ["·", "✢", "*", "✶", "✻", "✽"];
+}
+
+const SPINNER_CHARS = getDefaultSpinnerCharacters();
+const OB_FRAMES = [...SPINNER_CHARS, ...[...SPINNER_CHARS].reverse()];
 const LOADER_INTERVAL_MS = 250;
 const LOADER_LAST_TEXT = Symbol.for("pi-claude-style-tools:loader-last-text");
 const LOADER_ACTIVE = Symbol.for("pi-claude-style-tools:loader-active");
