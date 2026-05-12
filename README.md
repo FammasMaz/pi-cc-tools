@@ -14,6 +14,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **MCP-aware rendering** with hidden, summary, and preview modes
 - **Configurable output modes** for read, search, bash, and MCP results
 - **Transparent tool backgrounds** in `transparent` or `border` mode
+- **Theme-adaptive palette** — borders, branch connectors, dim text, spinner accent, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
 - **Transparent edit/write diffs** with universal red/green diff colors
 - **Global border patch** for all tool rows, including unknown/custom tools
 
@@ -31,9 +32,54 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
   "diffCollapsedLines": 24,
+  "themeAdaptive": true,
   "diffTheme": "github-dark"
 }
 ```
+
+### Theme integration
+
+When `themeAdaptive` is `true` (default), the following colors are derived from the active pi theme on every render and re-derived whenever the theme changes:
+
+| Element | Derived from |
+|---------|--------------|
+| Tool outline borders (top/bottom rules) | `borderMuted` |
+| Branch connectors (`├─`, `└─`, `│`) | `dim` (fallback: `muted`) |
+| "✻ Worked for Ns" line | `muted` |
+| Thinking-block italic gray | `muted` |
+| Diff add/remove accents | `toolDiffAdded` / `toolDiffRemoved` |
+| Diff background tints | mixed against `toolSuccessBg` base |
+| Spinner verb text (`Working…`) | `borderAccent` (fallback: `accent`) |
+| Spinner status text | `muted` |
+
+User-supplied `diffTheme` presets and `diffColors` overrides always win over theme-derived defaults. File-type icons (e.g. `ts`, `py`, `rs`) keep their language-identity colors and are not theme-derived.
+
+Set `themeAdaptive: false` to keep the original fixed Claude-style palette regardless of the active pi theme.
+
+#### Toggle at runtime with `/cc-theme`
+
+```text
+/cc-theme           # show current setting + theme name
+/cc-theme status    # show current setting + color preview (incl. spinner)
+/cc-theme on        # follow pi theme
+/cc-theme off       # keep fixed Claude palette
+/cc-theme toggle    # flip the current value
+```
+
+The selection is persisted to `~/.pi/settings.json` and applied to the next rendered tool row. No restart required.
+
+#### Repaint the spinner with `/cc-spinner`
+
+The spinner glyph itself is still colored by pi's loader using `accent`, while the verb text (e.g. `Cooking…`) follows `borderAccent` by default so it stays lively without being the exact same color as the glyph. The status suffix (e.g. `(thinking · ↓ 10 tokens · 2s)`) follows `muted`. Use `/cc-spinner` to bind either text element to any other theme color key:
+
+```text
+/cc-spinner preview          # list every common theme key with a colored sample
+/cc-spinner verb <key>       # change the verb color (e.g. thinkingHigh, mdHeading)
+/cc-spinner status <key>     # change the status suffix color
+/cc-spinner reset            # restore defaults (verb=borderAccent, status=muted)
+```
+
+The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in `~/.pi/settings.json` and applied on the next spinner tick.
 
 ### Tool background modes
 

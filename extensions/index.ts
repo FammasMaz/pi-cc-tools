@@ -42,9 +42,13 @@ import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 
 const RESET = "\x1b[0m";
-const BORDER_COLOR = "\x1b[38;5;238m";
 const TRANSPARENT_BG = "\x1b[49m";
 const TRANSPARENT_RESET = `${RESET}${TRANSPARENT_BG}`;
+
+// Border / branch rule colors. Defaults match the previous hardcoded values
+// so behavior is identical when the theme is unavailable or themeAdaptive=false.
+// `applyThemePaletteIfNeeded(theme)` re-derives these from `theme.fg("borderMuted"|"muted")`.
+let BORDER_COLOR = "\x1b[38;5;238m";
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const ANSI_PRESENT_RE = /\x1b\[[0-9;]*m/;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
@@ -72,6 +76,26 @@ interface SettingsFile {
 	diffCollapsedLines?: number;
 	diffTheme?: string;
 	diffColors?: Record<string, string>;
+	/**
+	 * When true (default), derive borders, dim text, branch rules, and diff
+	 * accents from the active pi theme via `theme.getFgAnsi`/`getBgAnsi`.
+	 * Explicit `diffTheme` / `diffColors` always win over theme-derived
+	 * defaults so users keep full control.
+	 */
+	themeAdaptive?: boolean;
+	/**
+	 * Theme color key used for the spinner verb (e.g. "Cooking…"). Defaults
+	 * to "accent". Useful when the active theme's accent is overloaded for
+	 * borders, headings, or bash mode and the verb should pop differently.
+	 * Valid keys are any of the pi theme `ThemeColor` names (e.g. accent,
+	 * borderAccent, success, warning, mdHeading, thinkingMedium, bashMode).
+	 */
+	spinnerVerbColor?: string;
+	/**
+	 * Theme color key used for the spinner status suffix (the parenthesized
+	 * "(thinking · ↓ 10 tokens · 2s)" trailer). Defaults to "muted".
+	 */
+	spinnerStatusColor?: string;
 }
 
 let _settingsCache: { value: SettingsFile; timestamp: number } | null = null;
@@ -101,6 +125,16 @@ function readSettings(): SettingsFile {
 	return empty;
 }
 
+// Cross-extension bust signal for spinner.ts — it watches this counter on
+// globalThis and invalidates its settings cache when it changes. Lets
+// /cc-spinner edits take effect on the next 250ms spinner tick instead of
+// waiting for the file-stat TTL.
+const SPINNER_BUST_KEY = Symbol.for("pi-claude-style-tools:spinner-settings-bust");
+function bustSpinnerSettingsCache(): void {
+	const current = ((globalThis as any)[SPINNER_BUST_KEY] as number | undefined) ?? 0;
+	(globalThis as any)[SPINNER_BUST_KEY] = current + 1;
+}
+
 function writeSettingsKey(key: string, value: unknown): void {
 	_settingsCache = null; // invalidate cache on write
 	const home = process.env.HOME ?? "";
@@ -111,7 +145,11 @@ function writeSettingsKey(key: string, value: unknown): void {
 	try {
 		if (existsSync(path)) settings = JSON.parse(readFileSync(path, "utf8")) ?? {};
 	} catch { /* start fresh */ }
-	settings[key] = value;
+	if (value === undefined) {
+		delete settings[key];
+	} else {
+		settings[key] = value;
+	}
 	try {
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
@@ -308,7 +346,8 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 const WORKED_DURATION_KEY = "_piClaudeStyleWorkedDurationMs";
 const WORKED_START_KEY = "_piClaudeStyleWorkedStartMs";
 const WORKED_DURATION_MARKER = "Worked for";
-const WORKED_LINE_FG = "\x1b[38;2;140;140;140m";
+// WORKED_LINE_FG is theme-derived (from "muted") when themeAdaptive is on.
+let WORKED_LINE_FG = "\x1b[38;2;140;140;140m";
 let currentAgentWorkStartMs: number | undefined;
 let currentAssistantMessageStartMs: number | undefined;
 
@@ -428,8 +467,9 @@ class ThinkingParagraph {
 		_defaultTextStyle?: ConstructorParameters<typeof Markdown>[4],
 	) {
 		// Use a plain theme that strips all color/formatting from thinking blocks.
-		// Every element gets the same dim gray italic treatment.
-		const DIM_FG = "\x1b[38;2;140;140;140m";
+		// Every element gets the same dim italic treatment, tracking the active
+		// pi theme's "muted" color (falls back to the previous gray when no theme).
+		const DIM_FG = WORKED_LINE_FG;
 		const ITALIC = "\x1b[3m";
 		const wrap = (s: string) => `${DIM_FG}${ITALIC}${s}`;
 		const plainTheme: ConstructorParameters<typeof Markdown>[3] = {
@@ -760,6 +800,7 @@ function isBlinkOn(): boolean {
 }
 
 function toolHeader(tool: string, summary: string, theme: Theme, prefix = ""): string {
+	applyThemePaletteIfNeeded(theme);
 	const label = theme.fg("toolTitle", theme.bold(tool));
 	if (!summary) return `${prefix}${label}`;
 	return `${prefix}${label} ${WRAP_MARK}${theme.fg("accent", summary)}`;
@@ -1242,10 +1283,44 @@ function loadDiffConfig(): DiffUserConfig {
 	return { diffTheme: settings.diffTheme, diffColors: settings.diffColors };
 }
 
+// 6x6x6 color cube channel values used by pi's 256color fallback.
+const CUBE_VALUES = [0, 95, 135, 175, 215, 255];
+
+function xterm256ToRgb(index: number): { r: number; g: number; b: number } | null {
+	if (!Number.isInteger(index) || index < 0 || index > 255) return null;
+	if (index < 16) {
+		// Standard 16 ANSI colors — terminal-defined, approximate with VS Code defaults.
+		const basic: Array<[number, number, number]> = [
+			[0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0],
+			[0, 0, 128], [128, 0, 128], [0, 128, 128], [192, 192, 192],
+			[128, 128, 128], [255, 0, 0], [0, 255, 0], [255, 255, 0],
+			[0, 0, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255],
+		];
+		const [r, g, b] = basic[index];
+		return { r, g, b };
+	}
+	if (index < 232) {
+		const i = index - 16;
+		return {
+			r: CUBE_VALUES[Math.floor(i / 36) % 6],
+			g: CUBE_VALUES[Math.floor(i / 6) % 6],
+			b: CUBE_VALUES[i % 6],
+		};
+	}
+	const level = 8 + (index - 232) * 10;
+	return { r: level, g: level, b: level };
+}
+
 function parseAnsiRgb(ansi: string): { r: number; g: number; b: number } | null {
+	if (!ansi) return null;
 	const esc = "\u001b";
-	const m = ansi.match(new RegExp(`${esc}\\[(?:38|48);2;(\\d+);(\\d+);(\\d+)m`));
-	return m ? { r: +m[1], g: +m[2], b: +m[3] } : null;
+	// Truecolor: \e[38;2;R;G;Bm or \e[48;2;R;G;Bm
+	const tc = ansi.match(new RegExp(`${esc}\\[(?:38|48);2;(\\d+);(\\d+);(\\d+)m`));
+	if (tc) return { r: +tc[1], g: +tc[2], b: +tc[3] };
+	// 256-color: \e[38;5;Nm or \e[48;5;Nm — happens on Apple Terminal, screen, etc.
+	const idx = ansi.match(new RegExp(`${esc}\\[(?:38|48);5;(\\d+)m`));
+	if (idx) return xterm256ToRgb(+idx[1]);
+	return null;
 }
 
 function hexToBgAnsi(hex: string): string {
@@ -1262,6 +1337,55 @@ function hexToFgAnsi(hex: string): string {
 	const g = Number.parseInt(hex.slice(3, 5), 16);
 	const b = Number.parseInt(hex.slice(5, 7), 16);
 	return `\x1b[38;2;${r};${g};${b}m`;
+}
+
+// ---------------------------------------------------------------------------
+// Theme palette extraction — pull RGB from the active pi theme so our
+// hardcoded greys and accent colors track the user's selected theme.
+//
+// `theme.getFgAnsi(name)` / `theme.getBgAnsi(name)` return raw ANSI escapes
+// (either truecolor or 256color depending on the terminal). We parse those
+// back into RGB so we can mix tints for diff backgrounds.
+// ---------------------------------------------------------------------------
+
+type Rgb = { r: number; g: number; b: number };
+
+function safeFgAnsi(theme: any, key: string): string | null {
+	try {
+		const ansi = theme?.getFgAnsi?.(key);
+		return typeof ansi === "string" && ansi.length > 0 ? ansi : null;
+	} catch {
+		return null;
+	}
+}
+
+function safeBgAnsi(theme: any, key: string): string | null {
+	try {
+		const ansi = theme?.getBgAnsi?.(key);
+		return typeof ansi === "string" && ansi.length > 0 ? ansi : null;
+	} catch {
+		return null;
+	}
+}
+
+function themeFgRgb(theme: any, key: string): Rgb | null {
+	const ansi = safeFgAnsi(theme, key);
+	return ansi ? parseAnsiRgb(ansi) : null;
+}
+
+function themeBgRgb(theme: any, key: string): Rgb | null {
+	const ansi = safeBgAnsi(theme, key);
+	return ansi ? parseAnsiRgb(ansi) : null;
+}
+
+// Cache theme identity so we only recompute on theme change. The Theme
+// object is reused across renders within a single session unless the user
+// switches themes via the picker.
+let _themePaletteCacheTheme: unknown = null;
+
+function themeAdaptiveEnabled(): boolean {
+	const settings = readSettings();
+	return settings.themeAdaptive !== false;
 }
 
 let DIFF_THEME: BundledTheme = (process.env.DIFF_THEME as BundledTheme | undefined) ?? "github-dark";
@@ -1353,16 +1477,24 @@ function rgbToBgAnsi(c: { r: number; g: number; b: number }): string {
 	return `\x1b[48;2;${Math.round(c.r)};${Math.round(c.g)};${Math.round(c.b)}m`;
 }
 
-function autoDeriveBgFromTheme(_theme: any): void {
-	// Universal diff palette: stable red/green across dark themes.
-	const base = FALLBACK_BASE_BG;
-	const addFg = UNIVERSAL_DIFF_ADD_FG;
-	const delFg = UNIVERSAL_DIFF_DEL_FG;
-	const addTint = mixRgb(addFg, ADDITION_TINT_TARGET, 0.35);
-	const delTint = mixRgb(delFg, DELETION_TINT_TARGET, 0.65);
+function autoDeriveBgFromTheme(theme: any): void {
+	// Diff palette derivation.
+	//
+	// `toolDiffAdded` / `toolDiffRemoved` from the active pi theme give us the
+	// fg accents. The base background is taken from `toolSuccessBg` (close to
+	// the panel color the row will sit on) so the tinted backgrounds blend in
+	// instead of forcing a hardcoded dark hue. Falls back to the universal
+	// dark palette when the theme is unavailable or themeAdaptive=false.
+	const useTheme = themeAdaptiveEnabled() && theme;
+	const addFgRgb = (useTheme && themeFgRgb(theme, "toolDiffAdded")) || UNIVERSAL_DIFF_ADD_FG;
+	const delFgRgb = (useTheme && themeFgRgb(theme, "toolDiffRemoved")) || UNIVERSAL_DIFF_DEL_FG;
+	const base = (useTheme && themeBgRgb(theme, "toolSuccessBg")) || FALLBACK_BASE_BG;
 
-	FG_ADD = `\x1b[38;2;${Math.round(addFg.r)};${Math.round(addFg.g)};${Math.round(addFg.b)}m`;
-	FG_DEL = `\x1b[38;2;${Math.round(delFg.r)};${Math.round(delFg.g)};${Math.round(delFg.b)}m`;
+	const addTint = mixRgb(addFgRgb, ADDITION_TINT_TARGET, 0.35);
+	const delTint = mixRgb(delFgRgb, DELETION_TINT_TARGET, 0.65);
+
+	FG_ADD = `\x1b[38;2;${Math.round(addFgRgb.r)};${Math.round(addFgRgb.g)};${Math.round(addFgRgb.b)}m`;
+	FG_DEL = `\x1b[38;2;${Math.round(delFgRgb.r)};${Math.round(delFgRgb.g)};${Math.round(delFgRgb.b)}m`;
 	BG_ADD = rgbToBgAnsi(mixRgb(base, addTint, 0.24));
 	BG_DEL = rgbToBgAnsi(mixRgb(base, delTint, 0.12));
 	BG_ADD_W = rgbToBgAnsi(mixRgb(base, addTint, 0.44));
@@ -1376,12 +1508,83 @@ function autoDeriveBgFromTheme(_theme: any): void {
 	DEFAULT_DIFF_COLORS = { fgAdd: FG_ADD, fgDel: FG_DEL, fgCtx: FG_DIM };
 }
 
+// Track which palette fields the user explicitly set so theme-derived
+// updates don't clobber their config.
+const _explicitFgFields = new Set<"fgAdd" | "fgDel" | "fgDim" | "fgLnum" | "fgRule" | "fgStripe" | "fgSafeMuted">();
+
+// Original Claude-Code-style palette captured at module-load so we can
+// restore it when the user toggles themeAdaptive off at runtime.
+const _claudeStyleDefaults = {
+	BORDER_COLOR: "\x1b[38;5;238m",
+	WORKED_LINE_FG: "\x1b[38;2;140;140;140m",
+	TOOL_RULE: "\x1b[38;2;153;153;153m",
+	FG_DIM: "\x1b[38;2;80;80;80m",
+	FG_LNUM: "\x1b[38;2;100;100;100m",
+	FG_RULE: "\x1b[38;2;50;50;50m",
+	FG_STRIPE: "\x1b[38;2;40;40;40m",
+	FG_SAFE_MUTED: "\x1b[38;2;139;148;158m",
+	FG_ADD: "\x1b[38;2;100;180;120m",
+	FG_DEL: "\x1b[38;2;200;100;100m",
+};
+
+function resetThemePalette(): void {
+	BORDER_COLOR = _claudeStyleDefaults.BORDER_COLOR;
+	WORKED_LINE_FG = _claudeStyleDefaults.WORKED_LINE_FG;
+	TOOL_RULE = _claudeStyleDefaults.TOOL_RULE;
+	if (!_explicitFgFields.has("fgDim")) FG_DIM = _claudeStyleDefaults.FG_DIM;
+	if (!_explicitFgFields.has("fgLnum")) FG_LNUM = _claudeStyleDefaults.FG_LNUM;
+	if (!_explicitFgFields.has("fgRule")) FG_RULE = _claudeStyleDefaults.FG_RULE;
+	if (!_explicitFgFields.has("fgStripe")) FG_STRIPE = _claudeStyleDefaults.FG_STRIPE;
+	if (!_explicitFgFields.has("fgSafeMuted")) FG_SAFE_MUTED = _claudeStyleDefaults.FG_SAFE_MUTED;
+	if (!_explicitFgFields.has("fgAdd")) FG_ADD = _claudeStyleDefaults.FG_ADD;
+	if (!_explicitFgFields.has("fgDel")) FG_DEL = _claudeStyleDefaults.FG_DEL;
+	DIVIDER = `${FG_RULE}│${D_RST}`;
+	DEFAULT_DIFF_COLORS = { fgAdd: FG_ADD, fgDel: FG_DEL, fgCtx: FG_DIM };
+}
+
+function applyThemePaletteIfNeeded(theme: any): void {
+	if (!theme) return;
+	if (!themeAdaptiveEnabled()) return;
+	if (_themePaletteCacheTheme === theme) return; // already applied for this theme instance
+	_themePaletteCacheTheme = theme;
+
+	// Borders (top/bottom outlines, user-message frame, branch rule).
+	const borderMuted = safeFgAnsi(theme, "borderMuted");
+	if (borderMuted) BORDER_COLOR = borderMuted;
+
+	// "Worked for Ns" line + thinking-block italics share pi's `muted` color.
+	const muted = safeFgAnsi(theme, "muted");
+	if (muted) WORKED_LINE_FG = muted;
+
+	// Tool branch rule (├─ / └─ connectors). Use `dim` if present, else `muted`.
+	const dim = safeFgAnsi(theme, "dim") ?? muted;
+	if (dim) TOOL_RULE = dim;
+
+	// Diff support text colors. These are user-overridable via diffColors.* so
+	// we only touch the ones not explicitly set.
+	if (!_explicitFgFields.has("fgDim") && muted) FG_DIM = muted;
+	if (!_explicitFgFields.has("fgLnum") && muted) FG_LNUM = muted;
+	if (!_explicitFgFields.has("fgRule") && borderMuted) FG_RULE = borderMuted;
+	if (!_explicitFgFields.has("fgStripe") && borderMuted) FG_STRIPE = borderMuted;
+	if (!_explicitFgFields.has("fgSafeMuted") && muted) FG_SAFE_MUTED = muted;
+
+	DIVIDER = `${FG_RULE}│${D_RST}`;
+
+	// Re-trigger background derivation against the new theme unless the user
+	// set explicit bg overrides via diffTheme/diffColors.
+	if (!hasExplicitBgConfig) {
+		autoDeriveBgFromTheme(theme);
+		autoDerivePending = false;
+	}
+}
+
 function applyDiffPalette(): void {
 	const config = loadDiffConfig();
 	const preset = config.diffTheme ? DIFF_PRESETS[config.diffTheme] : null;
 	if (preset) hasExplicitBgConfig = true;
 	const overrides = config.diffColors ?? {};
 	if (Object.keys(overrides).length > 0) hasExplicitBgConfig = true;
+	_explicitFgFields.clear();
 
 	const applyBg = (key: string, presetValue: string | undefined, set: (value: string) => void) => {
 		const hex = overrides[key] ?? presetValue;
@@ -1389,11 +1592,17 @@ function applyDiffPalette(): void {
 		const ansi = hexToBgAnsi(hex);
 		if (ansi) set(ansi);
 	};
-	const applyFg = (key: string, presetValue: string | undefined, set: (value: string) => void) => {
+	const applyFg = (
+		key: "fgAdd" | "fgDel" | "fgDim" | "fgLnum" | "fgRule" | "fgStripe" | "fgSafeMuted",
+		presetValue: string | undefined,
+		set: (value: string) => void,
+	) => {
 		const hex = overrides[key] ?? presetValue;
 		if (!hex) return;
 		const ansi = hexToFgAnsi(hex);
-		if (ansi) set(ansi);
+		if (!ansi) return;
+		set(ansi);
+		_explicitFgFields.add(key);
 	};
 
 	applyBg("bgAdd", preset?.bgAdd, (v) => {
@@ -1452,6 +1661,7 @@ function applyDiffPalette(): void {
 }
 
 function resolveDiffColors(theme?: any): DiffColors {
+	applyThemePaletteIfNeeded(theme);
 	if (autoDerivePending && theme?.getFgAnsi) {
 		autoDeriveBgFromTheme(theme);
 		autoDerivePending = false;
@@ -2382,6 +2592,9 @@ function prefixThinkingLine(text: string, _theme: Theme | undefined): string {
 
 function registerThinkingLabels(pi: ExtensionAPI): void {
 	const patchMessage = (event: any, theme?: Theme) => {
+		// Keep theme-derived border / dim text colors in sync with the
+		// active pi theme. Cheap when the theme hasn't changed (identity check).
+		if (theme) applyThemePaletteIfNeeded(theme);
 		const message = event?.message;
 		if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return;
 		for (const block of message.content) {
@@ -3362,14 +3575,190 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// /cc-theme command — toggle pi-theme-adaptive coloring at runtime.
+	const THEME_MODES = ["on", "off", "toggle", "status"] as const;
+	pi.registerCommand("cc-theme", {
+		description: "Toggle whether tool borders / branch rules / diff colors follow the active pi theme",
+		getArgumentCompletions(prefix) {
+			return THEME_MODES
+				.filter((m) => m.startsWith(prefix))
+				.map((m) => ({
+					value: m,
+					label: m,
+					description:
+						m === "on" ? "Derive borders, branch rules, dim text and diff tints from the active pi theme (default)"
+						: m === "off" ? "Keep the fixed Claude-style palette regardless of theme"
+						: m === "toggle" ? "Flip between on and off"
+						: "Show the current setting and a preview of the derived colors",
+				}));
+		},
+		async handler(args, ctx) {
+			const raw = args.trim().toLowerCase();
+			const current = themeAdaptiveEnabled();
+
+			if (!raw || raw === "status") {
+				if (!ctx.hasUI) return;
+				const theme = ctx.ui.theme as any;
+				const themeName = theme?.name ?? "unknown";
+				const state = current ? "on" : "off";
+				if (raw === "status" && current) {
+					const settings = readSettings();
+					const verbKey = settings.spinnerVerbColor || "borderAccent";
+					const statusKey = settings.spinnerStatusColor || "muted";
+					const verbAnsi = safeFgAnsi(theme, verbKey) ?? safeFgAnsi(theme, "accent");
+					const statusAnsi = safeFgAnsi(theme, statusKey) ?? safeFgAnsi(theme, "muted");
+					// Print a short preview of what we derived.
+					const preview = [
+						`borders     : ${safeFgAnsi(theme, "borderMuted") ? `${safeFgAnsi(theme, "borderMuted")}────\x1b[39m` : "(unchanged)"}`,
+						`branches    : ${safeFgAnsi(theme, "dim") ?? safeFgAnsi(theme, "muted") ? `${safeFgAnsi(theme, "dim") ?? safeFgAnsi(theme, "muted")}├─ └─\x1b[39m` : "(unchanged)"}`,
+						`muted text  : ${safeFgAnsi(theme, "muted") ? `${safeFgAnsi(theme, "muted")}example dim text\x1b[39m` : "(unchanged)"}`,
+						`diff add    : ${safeFgAnsi(theme, "toolDiffAdded") ? `${safeFgAnsi(theme, "toolDiffAdded")}+ added line\x1b[39m` : "(unchanged)"}`,
+						`diff del    : ${safeFgAnsi(theme, "toolDiffRemoved") ? `${safeFgAnsi(theme, "toolDiffRemoved")}- removed line\x1b[39m` : "(unchanged)"}`,
+						`spinner verb: ${verbAnsi ? `${verbAnsi}Cooking…\x1b[39m` : "(unchanged)"} (key: ${verbKey})`,
+						`spinner stat: ${statusAnsi ? `${statusAnsi}(thinking · ↓ 10 tokens · 2s)\x1b[39m` : "(unchanged)"} (key: ${statusKey})`,
+					].join("\n  ");
+					ctx.ui.notify(`Theme adaptive: ${state} (theme "${themeName}")\n  ${preview}`, "info");
+				} else {
+					ctx.ui.notify(`Theme adaptive: ${state} (theme "${themeName}")`, "info");
+				}
+				return;
+			}
+
+			let next: boolean;
+			if (raw === "on") next = true;
+			else if (raw === "off") next = false;
+			else if (raw === "toggle") next = !current;
+			else {
+				if (ctx.hasUI) ctx.ui.notify(`Unknown option "${raw}". Options: ${THEME_MODES.join(", ")}`, "error");
+				return;
+			}
+
+			writeSettingsKey("themeAdaptive", next);
+			bustSpinnerSettingsCache();
+			// Invalidate caches so the next render re-derives from the active
+			// theme (or falls back to the fixed Claude palette).
+			_themePaletteCacheTheme = null;
+			autoDerivePending = true;
+			if (next) {
+				if (ctx.hasUI) applyThemePaletteIfNeeded(ctx.ui.theme);
+			} else {
+				resetThemePalette();
+			}
+			if (ctx.hasUI) {
+				const label = next ? "on — colors follow pi theme" : "off — fixed Claude palette";
+				ctx.ui.notify(`Theme adaptive: ${label}`, "info");
+			}
+		},
+	});
+
+	// /cc-spinner command — pick which theme color keys drive the spinner verb
+	// and status suffix.
+	const COMMON_COLOR_KEYS: readonly string[] = [
+		"accent", "borderAccent", "success", "error", "warning",
+		"muted", "dim", "text", "thinkingText",
+		"toolTitle", "mdHeading", "mdCode", "mdLink", "mdListBullet",
+		"bashMode",
+		"thinkingLow", "thinkingMedium", "thinkingHigh", "thinkingXhigh",
+		"syntaxKeyword", "syntaxFunction", "syntaxString", "syntaxType",
+	];
+	pi.registerCommand("cc-spinner", {
+		description: "Set the spinner verb or status theme color, or preview current values",
+		getArgumentCompletions(prefix) {
+			const subCommands = ["verb", "status", "reset", "preview"];
+			const parts = prefix.split(/\s+/);
+			if (parts.length <= 1) {
+				return subCommands
+					.filter((c) => c.startsWith(parts[0] ?? ""))
+					.map((c) => ({
+						value: c,
+						label: c,
+						description:
+							c === "verb" ? "Set the color key used for the spinner verb (e.g. 'Cooking…')"
+							: c === "status" ? "Set the color key used for the spinner status suffix"
+							: c === "reset" ? "Reset both verb and status to defaults (borderAccent, muted)"
+							: "Preview every theme color key with its current sample",
+					}));
+			}
+			// Second arg: color key completions for verb/status.
+			if (parts[0] === "verb" || parts[0] === "status") {
+				const keyPrefix = (parts[1] ?? "").toLowerCase();
+				return COMMON_COLOR_KEYS
+					.filter((k) => k.toLowerCase().startsWith(keyPrefix))
+					.map((k) => ({ value: k, label: k, description: `theme.fg("${k}", …)` }));
+			}
+			return [];
+		},
+		async handler(args, ctx) {
+			const parts = args.trim().split(/\s+/).filter((p) => p.length > 0);
+			const sub = (parts[0] ?? "").toLowerCase();
+			const theme = ctx.hasUI ? (ctx.ui.theme as any) : null;
+			const settings = readSettings();
+			const currentVerb = settings.spinnerVerbColor || "borderAccent";
+			const currentStatus = settings.spinnerStatusColor || "muted";
+
+			if (!sub || sub === "preview") {
+				if (!ctx.hasUI) return;
+				if (!theme) {
+					ctx.ui.notify(`Spinner verb: ${currentVerb}, status: ${currentStatus} (no theme)`, "info");
+					return;
+				}
+				const lines: string[] = [
+					`Current: verb=${currentVerb}, status=${currentStatus}`,
+					"",
+					"Preview of common theme keys (pick one for verb or status):",
+				];
+				for (const key of COMMON_COLOR_KEYS) {
+					const ansi = safeFgAnsi(theme, key);
+					const marker = key === currentVerb ? "(verb)" : key === currentStatus ? "(status)" : "";
+					const sample = ansi ? `${ansi}Cooking…\x1b[39m` : "(unmapped)";
+					lines.push(`  ${key.padEnd(16)} ${sample} ${marker}`);
+				}
+				ctx.ui.notify(lines.join("\n"), "info");
+				return;
+			}
+
+			if (sub === "reset") {
+				writeSettingsKey("spinnerVerbColor", undefined);
+				writeSettingsKey("spinnerStatusColor", undefined);
+				bustSpinnerSettingsCache();
+				if (ctx.hasUI) ctx.ui.notify("Spinner colors reset to defaults (verb=borderAccent, status=muted)", "info");
+				return;
+			}
+
+			if (sub !== "verb" && sub !== "status") {
+				if (ctx.hasUI) ctx.ui.notify(`Usage: /cc-spinner verb <key> | status <key> | reset | preview`, "error");
+				return;
+			}
+
+			const key = parts[1];
+			if (!key) {
+				if (ctx.hasUI) ctx.ui.notify(`Missing color key. Try /cc-spinner preview to see available keys.`, "error");
+				return;
+			}
+
+			// Validate the key resolves to *some* color in the active theme;
+			// accept anyway if the user insists so themes with custom keys work.
+			const ansi = theme ? safeFgAnsi(theme, key) : null;
+			const settingKey = sub === "verb" ? "spinnerVerbColor" : "spinnerStatusColor";
+			writeSettingsKey(settingKey, key);
+			bustSpinnerSettingsCache();
+			if (ctx.hasUI) {
+				const sample = ansi ? `${ansi}sample\x1b[39m` : "(key unmapped in current theme)";
+				ctx.ui.notify(`Spinner ${sub} → ${key} ${sample}`, "info");
+			}
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		applyToolBackgroundMode(ctx.ui.theme);
+		applyThemePaletteIfNeeded(ctx.ui.theme);
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
 		applyToolBackgroundMode(ctx.ui.theme);
+		applyThemePaletteIfNeeded(ctx.ui.theme);
 	});
 
 	const cwd = process.cwd();

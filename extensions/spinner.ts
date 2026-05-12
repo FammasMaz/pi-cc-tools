@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Loader } from "@mariozechner/pi-tui";
 
@@ -9,8 +11,111 @@ import { Loader } from "@mariozechner/pi-tui";
 
 const RAW_ANSI_RE = /\x1b\[[0-9;]*m/;
 const RESET = "\x1b[0m";
-const CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
-const STATUS_DIM = "\x1b[38;2;153;153;153m";
+
+// Defaults match the previous hardcoded values so behavior is identical
+// when no theme is available or themeAdaptive=false. `applyThemeColors`
+// below re-derives them from the active pi theme each tick.
+let CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
+let STATUS_DIM = "\x1b[38;2;153;153;153m";
+
+// Short TTL so /cc-spinner changes are picked up within ~1s without
+// re-reading the file on every 250ms spinner tick.
+let _spinnerSettingsCache: { value: { adaptive: boolean; verbColor: string; statusColor: string }; expires: number } | null = null;
+const SPINNER_SETTINGS_TTL_MS = 1_000;
+// Cross-extension bust signal: /cc-spinner in index.ts bumps this counter
+// and we drop the cache when it changes.
+const SPINNER_BUST_KEY = Symbol.for("pi-claude-style-tools:spinner-settings-bust");
+let _spinnerLastBust = 0;
+
+function readSpinnerSettings(): { adaptive: boolean; verbColor: string; statusColor: string } {
+	const now = Date.now();
+	const bust = ((globalThis as any)[SPINNER_BUST_KEY] as number | undefined) ?? 0;
+	if (bust !== _spinnerLastBust) {
+		_spinnerLastBust = bust;
+		_spinnerSettingsCache = null;
+	}
+	if (_spinnerSettingsCache && _spinnerSettingsCache.expires > now) {
+		return _spinnerSettingsCache.value;
+	}
+	let adaptive = true;
+	// Spinner glyph is still pi's accent. Use borderAccent for the verb so it
+	// feels themed and lively without collapsing into the exact same Claude
+	// orange as the glyph on themes like openAntigravity-dark.
+	let verbColor = "borderAccent";
+	let statusColor = "muted";
+	const paths = [`${process.cwd()}/.pi/settings.json`, `${process.env.HOME ?? ""}/.pi/settings.json`];
+	for (const p of paths) {
+		try {
+			if (!p || !existsSync(p)) continue;
+			const raw = JSON.parse(readFileSync(p, "utf8"));
+			if (raw && typeof raw === "object") {
+				if (raw.themeAdaptive === false) adaptive = false;
+				if (typeof raw.spinnerVerbColor === "string" && raw.spinnerVerbColor.length > 0) verbColor = raw.spinnerVerbColor;
+				if (typeof raw.spinnerStatusColor === "string" && raw.spinnerStatusColor.length > 0) statusColor = raw.spinnerStatusColor;
+			}
+		} catch { /* ignore */ }
+	}
+	const value = { adaptive, verbColor, statusColor };
+	_spinnerSettingsCache = { value, expires: now + SPINNER_SETTINGS_TTL_MS };
+	return value;
+}
+
+function themeAdaptiveEnabled(): boolean {
+	return readSpinnerSettings().adaptive;
+}
+
+// Original Claude-style values restored when the user turns adaptive off.
+const _DEFAULT_CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
+const _DEFAULT_STATUS_DIM = "\x1b[38;2;153;153;153m";
+
+let _themeColorsCacheTheme: unknown = null;
+let _themeColorsLastAdaptive: boolean | null = null;
+let _themeColorsLastVerbKey: string | null = null;
+let _themeColorsLastStatusKey: string | null = null;
+
+function resolveThemeColor(theme: any, key: string, fallbackKey: string): string | null {
+	if (!theme || typeof theme.getFgAnsi !== "function") return null;
+	try {
+		const v = theme.getFgAnsi(key);
+		if (typeof v === "string" && v.length > 0) return v;
+	} catch { /* ignore */ }
+	if (fallbackKey !== key) {
+		try {
+			const v = theme.getFgAnsi(fallbackKey);
+			if (typeof v === "string" && v.length > 0) return v;
+		} catch { /* ignore */ }
+	}
+	return null;
+}
+
+function applyThemeColors(theme: any): void {
+	const { adaptive, verbColor, statusColor } = readSpinnerSettings();
+
+	// Respond to runtime toggles (themeAdaptive or spinner color key changes)
+	// without restarting pi.
+	const settingsChanged = _themeColorsLastAdaptive !== adaptive
+		|| _themeColorsLastVerbKey !== verbColor
+		|| _themeColorsLastStatusKey !== statusColor;
+	if (settingsChanged) {
+		_themeColorsLastAdaptive = adaptive;
+		_themeColorsLastVerbKey = verbColor;
+		_themeColorsLastStatusKey = statusColor;
+		_themeColorsCacheTheme = null;
+		if (!adaptive) {
+			CLAUDE_ORANGE = _DEFAULT_CLAUDE_ORANGE;
+			STATUS_DIM = _DEFAULT_STATUS_DIM;
+		}
+	}
+
+	if (!theme || !adaptive) return;
+	if (_themeColorsCacheTheme === theme) return;
+	_themeColorsCacheTheme = theme;
+
+	const verb = resolveThemeColor(theme, verbColor, "accent");
+	if (verb) CLAUDE_ORANGE = verb;
+	const status = resolveThemeColor(theme, statusColor, "muted");
+	if (status) STATUS_DIM = status;
+}
 
 // Match OpenBrawd's spinner glyph set, with the final Ghostty frame restored
 // to ✽ because the user's font-codepoint-map now centers it correctly.
@@ -406,6 +511,11 @@ export default function (pi: ExtensionAPI) {
 
 	function syncWorkingMessage(force = false): void {
 		if (!activeCtx?.hasUI) return;
+		// Re-derive colors on every tick so /cc-spinner verb/status changes
+		// take effect within ~250 ms without waiting for the next pi event.
+		// applyThemeColors is identity-cached on (theme, verbKey, statusKey) so
+		// this is cheap when nothing changed.
+		applyThemeColors(activeCtx.ui?.theme);
 		const nextMessage = buildWorkingMessage();
 		if (!force && nextMessage === lastWorkingMessage) return;
 		lastWorkingMessage = nextMessage;
@@ -425,8 +535,12 @@ export default function (pi: ExtensionAPI) {
 	function getWorkingMessageIntervalMs(): number {
 		const elapsed = Date.now() - (agentStartTime || turnStartTime);
 		const tokenCount = Math.max(0, Math.round(responseLength / 4));
+		// Keep ticking once per second even when idle so /cc-spinner changes
+		// take effect within ~1s and elapsed-time crossover into the timer-on
+		// state still fires close to 30s. syncWorkingMessage short-circuits
+		// when the rendered string is unchanged, so the cost is negligible.
 		if (thinkingStatus === null && tokenCount === 0 && elapsed <= SHOW_TIMER_AFTER_MS) {
-			return Math.max(250, SHOW_TIMER_AFTER_MS - elapsed + 1);
+			return Math.max(250, Math.min(WORKING_MESSAGE_INTERVAL_MS, SHOW_TIMER_AFTER_MS - elapsed + 1));
 		}
 		return Math.max(250, WORKING_MESSAGE_INTERVAL_MS - (elapsed % WORKING_MESSAGE_INTERVAL_MS));
 	}
@@ -538,6 +652,7 @@ export default function (pi: ExtensionAPI) {
 		activeTurnId++;
 		turnActive = true;
 		activeCtx = ctx;
+		applyThemeColors(ctx.ui?.theme);
 		turnStartTime = Date.now();
 		if (!agentStartTime) agentStartTime = turnStartTime;
 		currentVerb = pickVerb();
@@ -554,6 +669,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_update", async (event, ctx) => {
 		activeCtx = ctx;
+		applyThemeColors(ctx.ui?.theme);
 		const evt = event.assistantMessageEvent;
 		let statusChanged = false;
 		const previousTokenCount = Math.max(0, Math.round(responseLength / 4));
@@ -599,6 +715,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("turn_end", async (_event, ctx) => {
 		turnActive = false;
 		activeCtx = ctx;
+		applyThemeColors(ctx.ui?.theme);
 		const turnId = activeTurnId;
 		const elapsed = Date.now() - (agentStartTime || turnStartTime);
 		stopRefreshLoop();
