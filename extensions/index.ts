@@ -9,7 +9,7 @@ import type {
 	GrepToolDetails,
 	ReadToolDetails,
 	Theme,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
 	AssistantMessageComponent,
 	CustomMessageComponent,
@@ -22,7 +22,7 @@ import {
 	createLsTool,
 	createReadTool,
 	createWriteTool,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
 	Box,
 	Container,
@@ -36,7 +36,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
@@ -606,8 +606,8 @@ function patchUserMessageRender(): void {
 	if (typeof originalRender !== "function") return;
 	proto.render = function patchedUserMessageRender(width: number) {
 		for (const child of (this as any).children ?? []) {
-			if (child instanceof Markdown && child.defaultTextStyle?.bgColor) {
-				child.defaultTextStyle.bgColor = undefined;
+			if (child instanceof Markdown && (child as any).defaultTextStyle?.bgColor) {
+				(child as any).defaultTextStyle.bgColor = undefined;
 				child.invalidate?.();
 			}
 		}

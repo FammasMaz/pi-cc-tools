@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Loader } from "@mariozechner/pi-tui";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Loader } from "@earendil-works/pi-tui";
 
 // ---------------------------------------------------------------------------
 // Patch built-in Loader with Claude/OpenBrawd-style glyphs.
