@@ -2089,7 +2089,7 @@ function setToolStatus(ctx: any, status: "pending" | "success" | "error"): void 
 }
 
 function syncToolCallStatus(ctx: any): void {
-	if (!ctx?.executionStarted || ctx?.isPartial) {
+	if (ctx?.isPartial) {
 		setToolStatus(ctx, "pending");
 		return;
 	}
