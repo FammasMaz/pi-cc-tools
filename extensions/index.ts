@@ -2090,13 +2090,13 @@ function toolHeader(tool: string, summary: string, theme: Theme, prefix = ""): s
 	return `${prefix}${label} ${WRAP_MARK}${theme.fg("accent", summary)}`;
 }
 
-function setToolStatus(ctx: any, status: "pending" | "success" | "error"): void {
+function setToolStatus(ctx: any, status: "idle" | "pending" | "success" | "error"): void {
 	ctx.state._toolStatus = status;
 }
 
 function syncToolCallStatus(ctx: any): void {
 	if (ctx?.isPartial) {
-		setToolStatus(ctx, "pending");
+		setToolStatus(ctx, ctx?.executionStarted ? "pending" : "idle");
 		return;
 	}
 	setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2311,9 +2311,10 @@ function getWriteWasNewFile(ctx: any, cwd: string, filePath: string, reveal = sh
 }
 
 function toolStatusDot(ctx: any, theme: Theme): string {
-	const status = ctx.state?._toolStatus as "pending" | "success" | "error" | undefined;
+	const status = ctx.state?._toolStatus as "idle" | "pending" | "success" | "error" | undefined;
 	if (status === "success") return `${theme.fg("success", "●")} `;
 	if (status === "error") return `${theme.fg("error", "●")} `;
+	if (status === "idle") return `${theme.fg("muted", "○")} `;
 	return `${blinkDot(ctx, theme)} `;
 }
 
