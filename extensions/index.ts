@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
-import { extname, relative, resolve } from "node:path";
+import { basename, dirname, extname, relative, resolve } from "node:path";
 
 import type {
 	BashToolDetails,
@@ -5894,6 +5894,16 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
+			// SKILL.md reads: render as [skill] block matching /skill:name style
+			const rawPath = String(args?.path ?? "");
+			const absPath = resolve(ctx.cwd ?? cwd, rawPath);
+			if (basename(absPath) === "SKILL.md") {
+				const skillName = basename(dirname(absPath)) || "SKILL.md";
+				const line =
+					theme.fg("customMessageLabel", `\x1b[1m[skill]\x1b[22m `) +
+					theme.fg("customMessageText", skillName);
+				return makeText(ctx.lastComponent, `${toolStatusDot(ctx, theme)}${line}`);
+			}
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
 				let value = sp(args.path ?? "");
 				if (args.offset || args.limit) {
