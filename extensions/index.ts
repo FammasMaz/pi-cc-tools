@@ -57,6 +57,7 @@ const TOOL_CACHE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-cac
 const TOOL_IMAGE_EXPAND_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-read-image-expansion");
 const CUSTOM_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-custom-message-render");
 const USER_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-user-message-render");
+const RTK_NOTIFY_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-rtk-notify");
 const WRAP_MARK = "\uE000";
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_IMAGE_PREFIX = "\x1b]1337;File=";
@@ -951,6 +952,139 @@ function fileExistsForTool(cwd: string, filePath: string): boolean {
 }
 
 const WRITE_EXISTED_BEFORE = new Map<string, boolean>();
+
+interface RtkRewriteRecord {
+	original: string;
+	rewritten: string;
+	notice: string;
+}
+
+const RTK_ORIGINAL_BASH_COMMANDS = new Map<string, string>();
+const RTK_REWRITES_BY_TOOL_ID = new Map<string, RtkRewriteRecord>();
+const RTK_PENDING_REWRITES: RtkRewriteRecord[] = [];
+const RTK_PENDING_REWRITE_LIMIT = 20;
+
+function normalizeRtkCommandPreview(command: string): string {
+	return command.replace(/\s+/g, " ").trim();
+}
+
+function rtkPreviewMatches(command: string, preview: string): boolean {
+	const normalized = normalizeRtkCommandPreview(command);
+	const normalizedPreview = normalizeRtkCommandPreview(preview);
+	if (!normalized || !normalizedPreview) return false;
+	if (normalized === normalizedPreview) return true;
+	if (normalizedPreview.endsWith("…")) {
+		return normalized.startsWith(normalizedPreview.slice(0, -1));
+	}
+	return normalized.startsWith(normalizedPreview) || normalizedPreview.startsWith(normalized);
+}
+
+function parseRtkRewriteNotice(message: string): RtkRewriteRecord | undefined {
+	const match = message.match(/^RTK rewrite:\s*(.*?)\s*->\s*(.+)$/s);
+	if (!match) return undefined;
+	const original = match[1]?.trim() ?? "";
+	const rewritten = match[2]?.trim() ?? "";
+	if (!original || !rewritten) return undefined;
+	return { original, rewritten, notice: message };
+}
+
+function rememberPendingRtkRewrite(record: RtkRewriteRecord): void {
+	RTK_PENDING_REWRITES.push(record);
+	while (RTK_PENDING_REWRITES.length > RTK_PENDING_REWRITE_LIMIT) RTK_PENDING_REWRITES.shift();
+}
+
+function findRtkRewriteToolId(record: RtkRewriteRecord): string | undefined {
+	const entries = [...RTK_ORIGINAL_BASH_COMMANDS.entries()].reverse();
+	return entries.find(([, command]) => rtkPreviewMatches(command, record.original))?.[0];
+}
+
+function rememberRtkRewrite(record: RtkRewriteRecord): void {
+	const toolCallId = findRtkRewriteToolId(record);
+	if (toolCallId) {
+		RTK_REWRITES_BY_TOOL_ID.set(toolCallId, record);
+		return;
+	}
+	rememberPendingRtkRewrite(record);
+}
+
+function takePendingRtkRewrite(originalCommand: string | undefined, currentCommand: string | undefined): RtkRewriteRecord | undefined {
+	const index = RTK_PENDING_REWRITES.findIndex((record) => {
+		return (!!originalCommand && rtkPreviewMatches(originalCommand, record.original))
+			|| (!!currentCommand && (rtkPreviewMatches(currentCommand, record.rewritten) || rtkPreviewMatches(currentCommand, record.original)));
+	});
+	if (index === -1) return undefined;
+	const [record] = RTK_PENDING_REWRITES.splice(index, 1);
+	return record;
+}
+
+function ensureRtkRewriteForContext(ctx: any, args: any): RtkRewriteRecord | undefined {
+	if (ctx?.state?._rtkRewriteRecord) return ctx.state._rtkRewriteRecord as RtkRewriteRecord;
+	const toolCallId = typeof ctx?.toolCallId === "string" ? ctx.toolCallId : undefined;
+	const currentCommand = typeof args?.command === "string" ? args.command : undefined;
+	const originalCommand = toolCallId ? RTK_ORIGINAL_BASH_COMMANDS.get(toolCallId) : undefined;
+	if (!toolCallId) return undefined;
+
+	let record = RTK_REWRITES_BY_TOOL_ID.get(toolCallId);
+	if (!record) {
+		record = takePendingRtkRewrite(originalCommand, currentCommand);
+		if (record) RTK_REWRITES_BY_TOOL_ID.set(toolCallId, record);
+	}
+	if (!record && originalCommand && currentCommand && normalizeRtkCommandPreview(originalCommand) !== normalizeRtkCommandPreview(currentCommand)) {
+		record = {
+			original: originalCommand,
+			rewritten: currentCommand,
+			notice: `RTK rewrite: ${originalCommand} -> ${currentCommand}`,
+		};
+		RTK_REWRITES_BY_TOOL_ID.set(toolCallId, record);
+	}
+	if (record && ctx?.state) ctx.state._rtkRewriteRecord = record;
+	return record;
+}
+
+function formatRtkRewriteDetails(record: RtkRewriteRecord, theme: Theme): string {
+	return [
+		theme.fg("muted", "RTK rewrite"),
+		`${theme.fg("muted", "original :")} ${theme.fg("dim", record.original)}`,
+		`${theme.fg("muted", "rewritten:")} ${theme.fg("dim", record.rewritten)}`,
+	].join("\n");
+}
+
+function patchRtkRewriteNotifications(ui: any): void {
+	if (!ui || ui[RTK_NOTIFY_PATCH_FLAG]) return;
+	const originalNotify = ui.notify;
+	if (typeof originalNotify !== "function") return;
+	ui.notify = function patchedRtkNotify(message: string, type?: "info" | "warning" | "error") {
+		if (typeof message === "string") {
+			const rewrite = parseRtkRewriteNotice(message);
+			if (rewrite) {
+				rememberRtkRewrite(rewrite);
+				return;
+			}
+		}
+		return originalNotify.call(this, message, type);
+	};
+	ui[RTK_NOTIFY_PATCH_FLAG] = true;
+}
+
+function trackRtkOriginalBashCommand(toolCallId: unknown, args: unknown): void {
+	if (typeof toolCallId !== "string") return;
+	const command = (args as any)?.command;
+	if (typeof command === "string" && command.trim()) {
+		RTK_ORIGINAL_BASH_COMMANDS.set(toolCallId, command);
+	}
+}
+
+function forgetRtkBashCommand(toolCallId: unknown): void {
+	if (typeof toolCallId !== "string") return;
+	RTK_ORIGINAL_BASH_COMMANDS.delete(toolCallId);
+	RTK_REWRITES_BY_TOOL_ID.delete(toolCallId);
+}
+
+function clearRtkRewriteState(): void {
+	RTK_ORIGINAL_BASH_COMMANDS.clear();
+	RTK_REWRITES_BY_TOOL_ID.clear();
+	RTK_PENDING_REWRITES.length = 0;
+}
 
 function getWriteWasNewFile(ctx: any, cwd: string, filePath: string, reveal = shouldRevealCallArgs(ctx)): boolean | undefined {
 	if (typeof ctx?.state?._writeWasNewFile === "boolean") return ctx.state._writeWasNewFile;
@@ -3888,15 +4022,24 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		clearRtkRewriteState();
 		if (!ctx.hasUI) return;
+		patchRtkRewriteNotifications(ctx.ui);
 		applyToolBackgroundMode(ctx.ui.theme);
 		applyThemePaletteIfNeeded(ctx.ui.theme);
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
+		patchRtkRewriteNotifications(ctx.ui);
 		applyToolBackgroundMode(ctx.ui.theme);
 		applyThemePaletteIfNeeded(ctx.ui.theme);
+	});
+
+	pi.on("tool_execution_start", async (event) => {
+		const toolName = (event as any)?.toolName;
+		if (toolName !== "bash") return;
+		trackRtkOriginalBashCommand((event as any)?.toolCallId, (event as any)?.args);
 	});
 
 	const cwd = process.cwd();
@@ -3956,19 +4099,24 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
+			const rewrite = ensureRtkRewriteForContext(ctx, args);
 			const summary = stableCallSummary(ctx, "_callSummary", () => summarizeText(args.command, 72));
-			return makeText(ctx.lastComponent, toolHeader("Bash", summary, theme, toolStatusDot(ctx, theme)));
+			const rtkBadge = rewrite ? theme.fg("muted", " (RTK)") : "";
+			return makeText(ctx.lastComponent, toolHeader("Bash", `${summary}${rtkBadge}`, theme, toolStatusDot(ctx, theme)));
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			const details = result.details as BashToolDetails | undefined;
+			const rewrite = ensureRtkRewriteForContext(ctx, ctx.args);
 			const output = result.content[0]?.type === "text" ? result.content[0].text : "";
 			const nonEmpty = output.split("\n").filter((line) => line.trim().length > 0);
 			if (isPartial) {
-				return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("warning", "Running..."), expanded, theme, ctx, {
+				const running = runningPreviewBlock(result, theme.fg("warning", "Running..."), expanded, theme, ctx, {
 					lines: nonEmpty,
 					styleLine: (line) => theme.fg("dim", line),
 					tail: true,
-				}));
+				});
+				const withRewrite = expanded && rewrite ? `${running}\n${withBranch(formatRtkRewriteDetails(rewrite, theme), theme)}` : running;
+				return makeText(ctx.lastComponent, withRewrite);
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -3980,6 +4128,7 @@ export default function (pi: ExtensionAPI) {
 			if (!expanded && nonEmpty.length > 0) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
 			const collapsed = bashCollapsedLimit();
+			if (rewrite) text += `\n${formatRtkRewriteDetails(rewrite, theme)}`;
 			text += `\n${buildPreviewText(nonEmpty.map((line) => theme.fg("dim", line)), false, theme, collapsed)}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
 		},
@@ -4440,6 +4589,7 @@ export default function (pi: ExtensionAPI) {
 			entry.key._blinkActive = false;
 		}
 		_blinkContexts.clear();
+		clearRtkRewriteState();
 		clearHighlightCache();
 		if (_globalBlinkTimer) {
 			clearTimeout(_globalBlinkTimer);
