@@ -7,6 +7,8 @@
   "expandedPreviewMaxLines": 4000,
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
+  "liveToolPreview": true,
+  "liveToolPreviewLines": 5,
   "diffCollapsedLines": 24,
   "showTruncationHints": false,
   "themeAdaptive": true,

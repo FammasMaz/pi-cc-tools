@@ -13,6 +13,8 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Thinking labels** during streaming and final messages, with context sanitization
 - **MCP-aware rendering** with hidden, summary, and preview modes
 - **Configurable output modes** for read, search, bash, and MCP results
+- **Live running previews** that show a few output lines for active tool calls (latest lines for bash), then collapse after completion
+- **Subagent completion notifications** restyled to match the same Claude-style tool rows
 - **Transparent tool backgrounds** in `transparent` or `border` mode
 - **Theme-adaptive palette** — borders, branch connectors, dim text, spinner accent, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
 - **Transparent edit/write diffs** with universal red/green diff colors
@@ -31,6 +33,8 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
   "previewLines": 8,
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
+  "liveToolPreview": true,
+  "liveToolPreviewLines": 5,
   "diffCollapsedLines": 24,
   "themeAdaptive": true,
   "diffTheme": "github-dark"
@@ -105,6 +109,8 @@ The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in `~/.p
 | `previewLines` | `8` | Lines shown in collapsed preview mode |
 | `expandedPreviewMaxLines` | `4000` | Max lines when fully expanded |
 | `bashCollapsedLines` | `10` | Lines for collapsed bash output |
+| `liveToolPreview` | `true` | Show a small live output preview while tools are still running |
+| `liveToolPreviewLines` | `5` | Lines shown in the collapsed live preview |
 | `diffCollapsedLines` | `24` | Diff lines before collapsing |
 
 ## Notes

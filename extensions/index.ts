@@ -72,6 +72,10 @@ interface SettingsFile {
 	expandedPreviewMaxLines?: number;
 	bashOutputMode?: "opencode" | "summary" | "preview";
 	bashCollapsedLines?: number;
+	/** Show a small live output preview while tools are still running. Defaults to true. */
+	liveToolPreview?: boolean;
+	/** Number of live output lines to show while collapsed. Defaults to 5. */
+	liveToolPreviewLines?: number;
 	showTruncationHints?: boolean;
 	diffCollapsedLines?: number;
 	diffTheme?: string;
@@ -529,6 +533,94 @@ class ThinkingParagraph {
 	}
 }
 
+function trimRenderedBlankLines(lines: string[]): string[] {
+	let start = 0;
+	while (start < lines.length && isBlankLine(lines[start])) start++;
+	let end = lines.length - 1;
+	while (end >= start && isBlankLine(lines[end])) end--;
+	return start <= end ? lines.slice(start, end + 1) : [];
+}
+
+function isSubagentNotificationMessage(message: unknown): boolean {
+	const candidate = message as Record<string, unknown> | undefined;
+	return candidate?.customType === "subagent-notification";
+}
+
+function isSubagentHeaderLine(line: string): boolean {
+	return /^[✓✔✗■●]\s+/.test(stripAnsi(line).trimStart());
+}
+
+function isSubagentDetailLine(line: string): boolean {
+	const plain = stripAnsi(line).trimStart();
+	return plain.startsWith("⎿")
+		|| plain.startsWith("transcript:")
+		|| plain === "No output."
+		|| /^(?:Done|Wrapped up|Stopped|Error:|Aborted)\b/.test(plain);
+}
+
+function cleanSubagentDetailLine(line: string): string {
+	const markerIndex = line.indexOf("⎿");
+	if (markerIndex !== -1) {
+		const prefixAnsi = (line.slice(0, markerIndex).match(ANSI_RE) ?? []).join("");
+		return `${prefixAnsi}${line.slice(markerIndex + 1).replace(/^\s+/, "")}`;
+	}
+	return line
+		.replace(/^((?:\x1b\[[0-9;]*m)*)\s{2}/, "$1")
+		.replace(/^\s{2}/, "");
+}
+
+function formatSubagentNotificationGroup(lines: string[]): string[] {
+	if (lines.length === 0) return [];
+	const header = normalizeLeadingCheckGlyph(lines[0]);
+	const rest = lines.slice(1);
+	const detailStart = rest.findIndex(isSubagentDetailLine);
+	if (detailStart === -1) {
+		return [header, ...rest];
+	}
+
+	const metadata = rest.slice(0, detailStart);
+	const detailLines = rest.slice(detailStart).map(cleanSubagentDetailLine).filter((line) => stripAnsi(line).trim().length > 0);
+	const formattedDetails = withFinalBranchBlock(detailLines.join("\n"), undefined as any).split("\n").filter((line) => line.length > 0);
+	return [header, ...metadata, ...formattedDetails];
+}
+
+function splitSubagentNotificationGroups(lines: string[]): string[][] {
+	const groups: string[][] = [];
+	let current: string[] = [];
+	for (const line of lines) {
+		if (isSubagentHeaderLine(line) && current.length > 0) {
+			groups.push(current);
+			current = [line];
+		} else {
+			current.push(line);
+		}
+	}
+	if (current.length > 0) groups.push(current);
+	return groups;
+}
+
+function frameToolLikeLines(lines: string[], width: number): string[] {
+	syncToolBackgroundMode();
+	const safeWidth = Math.max(1, width);
+	const core = trimRenderedBlankLines(lines).map((line) => clampLineWidth(line, safeWidth));
+	if (core.length === 0 || toolBackgroundMode === "default") return core;
+	const spacerLine = " ".repeat(safeWidth);
+	if (toolBackgroundMode === "outlines") {
+		return [spacerLine, borderLine(safeWidth), ...core, borderLine(safeWidth)];
+	}
+	return [spacerLine, ...core];
+}
+
+function formatSubagentNotification(lines: string[], width: number): string[] {
+	const core = trimRenderedBlankLines(lines).map(normalizeLeadingCheckGlyph);
+	if (core.length === 0) return lines;
+	const formatted = splitSubagentNotificationGroups(core).flatMap((group, index) => {
+		const groupLines = formatSubagentNotificationGroup(group);
+		return index === 0 ? groupLines : ["", ...groupLines];
+	});
+	return frameToolLikeLines(formatted, width);
+}
+
 function patchCustomMessageRender(): void {
 	const proto = CustomMessageComponent.prototype as any;
 	if (proto[CUSTOM_MESSAGE_PATCH_FLAG]) return;
@@ -536,7 +628,11 @@ function patchCustomMessageRender(): void {
 	if (typeof originalRender !== "function") return;
 	proto.render = function patchedCustomMessageRender(width: number) {
 		const lines = originalRender.call(this, width);
-		return Array.isArray(lines) ? lines.map(normalizeLeadingCheckGlyph) : lines;
+		if (!Array.isArray(lines)) return lines;
+		if (isSubagentNotificationMessage(this?.message)) {
+			return formatSubagentNotification(lines, width);
+		}
+		return lines.map(normalizeLeadingCheckGlyph);
 	};
 	proto[CUSTOM_MESSAGE_PATCH_FLAG] = true;
 }
@@ -1172,6 +1268,15 @@ function expandedPreviewLimit(): number {
 function bashCollapsedLimit(): number {
 	const value = readSettings().bashCollapsedLines;
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 10;
+}
+
+function liveToolPreviewEnabled(): boolean {
+	return readSettings().liveToolPreview !== false;
+}
+
+function liveToolPreviewLimit(): number {
+	const value = readSettings().liveToolPreviewLines;
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 5;
 }
 
 function diffCollapsedLimit(): number {
@@ -2774,6 +2879,40 @@ function getTextContent(result: any): string {
 		.join("\n");
 }
 
+function getLivePreviewLines(result: any): string[] {
+	const raw = getTextContent(result).replace(/\r\n/g, "\n").trimEnd();
+	if (!raw) return [];
+	return raw.split("\n").filter((line) => line.trim().length > 0);
+}
+
+function lineCountLabel(count: number): string {
+	return `${count} line${count === 1 ? "" : "s"}`;
+}
+
+function runningPreviewBlock(
+	result: any,
+	statusText: string,
+	expanded: boolean,
+	theme: Theme,
+	ctx: any,
+	options: { lines?: string[]; styleLine?: (line: string) => string; tail?: boolean } = {},
+): string {
+	setupBlinkTimer(ctx);
+	const limit = liveToolPreviewLimit();
+	const lines = options.lines ?? getLivePreviewLines(result);
+	if (!liveToolPreviewEnabled() || limit <= 0 || lines.length === 0) {
+		return withBranch(statusText, theme);
+	}
+
+	const styleLine = options.styleLine ?? ((line: string) => theme.fg("dim", line || " "));
+	const previewLines = options.tail && !expanded ? lines.slice(-limit) : lines;
+	let preview = buildPreviewText(previewLines.map(styleLine), expanded, theme, limit);
+	if (options.tail && !expanded && lines.length > previewLines.length) {
+		preview = `${theme.fg("muted", `... (${lines.length - previewLines.length} earlier lines • Ctrl+O to expand)`)}\n${preview}`;
+	}
+	return withBranch(`${statusText} ${theme.fg("muted", `(${lineCountLabel(lines.length)})`)}\n${preview}`, theme);
+}
+
 function getStringArg(args: any, ...keys: string[]): string {
 	for (const key of keys) {
 		const value = args?.[key];
@@ -3200,8 +3339,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 
 function renderApplyPatchResult(result: any, isPartial: boolean, theme: Theme, ctx: any): Text {
 	if (isPartial) {
-		setupBlinkTimer(ctx);
-		return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Applying Patch..."), theme));
+		return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Applying Patch..."), !!ctx?.expanded, theme, ctx));
 	}
 	clearBlinkTimer(ctx);
 	setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -3244,8 +3382,9 @@ function summarizeGenericToolCall(name: string, args: any, theme: Theme, sp: (pa
 
 function renderMcpToolResult(result: any, expanded: boolean, isPartial: boolean, theme: Theme, ctx: any): Text {
 	if (isPartial) {
-		setupBlinkTimer(ctx);
-		return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "MCP running..."), theme));
+		return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "MCP running..."), expanded, theme, ctx, {
+			styleLine: (line) => theme.fg("toolOutput", line || " "),
+		}));
 	}
 	clearBlinkTimer(ctx);
 	setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -3485,8 +3624,7 @@ function renderReadImageResult(result: any, expanded: boolean, theme: Theme, ctx
 
 function renderOpenAiToolResult(name: string, result: any, expanded: boolean, isPartial: boolean, theme: Theme, ctx: any): Text {
 	if (isPartial) {
-		setupBlinkTimer(ctx);
-		return makeText(ctx.lastComponent, withBranch(theme.fg("dim", `${humanizeToolName(name)}...`), theme));
+		return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", `${humanizeToolName(name)}...`), expanded, theme, ctx));
 	}
 	clearBlinkTimer(ctx);
 	setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -3789,8 +3927,7 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
-				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Reading..."), theme));
+				return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Reading..."), expanded, theme, ctx));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -3827,8 +3964,11 @@ export default function (pi: ExtensionAPI) {
 			const output = result.content[0]?.type === "text" ? result.content[0].text : "";
 			const nonEmpty = output.split("\n").filter((line) => line.trim().length > 0);
 			if (isPartial) {
-				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, withBranch(theme.fg("warning", `Running... (${nonEmpty.length} lines)`), theme));
+				return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("warning", "Running..."), expanded, theme, ctx, {
+					lines: nonEmpty,
+					styleLine: (line) => theme.fg("dim", line),
+					tail: true,
+				}));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -3865,8 +4005,7 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
-				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Searching..."), theme));
+				return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Searching..."), expanded, theme, ctx));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -3903,8 +4042,7 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
-				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Finding..."), theme));
+				return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Finding..."), expanded, theme, ctx));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -3948,8 +4086,7 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
-				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Listing..."), theme));
+				return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Listing..."), expanded, theme, ctx));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -4023,10 +4160,9 @@ export default function (pi: ExtensionAPI) {
 			const hdr = toolHeader(label, summary, theme, toolStatusDot(ctx, theme));
 			return makeText(ctx.lastComponent, hdr);
 		},
-		renderResult(result, { isPartial }, theme, ctx) {
+		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
-				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, withBranch(theme.fg("dim", "Writing..."), theme));
+				return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Writing..."), expanded, theme, ctx));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -4169,10 +4305,9 @@ export default function (pi: ExtensionAPI) {
 			const body = ctx.state._ptDisplay as string | undefined;
 			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 		},
-		renderResult(result, { isPartial }, theme, ctx) {
+		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
-				setupBlinkTimer(ctx);
-				return makeText(ctx.lastComponent, indentBranchBlock(withBranch(theme.fg("dim", "Editing..."), theme)));
+				return makeText(ctx.lastComponent, indentBranchBlock(runningPreviewBlock(result, theme.fg("dim", "Editing..."), expanded, theme, ctx)));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
