@@ -4731,7 +4731,7 @@ function buildPersistentBashPreview(lines: string[], theme: Theme): string {
 	let preview = shown.join("\n");
 	const earlier = lines.length - shown.length;
 	if (earlier > 0) {
-		preview = `${theme.fg("muted", `... (${earlier} earlier lines${toolOutputDetailHint(theme, false, true)})`)}\n${preview}`;
+		preview = `${theme.fg("muted", `... (${earlier} earlier lines)`)}\n${preview}`;
 	}
 	return preview;
 }
