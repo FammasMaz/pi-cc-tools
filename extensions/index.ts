@@ -2090,13 +2090,21 @@ function toolHeader(tool: string, summary: string, theme: Theme, prefix = ""): s
 	return `${prefix}${label} ${WRAP_MARK}${theme.fg("accent", summary)}`;
 }
 
-function setToolStatus(ctx: any, status: "idle" | "pending" | "success" | "error"): void {
+function setToolStatus(ctx: any, status: "pending" | "success" | "error"): void {
 	ctx.state._toolStatus = status;
 }
 
 function syncToolCallStatus(ctx: any): void {
 	if (ctx?.isPartial) {
-		setToolStatus(ctx, ctx?.executionStarted ? "pending" : "idle");
+		// A partial tool row blinks only while an agent is actually running.
+		// When reconstructed from session history (initial load, compaction
+		// rebuild, or /tree navigation to a node ending in a tool call) the
+		// matching tool result lives outside the selected branch, so core never
+		// calls updateResult() and isPartial stays true. With no active agent
+		// that row is settled, not live: aborted calls already carry an isError
+		// result (isPartial=false), so a leftover partial here has succeeded.
+		const live = currentAgentWorkStartMs !== undefined;
+		setToolStatus(ctx, live ? "pending" : "success");
 		return;
 	}
 	setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -2311,10 +2319,9 @@ function getWriteWasNewFile(ctx: any, cwd: string, filePath: string, reveal = sh
 }
 
 function toolStatusDot(ctx: any, theme: Theme): string {
-	const status = ctx.state?._toolStatus as "idle" | "pending" | "success" | "error" | undefined;
+	const status = ctx.state?._toolStatus as "pending" | "success" | "error" | undefined;
 	if (status === "success") return `${theme.fg("success", "●")} `;
 	if (status === "error") return `${theme.fg("error", "●")} `;
-	if (status === "idle") return `${theme.fg("muted", "○")} `;
 	return `${blinkDot(ctx, theme)} `;
 }
 
