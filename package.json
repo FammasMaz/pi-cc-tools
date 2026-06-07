@@ -34,11 +34,11 @@
   },
   "dependencies": {
     "@shikijs/cli": "^4.0.2",
-    "diff": "^7.0.0"
+    "diff": "^9.0.0"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "@sinclair/typebox": "*"
   },
   "pi": {
@@ -48,11 +48,10 @@
     ]
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "latest",
-    "@mariozechner/pi-tui": "latest",
-    "@sinclair/typebox": "latest",
-    "@types/diff": "^7.0.2",
-    "@types/node": "^25.6.0",
-    "typescript": "^6.0.2"
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@earendil-works/pi-tui": "^0.74.0",
+    "@sinclair/typebox": "^0.34.49",
+    "@types/node": "^25.7.0",
+    "typescript": "^6.0.3"
   }
 }
