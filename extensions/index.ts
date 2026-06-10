@@ -430,19 +430,222 @@ function appendWorkedDurationLine(message: any, durationMs: number): void {
 	lastText.text = `${text.trimEnd()}\n\n${inlineWorkedDurationText(durationMs)}`;
 }
 
+type MarkdownThemeLike = ConstructorParameters<typeof Markdown>[3];
+
+type ParagraphSegment =
+	| { kind: "markdown"; md: InstanceType<typeof Markdown> }
+	| { kind: "math"; raw: string };
+
+interface MathDelimiter {
+	open: string;
+	close: string;
+}
+
+const DISPLAY_MATH_DELIMITERS: MathDelimiter[] = [
+	{ open: "\\[", close: "\\]" },
+	{ open: "$$", close: "$$" },
+	{ open: "\\begin{equation}", close: "\\end{equation}" },
+	{ open: "\\begin{equation*}", close: "\\end{equation*}" },
+	{ open: "\\begin{align}", close: "\\end{align}" },
+	{ open: "\\begin{align*}", close: "\\end{align*}" },
+	{ open: "\\begin{aligned}", close: "\\end{aligned}" },
+];
+
+const MATH_COMMANDS: Record<string, string> = {
+	alpha: "α", beta: "β", gamma: "γ", Gamma: "Γ", delta: "δ", Delta: "Δ",
+	epsilon: "ε", varepsilon: "ε", zeta: "ζ", eta: "η", theta: "θ", Theta: "Θ",
+	vartheta: "ϑ", iota: "ι", kappa: "κ", lambda: "λ", Lambda: "Λ", mu: "μ",
+	nu: "ν", xi: "ξ", Xi: "Ξ", pi: "π", Pi: "Π", rho: "ρ", varrho: "ϱ",
+	sigma: "σ", Sigma: "Σ", tau: "τ", upsilon: "υ", Upsilon: "Υ", phi: "φ",
+	varphi: "φ", Phi: "Φ", chi: "χ", psi: "ψ", Psi: "Ψ", omega: "ω", Omega: "Ω",
+	pm: "±", mp: "∓", times: "×", cdot: "·", div: "÷", ast: "*", le: "≤", leq: "≤",
+	ge: "≥", geq: "≥", neq: "≠", ne: "≠", approx: "≈", sim: "∼", propto: "∝",
+	infty: "∞", partial: "∂", nabla: "∇", sum: "Σ", prod: "Π", int: "∫", sqrt: "√",
+	to: "→", rightarrow: "→", leftarrow: "←", leftrightarrow: "↔", in: "∈", notin: "∉",
+	cup: "∪", cap: "∩", subset: "⊂", subseteq: "⊆", superset: "⊃", superseteq: "⊇",
+	wedge: "∧", vee: "∨", forall: "∀", exists: "∃", emptyset: "∅", degree: "°",
+};
+
+const COPY_SAFE_MARKDOWN_LINKS_FLAG = Symbol.for("pi-claude-style-tools:copy-safe-markdown-links");
+
+function copySafeMarkdownTheme(theme: MarkdownThemeLike): MarkdownThemeLike {
+	return {
+		...theme,
+		link: (text: string) => stripAnsi(text),
+		linkUrl: (text: string) => stripAnsi(text),
+	};
+}
+
+function makeMarkdownLinksCopySafe(markdown: InstanceType<typeof Markdown>): void {
+	const markdownAny = markdown as any;
+	if (markdownAny[COPY_SAFE_MARKDOWN_LINKS_FLAG] || !markdownAny.theme) return;
+	markdownAny.theme = copySafeMarkdownTheme(markdownAny.theme);
+	markdownAny[COPY_SAFE_MARKDOWN_LINKS_FLAG] = true;
+	markdown.invalidate?.();
+}
+
+function codeSpan(text: string): string {
+	const safe = text.replace(/`/g, "′");
+	return `\`${safe}\``;
+}
+
+function looksLikeInlineMath(text: string): boolean {
+	return /\\[A-Za-z]+|[_^=<>+*/-]/.test(text) && /[A-Za-z0-9}]/.test(text);
+}
+
+function replaceInlineMath(text: string): string {
+	const withParens = text.replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => {
+		return codeSpan(formatMathForDisplay(body, false));
+	});
+	return withParens.replace(/(^|[^\\])\$([^\n$]{1,200})\$/g, (match, prefix: string, body: string) => {
+		if (!looksLikeInlineMath(body)) return match;
+		return `${prefix}${codeSpan(formatMathForDisplay(body, false))}`;
+	});
+}
+
+interface MathBlock {
+	index: number;
+	contentStart: number;
+	contentEnd: number;
+	endIndex: number;
+}
+
+function findNextDelimitedMathBlock(text: string, start: number): MathBlock | undefined {
+	let best: MathBlock | undefined;
+	for (const delimiter of DISPLAY_MATH_DELIMITERS) {
+		const index = text.indexOf(delimiter.open, start);
+		if (index === -1) continue;
+		const contentStart = index + delimiter.open.length;
+		const contentEnd = text.indexOf(delimiter.close, contentStart);
+		if (contentEnd === -1) continue;
+		if (!best || index < best.index) {
+			best = { index, contentStart, contentEnd, endIndex: contentEnd + delimiter.close.length };
+		}
+	}
+	return best;
+}
+
+function looksLikeDisplayMath(text: string): boolean {
+	return /\\[A-Za-z]+|[_^=<>+*/|]/.test(text) && /[A-Za-z0-9}]/.test(text);
+}
+
+function findNextLooseBracketMathBlock(text: string, start: number): MathBlock | undefined {
+	const openRe = /(^|\r?\n)[ \t]*\[[ \t]*(?:\r?\n)/g;
+	openRe.lastIndex = start;
+	let openMatch: RegExpExecArray | null;
+	while ((openMatch = openRe.exec(text))) {
+		const index = openMatch.index + openMatch[1].length;
+		const contentStart = openMatch.index + openMatch[0].length;
+		const closeRe = /(^|\r?\n)[ \t]*\][ \t]*(?=\r?\n|$)/g;
+		closeRe.lastIndex = contentStart;
+		const closeMatch = closeRe.exec(text);
+		if (!closeMatch) return undefined;
+		const contentEnd = closeMatch.index + closeMatch[1].length;
+		const raw = text.slice(contentStart, contentEnd).trim();
+		if (looksLikeDisplayMath(raw)) {
+			return { index, contentStart, contentEnd, endIndex: closeMatch.index + closeMatch[0].length };
+		}
+		openRe.lastIndex = contentStart;
+	}
+	return undefined;
+}
+
+function findNextDisplayMathBlock(text: string, start: number): MathBlock | undefined {
+	const delimited = findNextDelimitedMathBlock(text, start);
+	const loose = findNextLooseBracketMathBlock(text, start);
+	if (!delimited) return loose;
+	if (!loose) return delimited;
+	return loose.index < delimited.index ? loose : delimited;
+}
+
+function appendMarkdownSegment(segments: ParagraphSegment[], text: string, theme: MarkdownThemeLike): void {
+	if (!text.trim()) return;
+	segments.push({ kind: "markdown", md: new Markdown(replaceInlineMath(text), 0, 0, theme) });
+}
+
+function buildParagraphSegments(text: string, theme: MarkdownThemeLike): ParagraphSegment[] {
+	const segments: ParagraphSegment[] = [];
+	let cursor = 0;
+	while (cursor < text.length) {
+		const next = findNextDisplayMathBlock(text, cursor);
+		if (!next) break;
+		appendMarkdownSegment(segments, text.slice(cursor, next.index), theme);
+		const raw = text.slice(next.contentStart, next.contentEnd).trim();
+		if (raw) segments.push({ kind: "math", raw });
+		cursor = next.endIndex;
+	}
+	appendMarkdownSegment(segments, text.slice(cursor), theme);
+	return segments;
+}
+
+function replaceSimpleCommandGroups(text: string): string {
+	return text
+		.replace(/\\(?:text|mathrm|operatorname|mathbf|mathit|mathsf|mathtt)\{([^{}]*)\}/g, "$1")
+		.replace(/\\mathbb\{R\}/g, "ℝ")
+		.replace(/\\mathbb\{N\}/g, "ℕ")
+		.replace(/\\mathbb\{Z\}/g, "ℤ")
+		.replace(/\\mathbb\{Q\}/g, "ℚ")
+		.replace(/\\mathbb\{C\}/g, "ℂ");
+}
+
+function replaceFractions(text: string): string {
+	let previous: string;
+	let current = text;
+	do {
+		previous = current;
+		current = current.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, "($1)/($2)");
+	} while (current !== previous);
+	return current;
+}
+
+function replaceMathCommands(text: string): string {
+	return text.replace(/\\([A-Za-z]+)/g, (match, name: string) => MATH_COMMANDS[name] ?? match);
+}
+
+function formatMathForDisplay(raw: string, multiline = true): string {
+	let text = raw.replace(/\\\\/g, "\n");
+	text = text.replace(/\\(?:begin|end)\{[^{}]+\}/g, "").replace(/&/g, "");
+	text = replaceSimpleCommandGroups(text);
+	text = replaceFractions(text);
+	text = text.replace(/\\sqrt\s*\{([^{}]+)\}/g, "√($1)");
+	text = replaceMathCommands(text);
+	text = text.replace(/\\(?:left|right|big|Big|bigg|Bigg)/g, "");
+	text = text.replace(/_\{([^{}]+)\}/g, "_$1").replace(/\^\{([^{}]+)\}/g, "^$1");
+	text = text.replace(/[{}]/g, "").replace(/\\[,;!]/g, " ").replace(/\\ /g, " ");
+	text = text.replace(/[ \t]+/g, " ").replace(/\s*([=+\-×·÷<>≤≥≈≠|])\s*/g, " $1 ");
+	const lines = text.split(/\r?\n/).map((line) => line.replace(/[ \t]{2,}/g, " ").trim()).filter(Boolean);
+	return multiline ? lines.join("\n") : lines.join(" ");
+}
+
+function renderMathBlock(raw: string, width: number, theme: MarkdownThemeLike): string[] {
+	const safeWidth = Math.max(12, width);
+	const innerWidth = Math.max(1, safeWidth - 2);
+	const label = " math ";
+	const topRule = "─".repeat(Math.max(1, safeWidth - 3 - visibleWidth(label)));
+	const top = theme.codeBlockBorder(`╭─${label}${topRule}╮`);
+	const bottom = theme.codeBlockBorder(`╰${"─".repeat(Math.max(1, safeWidth - 2))}╯`);
+	const formatted = formatMathForDisplay(raw, true) || raw;
+	const body = formatted.split("\n").flatMap((line) => wrapTextWithAnsi(theme.code(line), innerWidth));
+	return [top, ...body.map((line) => `${theme.codeBlockBorder("│")} ${line}`), bottom];
+}
+
 class DottedParagraph {
-	private md: InstanceType<typeof Markdown>;
+	private segments: ParagraphSegment[];
+	private markdownTheme: MarkdownThemeLike;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
-	constructor(text: string, markdownTheme: ConstructorParameters<typeof Markdown>[3]) {
-		this.md = new Markdown(text, 0, 0, markdownTheme);
+	constructor(text: string, markdownTheme: MarkdownThemeLike) {
+		this.markdownTheme = copySafeMarkdownTheme(markdownTheme);
+		this.segments = buildParagraphSegments(text, this.markdownTheme);
 	}
 
 	invalidate(): void {
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
-		this.md.invalidate();
+		for (const segment of this.segments) {
+			if (segment.kind === "markdown") segment.md.invalidate();
+		}
 	}
 
 	render(width: number): string[] {
@@ -454,7 +657,12 @@ class DottedParagraph {
 			this.cachedLines = [" ● "];
 			return this.cachedLines;
 		}
-		const lines = sanitizeRenderedTextBlockLines(this.md.render(width - PREFIX_W));
+		const contentWidth = width - PREFIX_W;
+		const lines = this.segments.flatMap((segment) => {
+			return segment.kind === "math"
+				? renderMathBlock(segment.raw, contentWidth, this.markdownTheme)
+				: sanitizeRenderedTextBlockLines(segment.md.render(contentWidth));
+		});
 		const looksLikeTaskStatus = lines.some((line) => /\b(?:transcript:|No output\.|Wrapped up)/.test(stripAnsi(line)));
 		const displayLines = looksLikeTaskStatus ? lines.map(normalizeLeadingCheckGlyph) : lines;
 		let dotPlaced = false;
@@ -487,10 +695,11 @@ class ThinkingParagraph {
 		const DIM_FG = WORKED_LINE_FG;
 		const ITALIC = "\x1b[3m";
 		const wrap = (s: string) => `${DIM_FG}${ITALIC}${s}`;
+		const wrapPlain = (s: string) => wrap(stripAnsi(s));
 		const plainTheme: ConstructorParameters<typeof Markdown>[3] = {
 			heading: wrap,
-			link: wrap,
-			linkUrl: wrap,
+			link: wrapPlain,
+			linkUrl: wrapPlain,
 			code: wrap,
 			codeBlock: wrap,
 			codeBlockBorder: wrap,
@@ -714,7 +923,9 @@ function patchUserMessageRender(): void {
 	if (typeof originalRender !== "function") return;
 	proto.render = function patchedUserMessageRender(width: number) {
 		for (const child of (this as any).children ?? []) {
-			if (child instanceof Markdown && child.defaultTextStyle?.bgColor) {
+			if (!(child instanceof Markdown)) continue;
+			makeMarkdownLinksCopySafe(child);
+			if (child.defaultTextStyle?.bgColor) {
 				child.defaultTextStyle.bgColor = undefined;
 				child.invalidate?.();
 			}
