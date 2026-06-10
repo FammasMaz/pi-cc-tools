@@ -36,6 +36,7 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
   "previewLines": 8,
   "expandedPreviewMaxLines": 4000,
   "extraExpandedPreviewMaxLines": 12000,
+  "extraToolOutputExpanded": false,
   "groupToolCalls": true,
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
@@ -99,6 +100,16 @@ The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in `~/.p
 | `transparent` | Transparent tool backgrounds |
 | `border` | Transparent backgrounds with top/bottom border lines |
 
+Use `/cc-tools` to control tool UI at runtime:
+
+```text
+/cc-tools status          # show style, grouping, and extra-detail state
+/cc-tools outlines        # tool style: outlines, transparent, or default
+/cc-tools group toggle    # toggle grouped adjacent/concurrent tool calls
+/cc-tools group off       # disable grouping (also ungroups current grouped rows)
+/cc-tools detail toggle   # same mode as Ctrl+Shift+O
+```
+
 ### Output modes
 
 | Setting | Values | Default |
@@ -108,13 +119,14 @@ The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in `~/.p
 | `mcpOutputMode` | `hidden`, `summary`, `preview` | `preview` |
 | `bashOutputMode` | `opencode`, `summary`, `preview` | `opencode` |
 
-### Numeric settings
+### Display settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `previewLines` | `8` | Lines shown in collapsed preview mode |
 | `expandedPreviewMaxLines` | `4000` | Max lines when expanded with Ctrl+O |
 | `extraExpandedPreviewMaxLines` | `12000` | Max lines after Ctrl+Shift+O extra-detail mode |
+| `extraToolOutputExpanded` | `false` | Start with Ctrl+Shift+O extra-detail mode enabled |
 | `groupToolCalls` | `true` | Group adjacent/concurrent tool calls under a compact status header |
 | `bashCollapsedLines` | `10` | Lines for collapsed bash output |
 | `liveToolPreview` | `true` | Show a small live output preview while tools are still running |

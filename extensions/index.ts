@@ -16,6 +16,7 @@ import {
 	ToolExecutionComponent,
 	UserMessageComponent,
 	keyHint,
+	keyText,
 	rawKeyHint,
 	createBashTool,
 	createEditTool,
@@ -76,6 +77,7 @@ interface SettingsFile {
 	previewLines?: number;
 	expandedPreviewMaxLines?: number;
 	extraExpandedPreviewMaxLines?: number;
+	extraToolOutputExpanded?: boolean;
 	groupToolCalls?: boolean;
 	bashOutputMode?: "opencode" | "summary" | "preview";
 	bashCollapsedLines?: number;
@@ -284,6 +286,10 @@ function toolGroupingEnabled(): boolean {
 	return readSettings().groupToolCalls !== false;
 }
 
+function setToolGroupingEnabled(enabled: boolean): void {
+	writeSettingsKey("groupToolCalls", enabled);
+}
+
 type ToolStatus = "pending" | "success" | "error";
 
 function getToolStatusForGroup(tool: any): ToolStatus {
@@ -292,28 +298,14 @@ function getToolStatusForGroup(tool: any): ToolStatus {
 	return "pending";
 }
 
-function statusGlyph(status: ToolStatus): string {
-	if (status === "success") return "\x1b[32m●\x1b[39m";
-	if (status === "error") return "\x1b[31m●\x1b[39m";
-	return "\x1b[90m○\x1b[39m";
-}
+let TOOL_STATUS_SUCCESS = "\x1b[32m";
+let TOOL_STATUS_ERROR = "\x1b[31m";
+let TOOL_STATUS_PENDING = "\x1b[90m";
 
-function groupFrameLine(text: string, width: number): string {
-	const safeWidth = Math.max(4, width);
-	const innerWidth = Math.max(1, safeWidth - 4);
-	const content = clampLineWidth(text, innerWidth);
-	const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
-	return `${BORDER_COLOR}│${TRANSPARENT_RESET} ${content}${padding} ${BORDER_COLOR}│${TRANSPARENT_RESET}`;
-}
-
-function groupBorder(width: number, top: boolean, label = ""): string {
-	const safeWidth = Math.max(4, width);
-	const left = top ? "╭" : "╰";
-	const right = top ? "╮" : "╯";
-	if (!top || !label) return `${BORDER_COLOR}${left}${"─".repeat(Math.max(0, safeWidth - 2))}${right}${TRANSPARENT_RESET}`;
-	const shown = clampLineWidth(label, Math.max(1, safeWidth - 4));
-	const suffixWidth = Math.max(0, safeWidth - 3 - visibleWidth(shown));
-	return `${BORDER_COLOR}${left}─${TRANSPARENT_RESET}${shown}${BORDER_COLOR}${"─".repeat(suffixWidth)}${right}${TRANSPARENT_RESET}`;
+function statusText(status: ToolStatus, count: number): string {
+	const label = status === "success" ? "done" : status === "error" ? "failed" : "running";
+	const color = status === "success" ? TOOL_STATUS_SUCCESS : status === "error" ? TOOL_STATUS_ERROR : TOOL_STATUS_PENDING;
+	return `${color}${count}${TRANSPARENT_RESET} ${label}`;
 }
 
 function countToolStatuses(tools: any[]): Record<ToolStatus, number> {
@@ -326,9 +318,9 @@ function countToolStatuses(tools: any[]): Record<ToolStatus, number> {
 function formatToolGroupCounts(tools: any[]): string {
 	const counts = countToolStatuses(tools);
 	const parts: string[] = [];
-	if (counts.pending) parts.push(`${statusGlyph("pending")} ${counts.pending} running`);
-	if (counts.success) parts.push(`${statusGlyph("success")} ${counts.success} done`);
-	if (counts.error) parts.push(`${statusGlyph("error")} ${counts.error} failed`);
+	if (counts.pending) parts.push(statusText("pending", counts.pending));
+	if (counts.success) parts.push(statusText("success", counts.success));
+	if (counts.error) parts.push(statusText("error", counts.error));
 	return parts.join(`${TRANSPARENT_RESET} • `);
 }
 
@@ -344,23 +336,81 @@ function formatToolNameList(tools: any[]): string {
 		.join(", ") + (counts.size > 4 ? ", …" : "");
 }
 
-function getCompactToolLine(tool: any, width: number): string {
-	const rendered = trimRenderedBlankLines(tool.render(Math.max(1, width)));
-	const content = rendered.find((line) => {
-		const plain = stripAnsi(line).trim();
-		return plain.length > 0 && /[^─━╭╮╰╯┌┐└┘│├┤┬┴┼ ]/.test(plain);
-	}) ?? `${statusGlyph(getToolStatusForGroup(tool))} ${tool?.toolName ?? "tool"}`;
-	return clampLineWidth(content, width);
+function isChromeOnlyLine(line: string): boolean {
+	const plain = stripAnsi(line).trim();
+	return plain.length === 0 || /^[─━╭╮╰╯┌┐└┘│├┤┬┴┼\s]+$/.test(plain);
 }
+
+function stripToolChrome(lines: string[]): string[] {
+	return trimRenderedBlankLines(lines).filter((line) => !isChromeOnlyLine(line));
+}
+
+function stripLeadingToolStatus(line: string): string {
+	return line.replace(/^((?:\x1b\[[0-9;]*m|[ \t]|[├└│─])*)(?:\x1b\[[0-9;]*m)*[●○✗■](?:\x1b\[[0-9;]*m)*\s+/, "$1");
+}
+
+function trimAnsiLeft(text: string): string {
+	let current = text;
+	while (true) {
+		const next = current.replace(/^((?:\x1b\[[0-9;]*m)*)[ \t]+/, "$1");
+		if (next === current) return current;
+		current = next;
+	}
+}
+
+function getCompactToolLine(tool: any, width: number): string {
+	const rendered = stripToolChrome(tool.render(Math.max(1, width))).map(stripLeadingToolStatus);
+	const content = rendered.find((line) => stripAnsi(line).trim().length > 0) ?? `${tool?.toolName ?? "tool"}`;
+	return clampLineWidth(trimAnsiLeft(content), width);
+}
+
+function getExpandedToolGroupLines(tool: any, width: number): string[] {
+	const lines = stripToolChrome(tool.render(Math.max(1, width))).map(stripLeadingToolStatus);
+	return lines.length > 0 ? lines : [String(tool?.toolName ?? "tool")];
+}
+
+function branchPrefix(index: number, total: number): string {
+	return index === total - 1 ? `${TOOL_RULE}└─${TRANSPARENT_RESET} ` : `${TOOL_RULE}├─${TRANSPARENT_RESET} `;
+}
+
+function branchContinuation(index: number, total: number): string {
+	return index === total - 1 ? "   " : `${TOOL_RULE}│${TRANSPARENT_RESET}  `;
+}
+
+function formatBranchedToolLines(lines: string[], index: number, total: number, width: number): string[] {
+	const output: string[] = [];
+	const content = lines.filter((line) => isTerminalImageLine(line) || stripAnsi(line).trim().length > 0);
+	const safeContent = content.length > 0 ? content : [""];
+	for (let lineIndex = 0; lineIndex < safeContent.length; lineIndex++) {
+		const line = safeContent[lineIndex];
+		if (isTerminalImageLine(line)) {
+			output.push(line);
+			continue;
+		}
+		const prefix = lineIndex === 0 ? branchPrefix(index, total) : branchContinuation(index, total);
+		output.push(clampLineWidth(`${prefix}${trimAnsiLeft(line)}`, width));
+	}
+	return output;
+}
+
+const ACTIVE_TOOL_GROUPS = new Set<any>();
 
 class ToolGroupComponent extends Container {
 	private tools: any[] = [];
 	private expanded = false;
 
 	addTool(tool: any): void {
+		ACTIVE_TOOL_GROUPS.add(this);
 		this.tools.push(tool);
 		tool[COMPONENT_PARENT] = this;
 		this.invalidate();
+	}
+
+	releaseTools(): any[] {
+		const tools = this.tools;
+		this.tools = [];
+		ACTIVE_TOOL_GROUPS.delete(this);
+		return tools;
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -376,40 +426,43 @@ class ToolGroupComponent extends Container {
 	render(width: number): string[] {
 		if (this.tools.length === 0) return [];
 		const safeWidth = Math.max(20, width);
-		const title = ` Tools ×${this.tools.length} `;
 		const names = formatToolNameList(this.tools);
-		const counts = formatToolGroupCounts(this.tools);
-		const lines = [
-			" ".repeat(safeWidth),
-			groupBorder(safeWidth, true, title),
-			groupFrameLine(`${counts}${names ? ` ${TRANSPARENT_RESET}• ${names}` : ""}${toolOutputDetailHint(undefined as any, this.expanded, true)}`, safeWidth),
-		];
+		const summary = `Tools: ${formatToolGroupCounts(this.tools)}${names ? ` ${TRANSPARENT_RESET}• ${names}` : ""}${toolOutputDetailHint(undefined as any, this.expanded, true)}`;
+		const lines = [" ".repeat(safeWidth), clampLineWidth(summary, safeWidth)];
+		const childWidth = Math.max(1, safeWidth - 3);
 
-		if (!this.expanded) {
-			const rowWidth = Math.max(1, safeWidth - 6);
-			for (const tool of this.tools) {
-				const glyph = statusGlyph(getToolStatusForGroup(tool));
-				const compact = getCompactToolLine(tool, rowWidth);
-				lines.push(groupFrameLine(`${glyph} ${compact}`, safeWidth));
-			}
-			lines.push(groupBorder(safeWidth, false));
-			return lines;
-		}
+		this.tools.forEach((tool, index) => {
+			const rawLines = this.expanded
+				? getExpandedToolGroupLines(tool, childWidth)
+				: [getCompactToolLine(tool, childWidth)];
+			lines.push(...formatBranchedToolLines(rawLines, index, this.tools.length, safeWidth));
+		});
 
-		const childWidth = Math.max(1, safeWidth - 4);
-		for (const tool of this.tools) {
-			for (const line of trimRenderedBlankLines(tool.render(childWidth))) {
-				if (isTerminalImageLine(line)) lines.push(line);
-				else lines.push(groupFrameLine(line, safeWidth));
-			}
-		}
-		lines.push(groupBorder(safeWidth, false));
 		return lines;
 	}
 }
 
 function isToolGroupComponent(value: unknown): value is ToolGroupComponent {
 	return value instanceof ToolGroupComponent;
+}
+
+function ungroupActiveToolGroups(): void {
+	for (const group of [...ACTIVE_TOOL_GROUPS]) {
+		const parent = group?.[COMPONENT_PARENT];
+		const children = parent?.children;
+		if (!Array.isArray(children)) {
+			ACTIVE_TOOL_GROUPS.delete(group);
+			continue;
+		}
+		const index = children.indexOf(group);
+		if (index === -1) {
+			ACTIVE_TOOL_GROUPS.delete(group);
+			continue;
+		}
+		const tools = group.releaseTools();
+		for (const tool of tools) tool[COMPONENT_PARENT] = parent;
+		children.splice(index, 1, ...tools);
+	}
 }
 
 function maybeGroupToolComponent(parent: any, component: any): void {
@@ -532,8 +585,24 @@ function hashText(text: string): string {
 
 let extraToolOutputExpanded = false;
 
+function syncExtraToolDetailMode(): void {
+	extraToolOutputExpanded = readSettings().extraToolOutputExpanded === true;
+}
+
+function setExtraToolDetailMode(enabled: boolean): void {
+	extraToolOutputExpanded = enabled;
+	writeSettingsKey("extraToolOutputExpanded", enabled);
+}
+
+function configuredKeyHint(binding: Parameters<typeof keyText>[0], fallbackKey: string, description: string): string {
+	try {
+		if (keyText(binding).trim()) return keyHint(binding, description);
+	} catch { /* fall back below */ }
+	return rawKeyHint(fallbackKey, description);
+}
+
 function expandHint(_theme: Theme, action: "expand" | "collapse" | "toggle" = "toggle"): string {
-	return ` • ${keyHint("app.tools.expand", `to ${action}`)}`;
+	return ` • ${configuredKeyHint("app.tools.expand", "ctrl+o", `to ${action}`)}`;
 }
 
 function deepExpandHint(): string {
@@ -1130,9 +1199,10 @@ function patchUserMessageRender(): void {
 	proto.render = function patchedUserMessageRender(width: number) {
 		for (const child of (this as any).children ?? []) {
 			if (!(child instanceof Markdown)) continue;
+			const markdownAny = child as any;
 			makeMarkdownLinksCopySafe(child);
-			if (child.defaultTextStyle?.bgColor) {
-				child.defaultTextStyle.bgColor = undefined;
+			if (markdownAny.defaultTextStyle?.bgColor) {
+				markdownAny.defaultTextStyle.bgColor = undefined;
 				child.invalidate?.();
 			}
 		}
@@ -2223,12 +2293,18 @@ const _claudeStyleDefaults = {
 	FG_SAFE_MUTED: "\x1b[38;2;139;148;158m",
 	FG_ADD: "\x1b[38;2;100;180;120m",
 	FG_DEL: "\x1b[38;2;200;100;100m",
+	TOOL_STATUS_SUCCESS: "\x1b[32m",
+	TOOL_STATUS_ERROR: "\x1b[31m",
+	TOOL_STATUS_PENDING: "\x1b[90m",
 };
 
 function resetThemePalette(): void {
 	BORDER_COLOR = _claudeStyleDefaults.BORDER_COLOR;
 	WORKED_LINE_FG = _claudeStyleDefaults.WORKED_LINE_FG;
 	TOOL_RULE = _claudeStyleDefaults.TOOL_RULE;
+	TOOL_STATUS_SUCCESS = _claudeStyleDefaults.TOOL_STATUS_SUCCESS;
+	TOOL_STATUS_ERROR = _claudeStyleDefaults.TOOL_STATUS_ERROR;
+	TOOL_STATUS_PENDING = _claudeStyleDefaults.TOOL_STATUS_PENDING;
 	if (!_explicitFgFields.has("fgDim")) FG_DIM = _claudeStyleDefaults.FG_DIM;
 	if (!_explicitFgFields.has("fgLnum")) FG_LNUM = _claudeStyleDefaults.FG_LNUM;
 	if (!_explicitFgFields.has("fgRule")) FG_RULE = _claudeStyleDefaults.FG_RULE;
@@ -2257,6 +2333,11 @@ function applyThemePaletteIfNeeded(theme: any): void {
 	// Tool branch rule (├─ / └─ connectors). Use `dim` if present, else `muted`.
 	const dim = safeFgAnsi(theme, "dim") ?? muted;
 	if (dim) TOOL_RULE = dim;
+
+	// Grouped-tool status counts follow the same semantic theme colors as regular tool dots.
+	TOOL_STATUS_SUCCESS = safeFgAnsi(theme, "success") ?? TOOL_STATUS_SUCCESS;
+	TOOL_STATUS_ERROR = safeFgAnsi(theme, "error") ?? TOOL_STATUS_ERROR;
+	TOOL_STATUS_PENDING = muted ?? dim ?? TOOL_STATUS_PENDING;
 
 	// Diff support text colors. These are user-overridable via diffColors.* so
 	// we only touch the ones not explicitly set.
@@ -4282,11 +4363,12 @@ export default function (pi: ExtensionAPI) {
 	patchToolExecutionRenderers();
 	applyDiffPalette();
 	registerThinkingLabels(pi);
+	syncExtraToolDetailMode();
 
 	pi.registerShortcut("ctrl+shift+o", {
 		description: "Toggle extra tool output detail",
 		handler: async (ctx) => {
-			extraToolOutputExpanded = !extraToolOutputExpanded;
+			setExtraToolDetailMode(!extraToolOutputExpanded);
 			if (ctx.hasUI) {
 				ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
 				ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}`, "info");
@@ -4294,38 +4376,109 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// /cc-tools command — toggle tool border style at runtime
+	// /cc-tools command — control tool chrome, grouping, and detail level.
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
+	const TOOL_BOOL_MODES = ["on", "off", "toggle", "status"] as const;
+	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "status"] as const;
+	const booleanMode = (raw: string | undefined, current: boolean): boolean | "status" | undefined => {
+		const mode = raw || "toggle";
+		if (mode === "on") return true;
+		if (mode === "off") return false;
+		if (mode === "toggle") return !current;
+		if (mode === "status") return "status";
+		return undefined;
+	};
+	const notifyToolStatus = (ctx: any): void => {
+		if (!ctx.hasUI) return;
+		ctx.ui.notify([
+			`Tool style: ${toolBackgroundMode}`,
+			`Tool grouping: ${toolGroupingEnabled() ? "on" : "off"}`,
+			`Extra detail: ${extraToolOutputExpanded ? "on" : "off"} (${rawKeyHint("ctrl+shift+o", "toggle")})`,
+		].join("\n"), "info");
+	};
 	pi.registerCommand("cc-tools", {
-		description: "Switch tool display style: outlines (lines around tools), transparent (no chrome), default (pi built-in backgrounds)",
+		description: "Control tool UI: style, grouped rows, and Ctrl+Shift+O extra-detail mode",
 		getArgumentCompletions(prefix) {
-			return TOOL_MODES
-				.filter((m) => m.startsWith(prefix))
-				.map((m) => ({
-					value: m,
-					label: m,
-					description:
-						m === "outlines" ? "Horizontal rules around each tool (default)"
-						: m === "transparent" ? "No borders or backgrounds"
-						: "Pi built-in tool backgrounds",
-				}));
+			const parts = prefix.trimStart().split(/\s+/);
+			const first = parts[0] ?? "";
+			if (parts.length <= 1) {
+				return TOOL_SUBCOMMANDS
+					.filter((m) => m.startsWith(first))
+					.map((m) => ({
+						value: m,
+						label: m,
+						description:
+							m === "group" ? "Toggle grouped adjacent/concurrent tool rows"
+							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
+							: m === "status" ? "Show tool UI settings"
+							: m === "outlines" ? "Horizontal rules around each tool (default)"
+							: m === "transparent" ? "No borders or backgrounds"
+							: "Pi built-in tool backgrounds",
+					}));
+			}
+			if (first === "group" || first === "detail" || first === "extra") {
+				const second = parts[1] ?? "";
+				return TOOL_BOOL_MODES
+					.filter((m) => m.startsWith(second))
+					.map((m) => ({ value: `${first} ${m}`, label: m, description: `${m} ${first}` }));
+			}
+			return [];
 		},
 		async handler(args, ctx) {
-			const mode = args.trim().toLowerCase();
-			if (!mode) {
-				if (ctx.hasUI) ctx.ui.notify(`Tool style: ${toolBackgroundMode}`, "info");
+			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+			const sub = parts[0] ?? "";
+			if (!sub || sub === "status") {
+				notifyToolStatus(ctx);
 				return;
 			}
-			if (!(TOOL_MODES as readonly string[]).includes(mode)) {
-				if (ctx.hasUI) ctx.ui.notify(`Unknown mode "${mode}". Options: ${TOOL_MODES.join(", ")}`, "error");
+
+			if (sub === "group") {
+				const next = booleanMode(parts[1], toolGroupingEnabled());
+				if (next === undefined) {
+					if (ctx.hasUI) ctx.ui.notify(`Usage: /cc-tools group ${TOOL_BOOL_MODES.join("|")}`, "error");
+					return;
+				}
+				if (next === "status") {
+					if (ctx.hasUI) ctx.ui.notify(`Tool grouping: ${toolGroupingEnabled() ? "on" : "off"}`, "info");
+					return;
+				}
+				setToolGroupingEnabled(next);
+				if (!next) ungroupActiveToolGroups();
+				if (ctx.hasUI) {
+					ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+					ctx.ui.notify(`Tool grouping: ${next ? "on" : "off"}${next ? " (future adjacent tool rows)" : ""}`, "info");
+				}
 				return;
 			}
-			toolBackgroundOverride = mode as typeof toolBackgroundMode;
+
+			if (sub === "detail" || sub === "extra") {
+				const next = booleanMode(parts[1], extraToolOutputExpanded);
+				if (next === undefined) {
+					if (ctx.hasUI) ctx.ui.notify(`Usage: /cc-tools detail ${TOOL_BOOL_MODES.join("|")}`, "error");
+					return;
+				}
+				if (next === "status") {
+					if (ctx.hasUI) ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}`, "info");
+					return;
+				}
+				setExtraToolDetailMode(next);
+				if (ctx.hasUI) {
+					ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+					ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}`, "info");
+				}
+				return;
+			}
+
+			if (!(TOOL_MODES as readonly string[]).includes(sub)) {
+				if (ctx.hasUI) ctx.ui.notify(`Unknown option "${sub}". Try /cc-tools status, /cc-tools group toggle, or /cc-tools detail toggle.`, "error");
+				return;
+			}
+			toolBackgroundOverride = sub as typeof toolBackgroundMode;
 			toolBackgroundMode = toolBackgroundOverride;
-			writeSettingsKey("toolBackground", mode);
+			writeSettingsKey("toolBackground", sub);
 			if (ctx.hasUI) {
 				applyToolBackgroundMode(ctx.ui.theme);
-				ctx.ui.notify(`Tool style → ${mode}`, "info");
+				ctx.ui.notify(`Tool style → ${sub}`, "info");
 			}
 		},
 	});
