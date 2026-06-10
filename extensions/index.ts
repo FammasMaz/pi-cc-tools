@@ -324,16 +324,54 @@ function formatToolGroupCounts(tools: any[]): string {
 	return parts.join(`${TRANSPARENT_RESET} • `);
 }
 
+function getToolName(tool: any): string {
+	return typeof tool?.toolName === "string" && tool.toolName ? tool.toolName : "tool";
+}
+
+function getGroupedToolName(tools: any[]): string | undefined {
+	const first = getToolName(tools[0]);
+	return tools.every((tool) => getToolName(tool) === first) ? first : undefined;
+}
+
+function getToolGroupLabel(tools: any[]): string {
+	const sameName = getGroupedToolName(tools);
+	return sameName ? humanizeToolName(sameName) : "Multiple Tools";
+}
+
+function getToolGroupOverallStatus(tools: any[]): ToolStatus {
+	const counts = countToolStatuses(tools);
+	if (counts.error > 0) return "error";
+	if (counts.pending > 0) return "pending";
+	return "success";
+}
+
+function groupStatusLight(status: ToolStatus): string {
+	const color = status === "success" ? TOOL_STATUS_SUCCESS : status === "error" ? TOOL_STATUS_ERROR : TOOL_STATUS_PENDING;
+	const glyph = status === "pending" ? "○" : "●";
+	return `${color}${glyph}${TRANSPARENT_RESET}`;
+}
+
 function formatToolNameList(tools: any[]): string {
 	const counts = new Map<string, number>();
 	for (const tool of tools) {
-		const name = typeof tool?.toolName === "string" ? tool.toolName : "tool";
+		const name = getToolName(tool);
 		counts.set(name, (counts.get(name) ?? 0) + 1);
 	}
 	return [...counts.entries()]
 		.slice(0, 4)
 		.map(([name, count]) => `${name}${count > 1 ? `×${count}` : ""}`)
 		.join(", ") + (counts.size > 4 ? ", …" : "");
+}
+
+function escapeRegex(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripGroupedToolLabel(line: string, label: string | undefined): string {
+	if (!label) return line;
+	const ansi = "(?:\\x1b\\[[0-9;]*m)*";
+	const pattern = new RegExp(`^(${ansi})${escapeRegex(label)}(${ansi})\\s+`);
+	return line.replace(pattern, "$1$2");
 }
 
 function isChromeOnlyLine(line: string): boolean {
@@ -358,14 +396,20 @@ function trimAnsiLeft(text: string): string {
 	}
 }
 
-function getCompactToolLine(tool: any, width: number): string {
-	const rendered = stripToolChrome(tool.render(Math.max(1, width))).map(stripLeadingToolStatus);
+function removeGroupedToolPrefix(line: string, groupedLabel?: string): string {
+	return trimAnsiLeft(stripGroupedToolLabel(trimAnsiLeft(stripLeadingToolStatus(line)), groupedLabel));
+}
+
+function getCompactToolLine(tool: any, width: number, groupedLabel?: string): string {
+	const rendered = stripToolChrome(tool.render(Math.max(1, width)))
+		.map((line) => removeGroupedToolPrefix(line, groupedLabel));
 	const content = rendered.find((line) => stripAnsi(line).trim().length > 0) ?? `${tool?.toolName ?? "tool"}`;
 	return clampLineWidth(trimAnsiLeft(content), width);
 }
 
-function getExpandedToolGroupLines(tool: any, width: number): string[] {
-	const lines = stripToolChrome(tool.render(Math.max(1, width))).map(stripLeadingToolStatus);
+function getExpandedToolGroupLines(tool: any, width: number, groupedLabel?: string): string[] {
+	const lines = stripToolChrome(tool.render(Math.max(1, width)))
+		.map((line) => removeGroupedToolPrefix(line, groupedLabel));
 	return lines.length > 0 ? lines : [String(tool?.toolName ?? "tool")];
 }
 
@@ -426,15 +470,18 @@ class ToolGroupComponent extends Container {
 	render(width: number): string[] {
 		if (this.tools.length === 0) return [];
 		const safeWidth = Math.max(20, width);
-		const names = formatToolNameList(this.tools);
-		const summary = `Tools: ${formatToolGroupCounts(this.tools)}${names ? ` ${TRANSPARENT_RESET}• ${names}` : ""}${toolOutputDetailHint(undefined as any, this.expanded, true)}`;
+		const groupedName = getGroupedToolName(this.tools);
+		const label = getToolGroupLabel(this.tools);
+		const names = groupedName ? "" : formatToolNameList(this.tools);
+		const light = groupStatusLight(getToolGroupOverallStatus(this.tools));
+		const summary = `${light} ${label}: ${formatToolGroupCounts(this.tools)}${names ? ` ${TRANSPARENT_RESET}• ${names}` : ""}${toolOutputDetailHint(undefined as any, this.expanded, true)}`;
 		const lines = [" ".repeat(safeWidth), clampLineWidth(summary, safeWidth)];
 		const childWidth = Math.max(1, safeWidth - 3);
 
 		this.tools.forEach((tool, index) => {
 			const rawLines = this.expanded
-				? getExpandedToolGroupLines(tool, childWidth)
-				: [getCompactToolLine(tool, childWidth)];
+				? getExpandedToolGroupLines(tool, childWidth, groupedName ? label : undefined)
+				: [getCompactToolLine(tool, childWidth, groupedName ? label : undefined)];
 			lines.push(...formatBranchedToolLines(rawLines, index, this.tools.length, safeWidth));
 		});
 
@@ -444,6 +491,27 @@ class ToolGroupComponent extends Container {
 
 function isToolGroupComponent(value: unknown): value is ToolGroupComponent {
 	return value instanceof ToolGroupComponent;
+}
+
+function isIgnorableToolSeparator(value: unknown): boolean {
+	if (value instanceof Spacer) return true;
+	if (value instanceof AssistantMessageComponent) {
+		try {
+			return trimRenderedBlankLines((value as any).render?.(80) ?? []).length === 0;
+		} catch {
+			return true;
+		}
+	}
+	return false;
+}
+
+function findPreviousToolSibling(children: any[], startIndex: number): { child: any; index: number } | undefined {
+	for (let index = startIndex; index >= 0; index--) {
+		const child = children[index];
+		if (isIgnorableToolSeparator(child)) continue;
+		return { child, index };
+	}
+	return undefined;
 }
 
 function ungroupActiveToolGroups(): void {
@@ -471,7 +539,9 @@ function maybeGroupToolComponent(parent: any, component: any): void {
 	if (!Array.isArray(children)) return;
 	const index = children.indexOf(component);
 	if (index <= 0) return;
-	const previous = children[index - 1];
+	const previousEntry = findPreviousToolSibling(children, index - 1);
+	if (!previousEntry) return;
+	const previous = previousEntry.child;
 	if (isToolGroupComponent(previous)) {
 		children.splice(index, 1);
 		previous.addTool(component);
@@ -483,7 +553,8 @@ function maybeGroupToolComponent(parent: any, component: any): void {
 		group.addTool(previous);
 		group.addTool(component);
 		(group as any)[COMPONENT_PARENT] = parent;
-		children.splice(index - 1, 2, group);
+		children[previousEntry.index] = group;
+		children.splice(index, 1);
 	}
 }
 
