@@ -5,6 +5,8 @@
   "mcpOutputMode": "preview",
   "previewLines": 8,
   "expandedPreviewMaxLines": 4000,
+  "extraExpandedPreviewMaxLines": 12000,
+  "groupToolCalls": true,
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
   "liveToolPreview": true,

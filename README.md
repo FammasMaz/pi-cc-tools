@@ -19,6 +19,8 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Transparent tool backgrounds** in `transparent` or `border` mode
 - **Theme-adaptive palette** — borders, branch connectors, dim text, spinner accent, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
 - **Transparent edit/write diffs** with universal red/green diff colors
+- **Grouped consecutive tool calls** with a compact status header and per-tool glance rows (set `groupToolCalls: false` to disable)
+- **Extra detail toggle** with `Ctrl+Shift+O`, increasing expanded preview caps without making the default view heavy
 - **Global border patch** for all tool rows, including unknown/custom tools
 
 ## Configuration
@@ -32,6 +34,9 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
   "searchOutputMode": "preview",
   "mcpOutputMode": "preview",
   "previewLines": 8,
+  "expandedPreviewMaxLines": 4000,
+  "extraExpandedPreviewMaxLines": 12000,
+  "groupToolCalls": true,
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
   "liveToolPreview": true,
@@ -108,7 +113,9 @@ The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in `~/.p
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `previewLines` | `8` | Lines shown in collapsed preview mode |
-| `expandedPreviewMaxLines` | `4000` | Max lines when fully expanded |
+| `expandedPreviewMaxLines` | `4000` | Max lines when expanded with Ctrl+O |
+| `extraExpandedPreviewMaxLines` | `12000` | Max lines after Ctrl+Shift+O extra-detail mode |
+| `groupToolCalls` | `true` | Group adjacent/concurrent tool calls under a compact status header |
 | `bashCollapsedLines` | `10` | Lines for collapsed bash output |
 | `liveToolPreview` | `true` | Show a small live output preview while tools are still running |
 | `liveToolPreviewLines` | `5` | Lines shown in the collapsed live preview |

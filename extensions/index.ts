@@ -15,6 +15,8 @@ import {
 	CustomMessageComponent,
 	ToolExecutionComponent,
 	UserMessageComponent,
+	keyHint,
+	rawKeyHint,
 	createBashTool,
 	createEditTool,
 	createFindTool,
@@ -53,6 +55,8 @@ const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const ANSI_PRESENT_RE = /\x1b\[[0-9;]*m/;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
 const TOOL_RENDER_CACHE = Symbol.for("pi-claude-style-tools:tool-render-cache");
+const COMPONENT_PARENT = Symbol.for("pi-claude-style-tools:component-parent");
+const PARENT_TRACKING_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-parent-tracking");
 const TOOL_CACHE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-cache-invalidation");
 const TOOL_IMAGE_EXPAND_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-read-image-expansion");
 const CUSTOM_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-custom-message-render");
@@ -71,6 +75,8 @@ interface SettingsFile {
 	mcpOutputMode?: "hidden" | "summary" | "preview";
 	previewLines?: number;
 	expandedPreviewMaxLines?: number;
+	extraExpandedPreviewMaxLines?: number;
+	groupToolCalls?: boolean;
 	bashOutputMode?: "opencode" | "summary" | "preview";
 	bashCollapsedLines?: number;
 	/** Show a small live output preview while tools are still running. Defaults to true. */
@@ -203,15 +209,26 @@ function stripRenderedHeadingMarkers(line: string): string {
 
 function sanitizeRenderedTextBlockLines(lines: string[]): string[] {
 	let inFence = false;
-	return lines.map((line) => {
+	let hideCurrentFence = false;
+	const result: string[] = [];
+	for (const line of lines) {
 		const plain = stripAnsi(line).trimStart();
 		if (plain.startsWith("```")) {
-			inFence = !inFence;
-			return line;
+			if (!inFence) {
+				const language = plain.slice(3).trim().toLowerCase();
+				hideCurrentFence = ["text", "txt", "plain", "plaintext"].includes(language);
+				inFence = true;
+				if (!hideCurrentFence) result.push(line);
+				continue;
+			}
+			inFence = false;
+			if (!hideCurrentFence) result.push(line);
+			hideCurrentFence = false;
+			continue;
 		}
-		if (inFence) return line;
-		return stripRenderedHeadingMarkers(line).replace(/###/g, "");
-	});
+		result.push(inFence ? line : stripRenderedHeadingMarkers(line).replace(/###/g, ""));
+	}
+	return result;
 }
 
 function isBlankLine(text: string): boolean {
@@ -261,6 +278,186 @@ function splitRenderedImageBlock(lines: string[]): { textLines: string[]; imageL
 	const textLines = lines.slice(0, imageStart);
 	while (textLines.length > 0 && isBlankLine(textLines[textLines.length - 1])) textLines.pop();
 	return { textLines, imageLines: lines.slice(imageStart) };
+}
+
+function toolGroupingEnabled(): boolean {
+	return readSettings().groupToolCalls !== false;
+}
+
+type ToolStatus = "pending" | "success" | "error";
+
+function getToolStatusForGroup(tool: any): ToolStatus {
+	if (tool?.result?.isError) return "error";
+	if (tool?.result && tool?.isPartial !== true) return "success";
+	return "pending";
+}
+
+function statusGlyph(status: ToolStatus): string {
+	if (status === "success") return "\x1b[32m●\x1b[39m";
+	if (status === "error") return "\x1b[31m●\x1b[39m";
+	return "\x1b[90m○\x1b[39m";
+}
+
+function groupFrameLine(text: string, width: number): string {
+	const safeWidth = Math.max(4, width);
+	const innerWidth = Math.max(1, safeWidth - 4);
+	const content = clampLineWidth(text, innerWidth);
+	const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
+	return `${BORDER_COLOR}│${TRANSPARENT_RESET} ${content}${padding} ${BORDER_COLOR}│${TRANSPARENT_RESET}`;
+}
+
+function groupBorder(width: number, top: boolean, label = ""): string {
+	const safeWidth = Math.max(4, width);
+	const left = top ? "╭" : "╰";
+	const right = top ? "╮" : "╯";
+	if (!top || !label) return `${BORDER_COLOR}${left}${"─".repeat(Math.max(0, safeWidth - 2))}${right}${TRANSPARENT_RESET}`;
+	const shown = clampLineWidth(label, Math.max(1, safeWidth - 4));
+	const suffixWidth = Math.max(0, safeWidth - 3 - visibleWidth(shown));
+	return `${BORDER_COLOR}${left}─${TRANSPARENT_RESET}${shown}${BORDER_COLOR}${"─".repeat(suffixWidth)}${right}${TRANSPARENT_RESET}`;
+}
+
+function countToolStatuses(tools: any[]): Record<ToolStatus, number> {
+	return tools.reduce((counts, tool) => {
+		counts[getToolStatusForGroup(tool)]++;
+		return counts;
+	}, { pending: 0, success: 0, error: 0 } as Record<ToolStatus, number>);
+}
+
+function formatToolGroupCounts(tools: any[]): string {
+	const counts = countToolStatuses(tools);
+	const parts: string[] = [];
+	if (counts.pending) parts.push(`${statusGlyph("pending")} ${counts.pending} running`);
+	if (counts.success) parts.push(`${statusGlyph("success")} ${counts.success} done`);
+	if (counts.error) parts.push(`${statusGlyph("error")} ${counts.error} failed`);
+	return parts.join(`${TRANSPARENT_RESET} • `);
+}
+
+function formatToolNameList(tools: any[]): string {
+	const counts = new Map<string, number>();
+	for (const tool of tools) {
+		const name = typeof tool?.toolName === "string" ? tool.toolName : "tool";
+		counts.set(name, (counts.get(name) ?? 0) + 1);
+	}
+	return [...counts.entries()]
+		.slice(0, 4)
+		.map(([name, count]) => `${name}${count > 1 ? `×${count}` : ""}`)
+		.join(", ") + (counts.size > 4 ? ", …" : "");
+}
+
+function getCompactToolLine(tool: any, width: number): string {
+	const rendered = trimRenderedBlankLines(tool.render(Math.max(1, width)));
+	const content = rendered.find((line) => {
+		const plain = stripAnsi(line).trim();
+		return plain.length > 0 && /[^─━╭╮╰╯┌┐└┘│├┤┬┴┼ ]/.test(plain);
+	}) ?? `${statusGlyph(getToolStatusForGroup(tool))} ${tool?.toolName ?? "tool"}`;
+	return clampLineWidth(content, width);
+}
+
+class ToolGroupComponent extends Container {
+	private tools: any[] = [];
+	private expanded = false;
+
+	addTool(tool: any): void {
+		this.tools.push(tool);
+		tool[COMPONENT_PARENT] = this;
+		this.invalidate();
+	}
+
+	setExpanded(expanded: boolean): void {
+		this.expanded = expanded;
+		for (const tool of this.tools) tool.setExpanded?.(expanded);
+		this.invalidate();
+	}
+
+	invalidate(): void {
+		for (const tool of this.tools) tool.invalidate?.();
+	}
+
+	render(width: number): string[] {
+		if (this.tools.length === 0) return [];
+		const safeWidth = Math.max(20, width);
+		const title = ` Tools ×${this.tools.length} `;
+		const names = formatToolNameList(this.tools);
+		const counts = formatToolGroupCounts(this.tools);
+		const lines = [
+			" ".repeat(safeWidth),
+			groupBorder(safeWidth, true, title),
+			groupFrameLine(`${counts}${names ? ` ${TRANSPARENT_RESET}• ${names}` : ""}${toolOutputDetailHint(undefined as any, this.expanded, true)}`, safeWidth),
+		];
+
+		if (!this.expanded) {
+			const rowWidth = Math.max(1, safeWidth - 6);
+			for (const tool of this.tools) {
+				const glyph = statusGlyph(getToolStatusForGroup(tool));
+				const compact = getCompactToolLine(tool, rowWidth);
+				lines.push(groupFrameLine(`${glyph} ${compact}`, safeWidth));
+			}
+			lines.push(groupBorder(safeWidth, false));
+			return lines;
+		}
+
+		const childWidth = Math.max(1, safeWidth - 4);
+		for (const tool of this.tools) {
+			for (const line of trimRenderedBlankLines(tool.render(childWidth))) {
+				if (isTerminalImageLine(line)) lines.push(line);
+				else lines.push(groupFrameLine(line, safeWidth));
+			}
+		}
+		lines.push(groupBorder(safeWidth, false));
+		return lines;
+	}
+}
+
+function isToolGroupComponent(value: unknown): value is ToolGroupComponent {
+	return value instanceof ToolGroupComponent;
+}
+
+function maybeGroupToolComponent(parent: any, component: any): void {
+	if (!toolGroupingEnabled() || !(component instanceof ToolExecutionComponent) || isToolGroupComponent(parent)) return;
+	const children = parent?.children;
+	if (!Array.isArray(children)) return;
+	const index = children.indexOf(component);
+	if (index <= 0) return;
+	const previous = children[index - 1];
+	if (isToolGroupComponent(previous)) {
+		children.splice(index, 1);
+		previous.addTool(component);
+		return;
+	}
+	if (previous instanceof ToolExecutionComponent) {
+		const group = new ToolGroupComponent();
+		group.setExpanded(Boolean((previous as any).expanded));
+		group.addTool(previous);
+		group.addTool(component);
+		(group as any)[COMPONENT_PARENT] = parent;
+		children.splice(index - 1, 2, group);
+	}
+}
+
+function patchContainerParentTracking(): void {
+	const proto = Container.prototype as any;
+	if (proto[PARENT_TRACKING_PATCH_FLAG]) return;
+	const originalAddChild = proto.addChild;
+	const originalRemoveChild = proto.removeChild;
+	const originalClear = proto.clear;
+	proto.addChild = function patchedAddChild(component: any) {
+		const result = originalAddChild.call(this, component);
+		if (component && typeof component === "object") component[COMPONENT_PARENT] = this;
+		maybeGroupToolComponent(this, component);
+		return result;
+	};
+	proto.removeChild = function patchedRemoveChild(component: any) {
+		const result = originalRemoveChild.call(this, component);
+		if (component && typeof component === "object" && component[COMPONENT_PARENT] === this) delete component[COMPONENT_PARENT];
+		return result;
+	};
+	proto.clear = function patchedClear() {
+		for (const child of this.children ?? []) {
+			if (child && typeof child === "object" && child[COMPONENT_PARENT] === this) delete child[COMPONENT_PARENT];
+		}
+		return originalClear.call(this);
+	};
+	proto[PARENT_TRACKING_PATCH_FLAG] = true;
 }
 
 function patchGlobalToolBorders(): void {
@@ -333,8 +530,21 @@ function hashText(text: string): string {
 	return (hash >>> 0).toString(36);
 }
 
-function expandHint(theme: Theme): string {
-	return theme.fg("muted", " • Ctrl+O to expand");
+let extraToolOutputExpanded = false;
+
+function expandHint(_theme: Theme, action: "expand" | "collapse" | "toggle" = "toggle"): string {
+	return ` • ${keyHint("app.tools.expand", `to ${action}`)}`;
+}
+
+function deepExpandHint(): string {
+	return ` • ${rawKeyHint("ctrl+shift+o", extraToolOutputExpanded ? "less detail" : "more detail")}`;
+}
+
+function toolOutputDetailHint(theme: Theme, expanded: boolean, hasMore = false): string {
+	if (!expanded) return expandHint(theme, "toggle");
+	const parts = [expandHint(theme, "collapse")];
+	if (hasMore || extraToolOutputExpanded) parts.push(deepExpandHint());
+	return parts.join("");
 }
 
 function clearStateKeys(state: Record<string, unknown> | undefined, ...keys: string[]): void {
@@ -619,14 +829,10 @@ function formatMathForDisplay(raw: string, multiline = true): string {
 
 function renderMathBlock(raw: string, width: number, theme: MarkdownThemeLike): string[] {
 	const safeWidth = Math.max(12, width);
-	const innerWidth = Math.max(1, safeWidth - 2);
-	const label = " math ";
-	const topRule = "─".repeat(Math.max(1, safeWidth - 3 - visibleWidth(label)));
-	const top = theme.codeBlockBorder(`╭─${label}${topRule}╮`);
-	const bottom = theme.codeBlockBorder(`╰${"─".repeat(Math.max(1, safeWidth - 2))}╯`);
 	const formatted = formatMathForDisplay(raw, true) || raw;
-	const body = formatted.split("\n").flatMap((line) => wrapTextWithAnsi(theme.code(line), innerWidth));
-	return [top, ...body.map((line) => `${theme.codeBlockBorder("│")} ${line}`), bottom];
+	return formatted
+		.split("\n")
+		.flatMap((line) => wrapTextWithAnsi(theme.bold(theme.code(line)), safeWidth));
 }
 
 class DottedParagraph {
@@ -1645,8 +1851,11 @@ function previewLimit(): number {
 }
 
 function expandedPreviewLimit(): number {
-	const value = readSettings().expandedPreviewMaxLines;
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 4000;
+	const settings = readSettings();
+	const key = extraToolOutputExpanded ? "extraExpandedPreviewMaxLines" : "expandedPreviewMaxLines";
+	const value = settings[key];
+	const fallback = extraToolOutputExpanded ? 12000 : 4000;
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
 function bashCollapsedLimit(): number {
@@ -1679,10 +1888,10 @@ function buildPreviewText(lines: string[], expanded: boolean, theme: Theme, fall
 	let text = shown.join("\n");
 	const remaining = lines.length - shown.length;
 	if (remaining > 0) {
-		text += `\n${theme.fg("muted", `... (${remaining} more lines${expanded ? "" : " • Ctrl+O to expand"})`)}`;
+		text += `\n${theme.fg("muted", `... (${remaining} more lines${toolOutputDetailHint(theme, expanded, true)})`)}`;
 	}
 	if (expanded && lines.length > maxLines) {
-		text += `\n${theme.fg("warning", `(display capped at ${maxLines} lines)`)}`;
+		text += `\n${theme.fg("warning", `(display capped at ${maxLines} lines${deepExpandHint()})`)}`;
 	}
 	return text;
 }
@@ -2363,7 +2572,7 @@ function diffSummaryWithMeta(added: number, removed: number, hunks: number, mode
 function collapsedDiffHint(remainingLines: number, hiddenHunks: number): string {
 	const width = termW();
 	const candidates = [
-		`… (${remainingLines} more diff lines${hiddenHunks > 0 ? ` • ${hiddenHunks} more hunks` : ""} • Ctrl+O to expand)`,
+		`… (${remainingLines} more diff lines${hiddenHunks > 0 ? ` • ${hiddenHunks} more hunks` : ""} • ${keyHint("app.tools.expand", "to toggle")})`,
 		`… (${remainingLines} more lines${hiddenHunks > 0 ? ` • ${hiddenHunks} hunks` : ""})`,
 		`… (+${remainingLines}${hiddenHunks > 0 ? ` • +${hiddenHunks}h` : ""})`,
 		"…",
@@ -3045,7 +3254,7 @@ function renderEditPreviewBody(
 			if (ctx.state._pk !== key) return;
 			const remainder = operations.length - maxShown;
 			const suffix = remainder > 0
-				? `\n${theme.fg("muted", `… ${remainder} more edit blocks${ctx.expanded ? "" : " • Ctrl+O to expand"}`)}`
+				? `\n${theme.fg("muted", `… ${remainder} more edit blocks${toolOutputDetailHint(theme, ctx.expanded, true)}`)}`
 				: "";
 			ctx.state._ptBody = `${operations.length} edits ${summary}\n\n${sections.join("\n\n")}${suffix}`;
 			ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
@@ -3292,7 +3501,7 @@ function runningPreviewBlock(
 	const previewLines = options.tail && !expanded ? lines.slice(-limit) : lines;
 	let preview = buildPreviewText(previewLines.map(styleLine), expanded, theme, limit);
 	if (options.tail && !expanded && lines.length > previewLines.length) {
-		preview = `${theme.fg("muted", `... (${lines.length - previewLines.length} earlier lines • Ctrl+O to expand)`)}\n${preview}`;
+		preview = `${theme.fg("muted", `... (${lines.length - previewLines.length} earlier lines${toolOutputDetailHint(theme, expanded, true)})`)}\n${preview}`;
 	}
 	return withBranch(`${statusText} ${theme.fg("muted", `(${lineCountLabel(lines.length)})`)}\n${preview}`, theme);
 }
@@ -3304,7 +3513,7 @@ function buildPersistentBashPreview(lines: string[], theme: Theme): string {
 	let preview = shown.join("\n");
 	const earlier = lines.length - shown.length;
 	if (earlier > 0) {
-		preview = `${theme.fg("muted", `... (${earlier} earlier lines • Ctrl+O to expand)`)}\n${preview}`;
+		preview = `${theme.fg("muted", `... (${earlier} earlier lines${toolOutputDetailHint(theme, false, true)})`)}\n${preview}`;
 	}
 	return preview;
 }
@@ -3713,7 +3922,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 					if (ctx.state._applyPatchPreviewKey !== key) return;
 					const remainder = preview.changes.length - maxShown;
 					const suffix = remainder > 0
-						? `\n${theme.fg("muted", `… ${remainder} more file patches${ctx.expanded ? "" : " • Ctrl+O to expand"}`)}`
+						? `\n${theme.fg("muted", `… ${remainder} more file patches${toolOutputDetailHint(theme, ctx.expanded, true)}`)}`
 						: "";
 					const summary = `${preview.changes.length} files ${preview.summary}`;
 					ctx.state._applyPatchPreviewBody = `${summary}\n\n${sections.join("\n\n")}${suffix}`;
@@ -3796,7 +4005,7 @@ function renderMcpToolResult(result: any, expanded: boolean, isPartial: boolean,
 
 	const statusText = ctx.isError ? theme.fg("error", lines[0]) : theme.fg("muted", `${lines.length} line${lines.length === 1 ? "" : "s"} returned`);
 	if (mode === "summary") return makeText(ctx.lastComponent, withBranch(statusText, theme));
-	if (!expanded) return makeText(ctx.lastComponent, withBranch(`${statusText}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+	if (!expanded) return makeText(ctx.lastComponent, withBranch(`${statusText}${toolOutputDetailHint(theme, expanded)}`, theme));
 	const preview = buildPreviewText(lines.map((line) => theme.fg(ctx.isError ? "error" : "toolOutput", line || " ")), true, theme, previewLimit());
 	return makeText(ctx.lastComponent, withBranch(`${statusText}\n${preview}`, theme));
 }
@@ -3969,7 +4178,7 @@ function renderTaskListResult(lines: string[], expanded: boolean, theme: Theme, 
 	if (parts.length > 0) summary += ` ${theme.fg("muted", "•")} ${parts.join(` ${theme.fg("muted", "•")} `)}`;
 
 	if (!expanded) {
-		return makeText(ctx.lastComponent, withBranch(`${summary}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+		return makeText(ctx.lastComponent, withBranch(`${summary}${toolOutputDetailHint(theme, expanded)}`, theme));
 	}
 
 	const shown = tasks.slice(0, previewLimit());
@@ -4003,7 +4212,7 @@ function renderReadImageResult(result: any, expanded: boolean, theme: Theme, ctx
 	const mimeType = image?.mimeType ?? "image";
 	const summary = `${theme.fg("success", "Image loaded")} ${theme.fg("muted", `[${mimeType}]`)}`;
 	if (!expanded) {
-		return makeText(ctx.lastComponent, withBranch(`${summary}${theme.fg("muted", " • Ctrl+O to show")}`, theme));
+		return makeText(ctx.lastComponent, withBranch(`${summary}${toolOutputDetailHint(theme, expanded)}`, theme));
 	}
 
 	const noteLines = getTextContent(result)
@@ -4045,7 +4254,7 @@ function renderOpenAiToolResult(name: string, result: any, expanded: boolean, is
 		? theme.fg("error", lines[0])
 		: theme.fg("muted", `${lines.length} line${lines.length === 1 ? "" : "s"} returned`);
 	if (!expanded) {
-		return makeText(ctx.lastComponent, withBranch(`${statusText}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+		return makeText(ctx.lastComponent, withBranch(`${statusText}${toolOutputDetailHint(theme, expanded)}`, theme));
 	}
 
 	if (!ctx.isError && lines.length === 1) {
@@ -4065,6 +4274,7 @@ function renderOpenAiToolResult(name: string, result: any, expanded: boolean, is
 export default function (pi: ExtensionAPI) {
 	patchToolRenderCacheInvalidation();
 	patchReadImageExpansion();
+	patchContainerParentTracking();
 	patchGlobalToolBorders();
 	patchCustomMessageRender();
 	patchUserMessageRender();
@@ -4072,6 +4282,17 @@ export default function (pi: ExtensionAPI) {
 	patchToolExecutionRenderers();
 	applyDiffPalette();
 	registerThinkingLabels(pi);
+
+	pi.registerShortcut("ctrl+shift+o", {
+		description: "Toggle extra tool output detail",
+		handler: async (ctx) => {
+			extraToolOutputExpanded = !extraToolOutputExpanded;
+			if (ctx.hasUI) {
+				ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+				ctx.ui.notify(`Extra tool detail: ${extraToolOutputExpanded ? "on" : "off"}`, "info");
+			}
+		},
+	});
 
 	// /cc-tools command — toggle tool border style at runtime
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
@@ -4350,7 +4571,7 @@ export default function (pi: ExtensionAPI) {
 			const lines = content.text.split("\n");
 			let text = theme.fg("muted", `${lines.length} lines loaded`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " (truncated)");
-			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			const shown = lines.slice(0, previewLimit());
 			text += `\n${buildPreviewText(shown.map((line) => theme.fg("dim", line || " ")), false, theme, previewLimit())}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
@@ -4399,8 +4620,8 @@ export default function (pi: ExtensionAPI) {
 			text += theme.fg("muted", ` (${nonEmpty.length} lines)`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " [truncated]");
 			const persistentPreview = shouldPreserveBashPreview(ctx) ? buildPersistentBashPreview(nonEmpty, theme) : "";
-			if (!expanded && persistentPreview) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}\n${persistentPreview}`, theme));
-			if (!expanded && nonEmpty.length > 0) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+			if (!expanded && persistentPreview) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}\n${persistentPreview}`, theme));
+			if (!expanded && nonEmpty.length > 0) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
 			const collapsed = bashCollapsedLimit();
 			if (rewrite) text += `\n${formatRtkRewriteDetails(rewrite, theme)}`;
@@ -4440,7 +4661,7 @@ export default function (pi: ExtensionAPI) {
 			if (matches.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "no matches"), theme));
 			let text = theme.fg("muted", `${matches.length} matches`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " (truncated)");
-			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			text += `\n${buildPreviewText(matches.map((line) => theme.fg("dim", line)), false, theme, previewLimit())}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
 		},
@@ -4475,7 +4696,7 @@ export default function (pi: ExtensionAPI) {
 				.filter((line) => line.trim().length > 0);
 			if (items.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "no files found"), theme));
 			let text = theme.fg("muted", `${items.length} files`);
-			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			// Expanded: grouped find results with icons
 			const maxShow = previewLimit();
 			const shown = items.slice(0, maxShow);
@@ -4519,7 +4740,7 @@ export default function (pi: ExtensionAPI) {
 				.filter((line) => line.trim().length > 0);
 			if (items.length === 0) return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "empty directory"), theme));
 			let text = theme.fg("muted", `${items.length} entries`);
-			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${theme.fg("muted", " • Ctrl+O to expand")}`, theme));
+			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			// Expanded: tree-view with icons
 			const maxShow = previewLimit();
 			const shown = items.slice(0, maxShow);
