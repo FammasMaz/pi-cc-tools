@@ -964,11 +964,27 @@ function findNextDisplayMathBlock(text: string, start: number, scanLoose: boolea
 	return loose.index < delimited.index ? loose : delimited;
 }
 
+function looksLikeMarkdownDocument(text: string): boolean {
+	if (/\r?\n\s*\r?\n/.test(text)) return true;
+	if (/^#{1,6}\s/m.test(text) || /```/.test(text)) return true;
+	if (/^\s*[-*+]\s/m.test(text) || /^\s*\d+\.\s/m.test(text)) return true;
+	if (/\|[^|\n]+\|/.test(text)) return true;
+	if (/https?:\/\//.test(text)) return true;
+	return false;
+}
+
 function shouldFormatStandaloneMath(text: string): boolean {
 	const plain = text.trim();
 	if (!plain || !plain.includes("\\")) return false;
-	if (/\\(?:frac|dfrac|tfrac|sqrt|left|right|begin|end|partial|boldsymbol|bm|mathrm|text|mathbf|mathit|mathsf|mathtt|mathbb|sigma|epsilon|delta|gamma|Gamma|Delta|theta|Theta|pi|Pi|rho|varrho|tau|phi|varphi|Psi|psi|omega|Omega|alpha|beta|mu|nu|xi|chi|sum|prod|int|to|rightarrow|leftarrow|leftrightarrow|infty)/.test(plain)) return true;
-	return /[_^=<>]/.test(plain) && /\\[A-Za-z]+/.test(plain);
+	// Whole assistant paragraphs must stay markdown; misclassifying them collapses newlines.
+	if (looksLikeMarkdownDocument(text)) return false;
+	if (plain.length > 600 || plain.split(/\r?\n/).length > 3) return false;
+	if (/\\(?:frac|dfrac|tfrac|sqrt|left|right|begin|end|partial|boldsymbol|bm|mathrm|mathbf|mathit|mathsf|mathtt|mathbb|sigma|epsilon|delta|gamma|Gamma|Delta|theta|Theta|pi|Pi|rho|varrho|tau|phi|varphi|Psi|psi|omega|Omega|alpha|beta|mu|nu|xi|chi|sum|prod|int|to|rightarrow|leftarrow|leftrightarrow|infty)/.test(plain)) {
+		return true;
+	}
+	// Paths like \opencode and prose with "=" are not math; require tight expression shape.
+	if (!/[_^]/.test(plain) || !/\\[A-Za-z]+/.test(plain)) return false;
+	return !/[.!?]\s/.test(plain) && plain.length <= 240;
 }
 
 function appendMarkdownSegment(segments: ParagraphSegment[], text: string, theme: MarkdownThemeLike): void {
