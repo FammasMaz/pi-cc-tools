@@ -350,8 +350,7 @@ function groupStatusLight(status: ToolStatus): string {
 	if (status === "pending") {
 		return isBlinkOn() ? `${TOOL_STATUS_SUCCESS}●${TRANSPARENT_RESET}` : `${TOOL_STATUS_PENDING}○${TRANSPARENT_RESET}`;
 	}
-	const glyph = status === "error" ? "✗" : "●";
-	return `${color}${glyph}${TRANSPARENT_RESET}`;
+	return `${color}●${TRANSPARENT_RESET}`;
 }
 
 function formatToolNameList(tools: any[]): string {
@@ -425,10 +424,19 @@ function getToolArgSummary(tool: any): string {
 	return summarizeText(getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt") || name, 72);
 }
 
-function getCompactToolLine(tool: any, width: number, groupedLabel?: string): string {
+function getToolCallLine(tool: any): string {
+	const value = (tool as any)?.callRendererComponent?.value;
+	if (typeof value === "string" && value.trim()) {
+		const line = value.split("\n").find((line) => stripAnsi(line).trim()) ?? value;
+		return line.replaceAll(WRAP_MARK, "");
+	}
 	const summary = getToolArgSummary(tool);
-	const label = groupedLabel ? "" : humanizeToolName(getToolName(tool));
-	const content = label ? `${label}${summary ? ` ${summary}` : ""}` : summary;
+	const label = humanizeToolName(getToolName(tool));
+	return `${label}${summary ? ` ${summary}` : ""}`;
+}
+
+function getCompactToolLine(tool: any, width: number, groupedLabel?: string): string {
+	const content = removeGroupedToolPrefix(getToolCallLine(tool), groupedLabel);
 	return clampLineWidth(content || getToolName(tool), width);
 }
 
@@ -956,9 +964,17 @@ function findNextDisplayMathBlock(text: string, start: number, scanLoose: boolea
 	return loose.index < delimited.index ? loose : delimited;
 }
 
+function shouldFormatStandaloneMath(text: string): boolean {
+	const plain = text.trim();
+	if (!plain || !plain.includes("\\")) return false;
+	if (/\\(?:frac|dfrac|tfrac|sqrt|left|right|begin|end|partial|boldsymbol|bm|mathrm|text|mathbf|mathit|mathsf|mathtt|mathbb|sigma|epsilon|delta|gamma|Gamma|Delta|theta|Theta|pi|Pi|rho|varrho|tau|phi|varphi|Psi|psi|omega|Omega|alpha|beta|mu|nu|xi|chi|sum|prod|int|to|rightarrow|leftarrow|leftrightarrow|infty)/.test(plain)) return true;
+	return /[_^=<>]/.test(plain) && /\\[A-Za-z]+/.test(plain);
+}
+
 function appendMarkdownSegment(segments: ParagraphSegment[], text: string, theme: MarkdownThemeLike): void {
 	if (!text.trim()) return;
-	segments.push({ kind: "markdown", md: new Markdown(replaceInlineMath(text), 0, 0, theme) });
+	const normalized = shouldFormatStandaloneMath(text) ? formatMathForDisplay(text, false) : replaceInlineMath(text);
+	segments.push({ kind: "markdown", md: new Markdown(normalized, 0, 0, theme) });
 }
 
 function buildParagraphSegments(text: string, theme: MarkdownThemeLike): ParagraphSegment[] {
@@ -983,7 +999,8 @@ function buildParagraphSegments(text: string, theme: MarkdownThemeLike): Paragra
 
 function replaceSimpleCommandGroups(text: string): string {
 	return text
-		.replace(/\\(?:text|mathrm|operatorname|mathbf|mathit|mathsf|mathtt)\{([^{}]*)\}/g, "$1")
+		.replace(/\\(?:text|mathrm|operatorname|mathbf|boldsymbol|bm|mathit|mathsf|mathtt)\{([^{}]*)\}/g, "$1")
+		.replace(/\\(?:boldsymbol|bm)\s+([A-Za-z])/g, "$1")
 		.replace(/\\mathbb\{R\}/g, "ℝ")
 		.replace(/\\mathbb\{N\}/g, "ℕ")
 		.replace(/\\mathbb\{Z\}/g, "ℤ")
@@ -991,14 +1008,43 @@ function replaceSimpleCommandGroups(text: string): string {
 		.replace(/\\mathbb\{C\}/g, "ℂ");
 }
 
+function readLatexGroup(text: string, start: number): { content: string; end: number } | undefined {
+	let open = start;
+	while (open < text.length && /\s/.test(text[open])) open++;
+	if (text[open] !== "{") return undefined;
+	let depth = 1;
+	for (let index = open + 1; index < text.length; index++) {
+		const char = text[index];
+		if (char === "{") depth++;
+		else if (char === "}") {
+			depth--;
+			if (depth === 0) return { content: text.slice(open + 1, index), end: index + 1 };
+		}
+	}
+	return undefined;
+}
+
 function replaceFractions(text: string): string {
-	let previous: string;
-	let current = text;
-	do {
-		previous = current;
-		current = current.replace(/\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, "($1)/($2)");
-	} while (current !== previous);
-	return current;
+	let output = "";
+	let index = 0;
+	while (index < text.length) {
+		const command = ["\\frac", "\\dfrac", "\\tfrac"].find((candidate) => text.startsWith(candidate, index));
+		if (!command) {
+			output += text[index];
+			index++;
+			continue;
+		}
+		const numerator = readLatexGroup(text, index + command.length);
+		const denominator = numerator ? readLatexGroup(text, numerator.end) : undefined;
+		if (!numerator || !denominator) {
+			output += text[index];
+			index++;
+			continue;
+		}
+		output += `(${replaceFractions(numerator.content)})/(${replaceFractions(denominator.content)})`;
+		index = denominator.end;
+	}
+	return output;
 }
 
 function replaceMathCommands(text: string): string {
@@ -1025,7 +1071,7 @@ function renderMathBlock(raw: string, width: number, theme: MarkdownThemeLike): 
 	const formatted = formatMathForDisplay(raw, true) || raw;
 	return formatted
 		.split("\n")
-		.flatMap((line) => wrapTextWithAnsi(theme.bold(theme.code(line)), safeWidth));
+		.flatMap((line) => wrapTextWithAnsi(theme.bold(line), safeWidth));
 }
 
 class DottedParagraph {
