@@ -347,7 +347,10 @@ function getToolGroupOverallStatus(tools: any[]): ToolStatus {
 
 function groupStatusLight(status: ToolStatus): string {
 	const color = status === "success" ? TOOL_STATUS_SUCCESS : status === "error" ? TOOL_STATUS_ERROR : TOOL_STATUS_PENDING;
-	const glyph = status === "error" ? "✗" : status === "pending" ? "○" : "●";
+	if (status === "pending") {
+		return isBlinkOn() ? `${TOOL_STATUS_SUCCESS}●${TRANSPARENT_RESET}` : `${TOOL_STATUS_PENDING}○${TRANSPARENT_RESET}`;
+	}
+	const glyph = status === "error" ? "✗" : "●";
 	return `${color}${glyph}${TRANSPARENT_RESET}`;
 }
 
@@ -400,23 +403,33 @@ function removeGroupedToolPrefix(line: string, groupedLabel?: string): string {
 	return trimAnsiLeft(stripGroupedToolLabel(trimAnsiLeft(stripLeadingToolStatus(line)), groupedLabel));
 }
 
-function tintGroupedToolLine(line: string, groupedLabel?: string): string {
-	const plain = stripAnsi(trimAnsiLeft(line));
-	if (!plain) return "";
-	if (groupedLabel) return `${FG_DIM}${plain}${TRANSPARENT_RESET}`;
-	const match = plain.match(/^(\S+)(\s+.*)?$/);
-	if (!match) return `${FG_DIM}${plain}${TRANSPARENT_RESET}`;
-	const title = match[1] ?? plain;
-	const rest = match[2] ?? "";
-	return `${FG_DIM}${title}${TRANSPARENT_RESET}${rest ? `${FG_DIM}${rest}${TRANSPARENT_RESET}` : ""}`;
+function tintGroupedToolLine(line: string, _groupedLabel?: string): string {
+	return trimAnsiLeft(line);
+}
+
+function getToolArgSummary(tool: any): string {
+	const args = tool?.args ?? {};
+	const name = getToolName(tool);
+	if (name === "read") {
+		let value = shortPath(process.cwd(), args.path ?? "");
+		const parts: string[] = [];
+		if (args.offset) parts.push(`offset=${args.offset}`);
+		if (args.limit) parts.push(`limit=${args.limit}`);
+		if (parts.length > 0) value += ` (${parts.join(", ")})`;
+		return value;
+	}
+	if (name === "bash") return summarizeText(args.command ?? "", 72);
+	if (name === "grep") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
+	if (name === "find") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
+	if (name === "ls") return shortPath(process.cwd(), args.path ?? ".");
+	return summarizeText(getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt") || name, 72);
 }
 
 function getCompactToolLine(tool: any, width: number, groupedLabel?: string): string {
-	const rendered = stripToolChrome(tool.render(Math.max(1, width)))
-		.map((line) => removeGroupedToolPrefix(line, groupedLabel))
-		.map((line) => tintGroupedToolLine(line, groupedLabel));
-	const content = rendered.find((line) => stripAnsi(line).trim().length > 0) ?? `${FG_DIM}${tool?.toolName ?? "tool"}${TRANSPARENT_RESET}`;
-	return clampLineWidth(trimAnsiLeft(content), width);
+	const summary = getToolArgSummary(tool);
+	const label = groupedLabel ? "" : humanizeToolName(getToolName(tool));
+	const content = label ? `${label}${summary ? ` ${summary}` : ""}` : summary;
+	return clampLineWidth(content || getToolName(tool), width);
 }
 
 function getExpandedToolGroupLines(tool: any, width: number, groupedLabel?: string): string[] {
@@ -428,11 +441,11 @@ function getExpandedToolGroupLines(tool: any, width: number, groupedLabel?: stri
 
 function branchPrefix(index: number, total: number): string {
 	const branch = index === total - 1 ? "└─" : "├─";
-	return `  ${TOOL_RULE}${branch}${TRANSPARENT_RESET} `;
+	return ` ${TOOL_RULE}${branch}${TRANSPARENT_RESET} `;
 }
 
 function branchContinuation(index: number, total: number): string {
-	return index === total - 1 ? "     " : `  ${TOOL_RULE}│${TRANSPARENT_RESET}  `;
+	return index === total - 1 ? "    " : ` ${TOOL_RULE}│${TRANSPARENT_RESET}  `;
 }
 
 function formatBranchedToolLines(lines: string[], index: number, total: number, width: number, status: ToolStatus): string[] {
@@ -494,10 +507,10 @@ class ToolGroupComponent extends Container {
 		const label = getToolGroupLabel(this.tools);
 		const names = groupedName ? "" : formatToolNameList(this.tools);
 		const light = groupStatusLight(getToolGroupOverallStatus(this.tools));
-		const summaryLabel = `${FG_DIM}${label}:${TRANSPARENT_RESET}`;
-		const summary = `  ${light} ${summaryLabel} ${formatToolGroupCounts(this.tools)}${names ? ` ${TRANSPARENT_RESET}• ${FG_DIM}${names}${TRANSPARENT_RESET}` : ""}${toolOutputDetailHint(undefined as any, this.expanded, true)}`;
+		const summaryLabel = `${label}:`;
+		const summary = ` ${light} ${summaryLabel} ${formatToolGroupCounts(this.tools)}${names ? ` ${TRANSPARENT_RESET}• ${names}` : ""}${toolOutputDetailHint(undefined as any, this.expanded, true)}`;
 		const lines = [" ".repeat(safeWidth), clampLineWidth(summary, safeWidth)];
-		const childWidth = Math.max(1, safeWidth - 8);
+		const childWidth = Math.max(1, safeWidth - 6);
 
 		this.tools.forEach((tool, index) => {
 			const rawLines = this.expanded
@@ -865,7 +878,12 @@ function looksLikeInlineMath(text: string): boolean {
 	return /\\[A-Za-z]+|[_^=<>+*/-]/.test(text) && /[A-Za-z0-9}]/.test(text);
 }
 
+function hasInlineMathMarkers(text: string): boolean {
+	return text.includes("\\(") || text.includes("$");
+}
+
 function replaceInlineMath(text: string): string {
+	if (!hasInlineMathMarkers(text)) return text;
 	const withParens = text.replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => {
 		return codeSpan(formatMathForDisplay(body, false));
 	});
@@ -922,9 +940,17 @@ function findNextLooseBracketMathBlock(text: string, start: number): MathBlock |
 	return undefined;
 }
 
-function findNextDisplayMathBlock(text: string, start: number): MathBlock | undefined {
+function hasDisplayMathMarkers(text: string): boolean {
+	return text.includes("\\[") || text.includes("$$") || text.includes("\\begin{") || /(^|\n)[ \t]*\[[ \t]*(?:\r?\n)/.test(text);
+}
+
+function shouldScanLooseBracketMath(text: string): boolean {
+	return text.length < 20_000 && /(^|\n)[ \t]*\[[ \t]*(?:\r?\n)/.test(text);
+}
+
+function findNextDisplayMathBlock(text: string, start: number, scanLoose: boolean): MathBlock | undefined {
 	const delimited = findNextDelimitedMathBlock(text, start);
-	const loose = findNextLooseBracketMathBlock(text, start);
+	const loose = scanLoose ? findNextLooseBracketMathBlock(text, start) : undefined;
 	if (!delimited) return loose;
 	if (!loose) return delimited;
 	return loose.index < delimited.index ? loose : delimited;
@@ -937,9 +963,14 @@ function appendMarkdownSegment(segments: ParagraphSegment[], text: string, theme
 
 function buildParagraphSegments(text: string, theme: MarkdownThemeLike): ParagraphSegment[] {
 	const segments: ParagraphSegment[] = [];
+	if (!hasDisplayMathMarkers(text)) {
+		appendMarkdownSegment(segments, text, theme);
+		return segments;
+	}
+	const scanLoose = shouldScanLooseBracketMath(text);
 	let cursor = 0;
 	while (cursor < text.length) {
-		const next = findNextDisplayMathBlock(text, cursor);
+		const next = findNextDisplayMathBlock(text, cursor, scanLoose);
 		if (!next) break;
 		appendMarkdownSegment(segments, text.slice(cursor, next.index), theme);
 		const raw = text.slice(next.contentStart, next.contentEnd).trim();
