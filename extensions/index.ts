@@ -510,7 +510,7 @@ class ToolGroupComponent extends Container {
 
 	render(width: number): string[] {
 		if (this.tools.length === 0) return [];
-		const safeWidth = Math.max(20, width);
+		const safeWidth = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1;
 		const groupedName = getGroupedToolName(this.tools);
 		const label = getToolGroupLabel(this.tools);
 		const names = groupedName ? "" : formatToolNameList(this.tools);
@@ -527,7 +527,7 @@ class ToolGroupComponent extends Container {
 			lines.push(...formatBranchedToolLines(rawLines, index, this.tools.length, safeWidth, getToolStatusForGroup(tool)));
 		});
 
-		return lines;
+		return lines.map((line) => clampLineWidth(line, safeWidth));
 	}
 }
 
@@ -744,6 +744,14 @@ function clearToolRenderCache(value: unknown): void {
 
 function unrefTimer(timer: ReturnType<typeof setTimeout> | null | undefined): void {
 	(timer as any)?.unref?.();
+}
+
+function safeInvalidate(ctx: any): void {
+	try {
+		if (typeof ctx?.invalidate === "function") ctx.invalidate();
+	} catch {
+		// Tool render contexts may outlive their row during reload/session switches.
+	}
 }
 
 const ASSISTANT_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-message");
@@ -1111,14 +1119,20 @@ class DottedParagraph {
 
 	render(width: number): string[] {
 		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-		// " ● " = 1 margin + dot + space = 3 visible chars
-		const PREFIX_W = 3;
-		if (width <= PREFIX_W) {
+		const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
+		if (safeWidth <= 0) {
 			this.cachedWidth = width;
-			this.cachedLines = [" ● "];
+			this.cachedLines = [""];
 			return this.cachedLines;
 		}
-		const contentWidth = width - PREFIX_W;
+		// " ● " = 1 margin + dot + space = 3 visible chars
+		const PREFIX_W = 3;
+		if (safeWidth <= PREFIX_W) {
+			this.cachedWidth = width;
+			this.cachedLines = [clampLineWidth(" ● ", safeWidth)];
+			return this.cachedLines;
+		}
+		const contentWidth = safeWidth - PREFIX_W;
 		const lines = this.segments.flatMap((segment) => {
 			return segment.kind === "math"
 				? renderMathBlock(segment.raw, contentWidth, this.markdownTheme)
@@ -1133,7 +1147,7 @@ class DottedParagraph {
 				return ` ● ${line}`;
 			}
 			return `   ${line}`;
-		});
+		}).map((line) => clampLineWidth(line, safeWidth));
 		this.cachedWidth = width;
 		this.cachedLines = rendered;
 		return rendered;
@@ -1191,15 +1205,21 @@ class ThinkingParagraph {
 
 	render(width: number): string[] {
 		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+		const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
+		if (safeWidth <= 0) {
+			this.cachedWidth = width;
+			this.cachedLines = [""];
+			return this.cachedLines;
+		}
 		// " ✻ " = 1 margin + symbol + space = 3 visible chars
 		const PREFIX_W = 3;
 		const prefix = `${WORKED_LINE_FG}✻${RESET}`;
-		if (width <= PREFIX_W) {
+		if (safeWidth <= PREFIX_W) {
 			this.cachedWidth = width;
-			this.cachedLines = [` ${prefix} `];
+			this.cachedLines = [clampLineWidth(` ${prefix} `, safeWidth)];
 			return this.cachedLines;
 		}
-		const lines = sanitizeRenderedTextBlockLines(this.md.render(width - PREFIX_W));
+		const lines = sanitizeRenderedTextBlockLines(this.md.render(safeWidth - PREFIX_W));
 		let symbolPlaced = false;
 		const rendered = lines.map((line: string) => {
 			if (!symbolPlaced && stripAnsi(line).trim()) {
@@ -1207,7 +1227,7 @@ class ThinkingParagraph {
 				return ` ${prefix} ${line}`;
 			}
 			return `   ${line}`;
-		});
+		}).map((line) => clampLineWidth(line, safeWidth));
 		this.cachedWidth = width;
 		this.cachedLines = rendered;
 		return rendered;
@@ -1403,7 +1423,7 @@ function patchUserMessageRender(): void {
 		];
 		rendered[0] = OSC133_ZONE_START + rendered[0];
 		rendered[rendered.length - 1] += OSC133_ZONE_END + OSC133_ZONE_FINAL;
-		return rendered;
+		return rendered.map((line) => clampLineWidth(line, borderWidth));
 	};
 	proto[USER_MESSAGE_PATCH_FLAG] = true;
 }
@@ -1655,7 +1675,7 @@ function preserveBashPreview(ctx: any): void {
 	if (!toolCallId) return;
 	PRESERVED_BASH_PREVIEWS.add(toolCallId);
 	if (typeof ctx?.invalidate === "function") {
-		BASH_PREVIEW_INVALIDATORS.set(toolCallId, () => ctx.invalidate());
+		BASH_PREVIEW_INVALIDATORS.set(toolCallId, () => safeInvalidate(ctx));
 	}
 }
 
@@ -1925,7 +1945,7 @@ function _stopGlobalBlinkTimerIfEmpty(): void {
 function setupBlinkTimer(ctx: any): void {
 	const key = getBlinkKey(ctx);
 	if (!key) return;
-	const invalidate = typeof ctx?.invalidate === "function" ? () => ctx.invalidate() : () => {};
+	const invalidate = typeof ctx?.invalidate === "function" ? () => safeInvalidate(ctx) : () => {};
 	const existing = _blinkContexts.get(key);
 	if (existing) {
 		// Already tracked — just refresh the invalidate fn, skip expensive recalc
@@ -2029,8 +2049,10 @@ function lineCount(text: string): number {
 }
 
 function padToWidth(line: string, width: number): string {
-	const padding = Math.max(0, width - visibleWidth(line));
-	return `${line}${" ".repeat(padding)}`;
+	const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
+	const clipped = clampLineWidth(line, safeWidth);
+	const padding = Math.max(0, safeWidth - visibleWidth(clipped));
+	return `${clipped}${" ".repeat(padding)}`;
 }
 
 function markedContinuationPrefix(prefix: string): string {
@@ -3495,13 +3517,13 @@ function renderEditPreviewBody(
 				if (ctx.state._pk !== key) return;
 				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}\n${rendered}`;
 				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-				ctx.invalidate();
+				safeInvalidate(ctx);
 			})
 			.catch(() => {
 				if (ctx.state._pk !== key) return;
 				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}`;
 				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-				ctx.invalidate();
+				safeInvalidate(ctx);
 			});
 		return;
 	}
@@ -3525,13 +3547,13 @@ function renderEditPreviewBody(
 				: "";
 			ctx.state._ptBody = `${operations.length} edits ${summary}\n\n${sections.join("\n\n")}${suffix}`;
 			ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-			ctx.invalidate();
+			safeInvalidate(ctx);
 		})
 		.catch(() => {
 			if (ctx.state._pk !== key) return;
 			ctx.state._ptBody = `${operations.length} edits ${summary}`;
 			ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-			ctx.invalidate();
+			safeInvalidate(ctx);
 		});
 }
 
@@ -4165,13 +4187,13 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 					if (ctx.state._applyPatchPreviewKey !== key) return;
 					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`;
 					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
-					ctx.invalidate();
+					safeInvalidate(ctx);
 				})
 				.catch(() => {
 					if (ctx.state._applyPatchPreviewKey !== key) return;
 					ctx.state._applyPatchPreviewBody = `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`;
 					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
-					ctx.invalidate();
+					safeInvalidate(ctx);
 				});
 		} else {
 			const maxShown = ctx.expanded ? preview.changes.length : Math.min(preview.changes.length, 3);
@@ -4194,13 +4216,13 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 					const summary = `${preview.changes.length} files ${preview.summary}`;
 					ctx.state._applyPatchPreviewBody = `${summary}\n\n${sections.join("\n\n")}${suffix}`;
 					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
-					ctx.invalidate();
+					safeInvalidate(ctx);
 				})
 				.catch(() => {
 					if (ctx.state._applyPatchPreviewKey !== key) return;
 					ctx.state._applyPatchPreviewBody = `${preview.changes.length} files ${preview.summary}`;
 					ctx.state._applyPatchPreviewDisplay = withBranch(ctx.state._applyPatchPreviewBody, theme, false, true);
-					ctx.invalidate();
+					safeInvalidate(ctx);
 				});
 		}
 	}
@@ -5175,12 +5197,12 @@ export default function (pi: ExtensionAPI) {
 						.then((rendered) => {
 							if (ctx.state._wdk !== key) return;
 							ctx.state._wdt = withFinalBranchBlock(`${richSummary}\n${rendered}`, theme);
-							ctx.invalidate();
+							safeInvalidate(ctx);
 						})
 						.catch(() => {
 							if (ctx.state._wdk !== key) return;
 							ctx.state._wdt = withBranch(richSummary, theme);
-							ctx.invalidate();
+							safeInvalidate(ctx);
 						});
 				}
 				return makeText(ctx.lastComponent, ctx.state._wdt ?? withBranch(richSummary, theme));
@@ -5203,12 +5225,12 @@ export default function (pi: ExtensionAPI) {
 						.then((rendered) => {
 							if (ctx.state._nfk !== pk) return;
 							ctx.state._nft = withFinalBranchBlock(`${richSummary}\n${rendered}`, theme);
-							ctx.invalidate();
+							safeInvalidate(ctx);
 						})
 						.catch(() => {
 							if (ctx.state._nfk !== pk) return;
 							ctx.state._nft = withBranch(`${richSummary} ${theme.fg("muted", `(${lineTotal} lines)`)}`, theme);
-							ctx.invalidate();
+							safeInvalidate(ctx);
 						});
 				}
 				return makeText(ctx.lastComponent, ctx.state._nft ?? withBranch(`${richSummary} ${theme.fg("muted", `(${lineTotal} lines)`)}`, theme));
