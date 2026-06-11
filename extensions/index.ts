@@ -9,7 +9,7 @@ import type {
 	GrepToolDetails,
 	ReadToolDetails,
 	Theme,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
 	AssistantMessageComponent,
 	CustomMessageComponent,
@@ -25,7 +25,7 @@ import {
 	createLsTool,
 	createReadTool,
 	createWriteTool,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
 	Box,
 	Container,
@@ -39,7 +39,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
@@ -2163,15 +2163,57 @@ function buildPreviewText(lines: string[], expanded: boolean, theme: Theme, fall
 	if (lines.length === 0) return theme.fg("muted", "(no output)");
 	const maxLines = collapsedPreviewCount(expanded, fallbackCollapsed);
 	const shown = lines.slice(0, maxLines);
+	return buildPreviewTextFromShown(shown, lines.length, maxLines, expanded, theme);
+}
+
+function buildPreviewTextFromShown(shown: string[], totalLines: number, maxLines: number, expanded: boolean, theme: Theme): string {
+	if (totalLines === 0) return theme.fg("muted", "(no output)");
 	let text = shown.join("\n");
-	const remaining = lines.length - shown.length;
+	const remaining = totalLines - shown.length;
 	if (remaining > 0) {
 		text += `\n${theme.fg("muted", `... (${remaining} more lines${toolOutputDetailHint(theme, expanded, true)})`)}`;
 	}
-	if (expanded && lines.length > maxLines) {
+	if (expanded && totalLines > maxLines) {
 		text += `\n${theme.fg("warning", `(display capped at ${maxLines} lines${deepExpandHint()})`)}`;
 	}
 	return text;
+}
+
+function displayBlankLine(line: string): string {
+	return stripAnsi(line).length === 0 ? " " : line;
+}
+
+function splitReadOutput(text: string): string[] {
+	const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+	while (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+	return lines;
+}
+
+function renderReadPreviewText(filePath: string, lines: string[], expanded: boolean, theme: Theme, ctx: any): string {
+	const maxLines = collapsedPreviewCount(expanded, previewLimit());
+	const shown = lines.slice(0, maxLines);
+	const fallbackLines = shown.map((line) => theme.fg("dim", line || " "));
+	const fallback = buildPreviewTextFromShown(fallbackLines, lines.length, maxLines, expanded, theme);
+	const language = lang(filePath);
+	const code = shown.join("\n");
+	if (!ctx.state || !language || !code || code.length > MAX_HL_CHARS) return fallback;
+
+	const key = `read:${DIFF_THEME}:${language}:${maxLines}:${lines.length}:${hashText(filePath)}:${hashText(code)}`;
+	if (ctx.state._readHighlightKey !== key) {
+		ctx.state._readHighlightKey = key;
+		ctx.state._readHighlightText = fallback;
+		hlBlock(code, language)
+			.then((highlighted) => {
+				if (ctx.state?._readHighlightKey !== key) return;
+				const highlightedLines = shown.map((line, index) => displayBlankLine(highlighted[index] ?? theme.fg("dim", line || " ")));
+				ctx.state._readHighlightText = buildPreviewTextFromShown(highlightedLines, lines.length, maxLines, expanded, theme);
+				safeInvalidate(ctx);
+			})
+			.catch(() => {
+				if (ctx.state?._readHighlightKey === key) ctx.state._readHighlightText = fallback;
+			});
+	}
+	return typeof ctx.state._readHighlightText === "string" ? ctx.state._readHighlightText : fallback;
 }
 
 // ===========================================================================
@@ -2821,7 +2863,9 @@ function wrapAnsi(text: string, width: number, maxRows = adaptiveWrapRows(), fil
 function lnum(n: number | null, width: number, fg = FG_LNUM): string {
 	if (n === null) return " ".repeat(width);
 	const value = String(n);
-	return `${fg}${" ".repeat(Math.max(0, width - value.length))}${value}${D_RST}`;
+	// Callers reset after the whole gutter cell so wrapped rows keep one
+	// continuous add/remove background through the line-number/sign columns.
+	return `${fg}${" ".repeat(Math.max(0, width - value.length))}${value}`;
 }
 
 function stripes(width: number): string {
@@ -3136,8 +3180,8 @@ async function renderUnified(
 		const borderFg = sign === "-" ? dc.fgDel : sign === "+" ? dc.fgAdd : "";
 		const border = borderFg ? `${borderFg}▌${D_RST}` : `${BG_BASE} `;
 		const numFg = borderFg || FG_LNUM;
-		const gutter = `${border}${gutterBg}${lnum(num, nw, numFg)}${signFg}${sign}${D_RST} ${DIVIDER} `;
-		const cont = `${border}${gutterBg}${" ".repeat(nw + 1)}${D_RST} ${DIVIDER} `;
+		const gutter = `${border}${gutterBg}${lnum(num, nw, numFg)}${signFg}${sign} ${D_RST}${DIVIDER} `;
+		const cont = `${border}${gutterBg}${" ".repeat(nw + 2)}${D_RST}${DIVIDER} `;
 		const rows = wrapAnsi(tabs(body), cw, adaptiveWrapRows(), bodyBg);
 		out.push(`${gutter}${rows[0]}${D_RST}`);
 		for (let r = 1; r < rows.length; r++) out.push(`${cont}${rows[r]}${D_RST}`);
@@ -3281,8 +3325,8 @@ async function renderSplit(
 		if (ranges && ranges.length > 0) body = injectBg(hl, ranges, cBg, isDel ? BG_DEL_W : BG_ADD_W);
 		else if (isDel || isAdd) body = `${cBg}${hl}`;
 		else body = `${BG_BASE}${D_DIM}${hl}`;
-		const gutter = `${border}${gBg}${lnum(num, nw, numFg)}${sFg}${D_BOLD}${sign}${D_RST} ${FG_RULE}│${D_RST} `;
-		const contGutter = `${border}${gBg}${" ".repeat(nw + 1)}${D_RST} ${FG_RULE}│${D_RST} `;
+		const gutter = `${border}${gBg}${lnum(num, nw, numFg)}${sFg}${D_BOLD}${sign} ${D_RST}${FG_RULE}│${D_RST} `;
+		const contGutter = `${border}${gBg}${" ".repeat(nw + 2)}${D_RST}${FG_RULE}│${D_RST} `;
 		return { gutter, contGutter, bodyRows: wrapAnsi(tabs(body), cw, adaptiveWrapRows(), cBg) };
 	}
 
@@ -4925,16 +4969,19 @@ export default function (pi: ExtensionAPI) {
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
+			const mode = getMode(readSettings().readOutputMode, ["hidden", "summary", "preview"] as const, "preview");
+			if (mode === "hidden") return makeText(ctx.lastComponent, "");
 			if (getFirstImageBlock(result)) return renderReadImageResult(result, expanded, theme, ctx);
 			const details = result.details as ReadToolDetails | undefined;
 			const content = result.content.find((block: any) => block?.type === "text");
 			if (content?.type !== "text") return makeText(ctx.lastComponent, withBranch(theme.fg("error", "No text content"), theme));
-			const lines = content.text.split("\n");
+			const lines = splitReadOutput(content.text);
 			let text = theme.fg("muted", `${lines.length} lines loaded`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " (truncated)");
+			if (mode === "summary") return makeText(ctx.lastComponent, withBranch(text, theme));
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
-			const shown = lines.slice(0, previewLimit());
-			text += `\n${buildPreviewText(shown.map((line) => theme.fg("dim", line || " ")), false, theme, previewLimit())}`;
+			const preview = renderReadPreviewText(getStringArg(ctx.args, "path", "file_path") || "", lines, expanded, theme, ctx);
+			text += `\n${preview}`;
 			return makeText(ctx.lastComponent, withBranch(text, theme));
 		},
 	});

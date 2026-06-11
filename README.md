@@ -5,6 +5,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 ## Features
 
 - **Compact built-in tool rendering** for `read`, `bash`, `grep`, `find`, `ls`, `edit`, and `write`
+- **Syntax-highlighted read previews** for known file types, using the same Shiki theme as diffs
 - **Claude-style OpenAI tool rendering** for `apply_patch` plus common Pi/OpenAI-style tools like `webfetch`, `web_search`, `fetch_content`, task tools, and context tools
 - **`apply_patch` diff previews** that render parsed file patches in the call phase, similar to `edit`/`write`
 - **Adaptive edit/write diffs** with split or unified layouts, syntax highlighting, and inline word-level emphasis
