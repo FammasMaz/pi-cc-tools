@@ -2689,6 +2689,20 @@ function themeBgRgb(theme: any, key: string): Rgb | null {
 // object is reused across renders within a single session unless the user
 // switches themes via the picker.
 let _themePaletteCacheTheme: unknown = null;
+let _themePaletteCacheName: string | null = null;
+let _themePaletteCacheFingerprint: string | null = null;
+
+/** Resolved-color fingerprint so palette re-derives when the active theme file changes under the same name/object. */
+function themePaletteFingerprint(theme: any): string {
+	const keys = ["success", "error", "borderMuted", "accent", "muted", "toolDiffAdded", "toolDiffRemoved"] as const;
+	return keys.map((k) => safeFgAnsi(theme, k) ?? "").join("\u001f");
+}
+
+function invalidateThemePaletteCache(): void {
+	_themePaletteCacheTheme = null;
+	_themePaletteCacheName = null;
+	_themePaletteCacheFingerprint = null;
+}
 
 function themeAdaptiveEnabled(): boolean {
 	const settings = readSettings();
@@ -2832,7 +2846,7 @@ function refreshToolBranchDisplaysInState(state: Record<string, unknown> | undef
 
 function refreshAllToolBranchVisuals(ctx: any): void {
 	_settingsCache = null;
-	_themePaletteCacheTheme = null;
+	invalidateThemePaletteCache();
 	applyToolBranchColor(ctx?.ui?.theme);
 	bumpToolBranchVisualEpoch(); // always bust ToolText + container caches after /cc-tools branch
 	// Tool rows recompute branch markup on next render (liveBranchDisplay + cache bust).
@@ -3007,11 +3021,19 @@ function applyThemePaletteIfNeeded(theme: any): void {
 		applyToolBranchColor(theme);
 		return;
 	}
-	if (_themePaletteCacheTheme === theme) {
+	const themeName = typeof theme?.name === "string" ? theme.name : "";
+	const fingerprint = themePaletteFingerprint(theme);
+	if (
+		_themePaletteCacheTheme === theme &&
+		_themePaletteCacheName === themeName &&
+		_themePaletteCacheFingerprint === fingerprint
+	) {
 		applyToolBranchColor(theme);
 		return;
 	}
 	_themePaletteCacheTheme = theme;
+	_themePaletteCacheName = themeName;
+	_themePaletteCacheFingerprint = fingerprint;
 
 	// Borders (top/bottom outlines, user-message frame, branch rule).
 	const borderMuted = safeFgAnsi(theme, "borderMuted");
@@ -5337,7 +5359,7 @@ export default function (pi: ExtensionAPI) {
 			bustSpinnerSettingsCache();
 			// Invalidate caches so the next render re-derives from the active
 			// theme (or falls back to the fixed Claude palette).
-			_themePaletteCacheTheme = null;
+			invalidateThemePaletteCache();
 			autoDerivePending = true;
 			if (next) {
 				if (ctx.hasUI) applyThemePaletteIfNeeded(ctx.ui.theme);
