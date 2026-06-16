@@ -1,6 +1,6 @@
 {
   "name": "pi-claude-style-tools",
-  "version": "1.0.52",
+  "version": "1.0.53",
   "description": "Claude Code-style grouped tool rows for pi with Ctrl+O/Ctrl+Shift+O previews, math rendering, and consistent built-in, MCP, and custom tool rendering",
   "keywords": [
     "pi-package",
@@ -31,7 +31,8 @@
     "extensions/index.ts",
     "extensions/spinner.ts",
     "config/config.example.json",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/index.ts extensions/spinner.ts",

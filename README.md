@@ -18,6 +18,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **RTK rewrite integration** that folds rewrite notices into the bash tool row with a muted `(RTK)` badge and expanded-only rewrite details
 - **Transparent tool backgrounds** in `transparent` or `border` mode
 - **Theme-adaptive palette** — borders, branch connectors, dim text, spinner accent, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
+- **Light Ghostty-sync themes** — edit/write diffs use `github-light` highlighting and light-tinted diff rows; tool pending dots use softer chrome colors
 - **Transparent edit/write diffs** with universal red/green diff colors
 - **Grouped consecutive tool calls** with a compact status header and per-tool glance rows (set `groupToolCalls: false` to disable)
 - **Extra detail toggle** with `Ctrl+Shift+O`, increasing expanded preview caps without making the default view heavy

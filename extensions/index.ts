@@ -2285,11 +2285,19 @@ function clearBlinkTimer(ctx: any): void {
 	_scheduleGlobalBlinkTimer();
 }
 
+function pendingToolChromeColor(theme: Theme): "borderMuted" | "muted" {
+	if (isLightThemeBackground(theme)) {
+		return "borderMuted";
+	}
+	return "muted";
+}
+
 function blinkDot(ctx: any, theme: Theme): string {
 	setupBlinkTimer(ctx);
 	const key = getBlinkKey(ctx);
-	if (key?._blinkActive !== true) return theme.fg("muted", "○");
-	return _globalBlinkPhase ? theme.fg("success", "●") : theme.fg("muted", "○");
+	const idle = pendingToolChromeColor(theme);
+	if (key?._blinkActive !== true) return theme.fg(idle, "○");
+	return _globalBlinkPhase ? theme.fg("success", "●") : theme.fg(idle, "○");
 }
 
 // ---------------------------------------------------------------------------
@@ -3026,7 +3034,14 @@ function applyThemePaletteIfNeeded(theme: any): void {
 	// Grouped-tool status counts follow the same semantic theme colors as regular tool dots.
 	TOOL_STATUS_SUCCESS = safeFgAnsi(theme, "success") ?? TOOL_STATUS_SUCCESS;
 	TOOL_STATUS_ERROR = safeFgAnsi(theme, "error") ?? TOOL_STATUS_ERROR;
-	TOOL_STATUS_PENDING = muted ?? dim ?? TOOL_STATUS_PENDING;
+	const pendingChrome = dim ?? muted ?? TOOL_STATUS_PENDING;
+	TOOL_STATUS_PENDING = pendingChrome;
+
+	// Light themes: pending ○ reads too heavy when dim/muted track body fg — soften chrome only.
+	if (isLightThemeBackground(theme)) {
+		const softPending = safeFgAnsi(theme, "borderMuted") ?? safeFgAnsi(theme, "gray") ?? pendingChrome;
+		TOOL_STATUS_PENDING = softPending;
+	}
 
 	// Diff support text colors. These are user-overridable via diffColors.* so
 	// we only touch the ones not explicitly set.
