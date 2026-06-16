@@ -209,26 +209,96 @@ function stripRenderedHeadingMarkers(line: string): string {
 	return line.replace(/^((?:\x1b\[[0-9;]*m|[ \t])*)#{3,6}[ \t]*((?:\x1b\[[0-9;]*m)*)/, "$1$2");
 }
 
-function sanitizeRenderedTextBlockLines(lines: string[]): string[] {
-	let inFence = false;
-	let hideCurrentFence = false;
+const PLAIN_FENCE_LANGS = new Set(["text", "txt", "plain", "plaintext", ""]);
+
+function parseRenderedFenceLine(line: string): { kind: "open" | "close"; language: string } | undefined {
+	const plain = stripAnsi(line).trim();
+	if (plain === "```") return { kind: "close", language: "" };
+	if (!plain.startsWith("```")) return undefined;
+	const rest = plain.slice(3).trim();
+	if (rest.includes("`")) return undefined;
+	return { kind: "open", language: rest };
+}
+
+function formatCodeBlockLanguageLabel(language: string): string {
+	const raw = language.trim();
+	if (!raw) return "";
+	return raw.toLowerCase();
+}
+
+function roundedCodeBlockTop(width: number, language: string): string {
+	if (width <= 1) return `${BORDER_COLOR}│${TRANSPARENT_RESET}`;
+	const label = formatCodeBlockLanguageLabel(language);
+	if (!label || width < 8) {
+		const left = "╭";
+		const right = "╮";
+		return `${BORDER_COLOR}${left}${"─".repeat(Math.max(0, width - 2))}${right}${TRANSPARENT_RESET}`;
+	}
+	const left = "╭─ ";
+	const right = " ╮";
+	const labelStyled = `${WORKED_LINE_FG}${label}${TRANSPARENT_RESET}`;
+	const prefixVis = 3 + visibleWidth(labelStyled) + 1;
+	const dashCount = Math.max(0, width - prefixVis - 1);
+	return `${BORDER_COLOR}${left}${TRANSPARENT_RESET}${labelStyled}${BORDER_COLOR}${"─".repeat(dashCount)}${right}${TRANSPARENT_RESET}`;
+}
+
+function roundedCodeBlockBottom(width: number): string {
+	if (width <= 1) return `${BORDER_COLOR}│${TRANSPARENT_RESET}`;
+	return `${BORDER_COLOR}╰${"─".repeat(Math.max(0, width - 2))}╯${TRANSPARENT_RESET}`;
+}
+
+function borderedCodeBlockLine(line: string, width: number): string {
+	const innerWidth = Math.max(1, width - 4);
+	const content = clampLineWidth(line, innerWidth);
+	const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
+	return `${BORDER_COLOR}│${TRANSPARENT_RESET} ${content}${padding} ${BORDER_COLOR}│${TRANSPARENT_RESET}`;
+}
+
+function boxRenderedCodeBlock(bodyLines: string[], language: string, width: number): string[] {
+	const safeWidth = Math.max(4, Number.isFinite(width) ? Math.floor(width) : 0);
+	const framed = [
+		roundedCodeBlockTop(safeWidth, language),
+		...bodyLines.map((line) => borderedCodeBlockLine(line, safeWidth)),
+		roundedCodeBlockBottom(safeWidth),
+	];
+	return framed.map((line) => clampLineWidth(line, safeWidth));
+}
+
+function sanitizeRenderedTextBlockLines(lines: string[], width?: number): string[] {
 	const result: string[] = [];
-	for (const line of lines) {
-		const plain = stripAnsi(line).trimStart();
-		if (plain.startsWith("```")) {
-			if (!inFence) {
-				const language = plain.slice(3).trim().toLowerCase();
-				hideCurrentFence = ["text", "txt", "plain", "plaintext"].includes(language);
-				inFence = true;
-				if (!hideCurrentFence) result.push(line);
-				continue;
+	let i = 0;
+	const canBox = typeof width === "number" && width > 0;
+	while (i < lines.length) {
+		const fence = parseRenderedFenceLine(lines[i]);
+		if (fence?.kind === "open") {
+			const language = fence.language;
+			const hideBox = PLAIN_FENCE_LANGS.has(language.trim().toLowerCase());
+			const body: string[] = [];
+			i++;
+			while (i < lines.length) {
+				const close = parseRenderedFenceLine(lines[i]);
+				if (close?.kind === "close") {
+					i++;
+					break;
+				}
+				body.push(lines[i]);
+				i++;
 			}
-			inFence = false;
-			if (!hideCurrentFence) result.push(line);
-			hideCurrentFence = false;
+			if (hideBox) {
+				result.push(...body);
+			} else if (canBox && (body.length > 0 || language.trim())) {
+				result.push(...boxRenderedCodeBlock(body, language, width));
+			} else {
+				result.push(...body);
+			}
 			continue;
 		}
-		result.push(inFence ? line : stripRenderedHeadingMarkers(line).replace(/###/g, ""));
+		if (fence?.kind === "close") {
+			i++;
+			continue;
+		}
+		result.push(stripRenderedHeadingMarkers(lines[i]).replace(/###/g, ""));
+		i++;
 	}
 	return result;
 }
@@ -1136,7 +1206,7 @@ class DottedParagraph {
 		const lines = this.segments.flatMap((segment) => {
 			return segment.kind === "math"
 				? renderMathBlock(segment.raw, contentWidth, this.markdownTheme)
-				: sanitizeRenderedTextBlockLines(segment.md.render(contentWidth));
+				: sanitizeRenderedTextBlockLines(segment.md.render(contentWidth), contentWidth);
 		});
 		const looksLikeTaskStatus = lines.some((line) => /\b(?:transcript:|No output\.|Wrapped up)/.test(stripAnsi(line)));
 		const displayLines = looksLikeTaskStatus ? lines.map(normalizeLeadingCheckGlyph) : lines;
@@ -1219,7 +1289,7 @@ class ThinkingParagraph {
 			this.cachedLines = [clampLineWidth(` ${prefix} `, safeWidth)];
 			return this.cachedLines;
 		}
-		const lines = sanitizeRenderedTextBlockLines(this.md.render(safeWidth - PREFIX_W));
+		const lines = sanitizeRenderedTextBlockLines(this.md.render(safeWidth - PREFIX_W), safeWidth - PREFIX_W);
 		let symbolPlaced = false;
 		const rendered = lines.map((line: string) => {
 			if (!symbolPlaced && stripAnsi(line).trim()) {
