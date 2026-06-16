@@ -976,6 +976,41 @@ function thoughtDurationSummaryText(ms: number): string {
 	return thinkingSummaryStyledText(`Thought for ${formatThoughtDuration(ms)}`);
 }
 
+/** Single-line hidden thinking row — no Text paddingX, full muted italic styling. */
+class HiddenThinkingSummary {
+	private summaryText: string;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
+	constructor(summaryText: string) {
+		this.summaryText = summaryText;
+	}
+
+	setSummary(summaryText: string): void {
+		this.summaryText = summaryText;
+		this.invalidate();
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+		const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
+		if (safeWidth <= 0) {
+			this.cachedWidth = width;
+			this.cachedLines = [""];
+			return this.cachedLines;
+		}
+		const line = padRenderedLineToWidth(this.summaryText, safeWidth);
+		this.cachedWidth = width;
+		this.cachedLines = [line];
+		return this.cachedLines;
+	}
+}
+
 function hiddenThinkingSummaryForMessage(message: any): string {
 	const finished = typeof message?.stopReason === "string" && message.stopReason.length > 0;
 	const stored = (message as any)?.[THINKING_DURATION_KEY];
@@ -1381,6 +1416,21 @@ class DottedParagraph {
 	}
 }
 
+function replaceHiddenThinkingPlaceholders(container: { children?: any[] }, message: any): void {
+	if (!container?.children) return;
+	const summary = hiddenThinkingSummaryForMessage(message);
+	for (let i = 0; i < container.children.length; i++) {
+		const child = container.children[i];
+		if (child instanceof HiddenThinkingSummary) {
+			child.setSummary(summary);
+			continue;
+		}
+		if (isHiddenThinkingPlaceholderText(child)) {
+			container.children[i] = new HiddenThinkingSummary(summary);
+		}
+	}
+}
+
 class ThinkingParagraph {
 	private md: InstanceType<typeof Markdown>;
 	private cachedWidth?: number;
@@ -1676,7 +1726,8 @@ function patchAssistantMessages(): void {
 			return originalUpdateContent.call(this, message);
 		}
 		if ((this as any).hideThinkingBlock && messageHasThinkingContent(message)) {
-			(this as any).hiddenThinkingLabel = thinkingActiveSummaryText();
+			// Pi wraps this in theme.italic/fg again — keep plain label for the placeholder pass.
+			(this as any).hiddenThinkingLabel = "Thinking…";
 		}
 		// Call original to build all children (text, thinking, spacers, errors)
 		originalUpdateContent.call(this, message);
@@ -1684,13 +1735,7 @@ function patchAssistantMessages(): void {
 		const container = (this as any).contentContainer;
 		if (!container?.children) return;
 		if ((this as any).hideThinkingBlock && messageHasThinkingContent(message)) {
-			const summary = hiddenThinkingSummaryForMessage(message);
-			for (const child of container.children) {
-				if (isHiddenThinkingPlaceholderText(child)) {
-					child.setText(summary);
-					(child as any).paddingX = 0;
-				}
-			}
+			replaceHiddenThinkingPlaceholders(container, message);
 		}
 		const mdTheme = (this as any).markdownTheme;
 		for (let i = container.children.length - 1; i >= 0; i--) {
@@ -3824,10 +3869,12 @@ function stripThinkingPresentationArtifacts(text: string): string {
 }
 
 function prefixThinkingLine(text: string, _theme: Theme | undefined): string {
+	if (!ANSI_PRESENT_RE.test(text) && text.startsWith("Thinking: ") && !/^Thinking:\s*thinking:\s*/i.test(text)) {
+		return text;
+	}
 	const normalized = stripThinkingPresentationArtifacts(text).trim();
 	if (!normalized) return text;
-	// Visible thinking uses ✻ on the first rendered line (ThinkingParagraph); no "Thinking:" prefix.
-	return normalized;
+	return `Thinking: ${normalized}`;
 }
 
 function trackThinkingBlockEvents(event: any): void {
