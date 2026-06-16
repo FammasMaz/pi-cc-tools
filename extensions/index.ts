@@ -1458,7 +1458,8 @@ class ThinkingParagraph {
 			quote: wrap,
 			quoteBorder: wrap,
 			hr: wrap,
-			listBullet: (marker: string) => wrap(assistantListBulletMarker(marker)),
+			// Thinking blocks keep classic "- " bullets, not assistant ● markers.
+			listBullet: (marker: string) => wrap(marker),
 			bold: wrap,
 			italic: wrap,
 			strikethrough: wrap,
