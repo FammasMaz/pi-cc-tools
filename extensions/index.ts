@@ -52,6 +52,8 @@ const TRANSPARENT_RESET = `${RESET}${TRANSPARENT_BG}`;
 // so behavior is identical when the theme is unavailable or themeAdaptive=false.
 // `applyThemePaletteIfNeeded(theme)` re-derives these from `theme.fg("borderMuted"|"muted")`.
 let BORDER_COLOR = "\x1b[38;5;238m";
+// Fenced-code language tag — dimmer than body `muted` so it reads as chrome, not prose.
+let CODE_BLOCK_LANG_FG = "\x1b[38;2;95;95;95m";
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const ANSI_PRESENT_RE = /\x1b\[[0-9;]*m/;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
@@ -226,30 +228,52 @@ function formatCodeBlockLanguageLabel(language: string): string {
 	return raw.toLowerCase();
 }
 
+function mutedDotFill(count: number): string {
+	if (count <= 0) return "";
+	return `${BORDER_COLOR}${"·".repeat(count)}${TRANSPARENT_RESET}`;
+}
+
+function padRenderedLineToWidth(line: string, width: number): string {
+	if (width <= 0) return "";
+	const gap = width - visibleWidth(line);
+	if (gap <= 0) return line;
+	return line + " ".repeat(gap);
+}
+
+function isCodeBoxChromeLine(line: string): boolean {
+	const plain = stripAnsi(line).trim();
+	if (!plain) return false;
+	if (/^[╭╮╰╯│·\s]+$/.test(plain) && /[╭╮╰╯│]/.test(plain)) return true;
+	if (/^╭·/.test(plain) && /╮$/.test(plain)) return true;
+	if (plain.startsWith("│") && plain.endsWith("│")) return true;
+	return false;
+}
+
 function roundedCodeBlockTop(width: number, language: string): string {
 	if (width <= 1) return `${BORDER_COLOR}│${TRANSPARENT_RESET}`;
 	const label = formatCodeBlockLanguageLabel(language);
 	if (!label || width < 8) {
-		const left = "╭";
-		const right = "╮";
-		return `${BORDER_COLOR}${left}${"─".repeat(Math.max(0, width - 2))}${right}${TRANSPARENT_RESET}`;
+		const inner = Math.max(0, width - 2);
+		return `${BORDER_COLOR}╭${TRANSPARENT_RESET}${mutedDotFill(inner)}${BORDER_COLOR}╮${TRANSPARENT_RESET}`;
 	}
-	const left = "╭─ ";
-	const right = " ╮";
-	const labelStyled = `${WORKED_LINE_FG}${label}${TRANSPARENT_RESET}`;
-	const prefixVis = 3 + visibleWidth(labelStyled) + 1;
-	const dashCount = Math.max(0, width - prefixVis - 1);
-	return `${BORDER_COLOR}${left}${TRANSPARENT_RESET}${labelStyled}${BORDER_COLOR}${"─".repeat(dashCount)}${right}${TRANSPARENT_RESET}`;
+	const labelStyled = `${CODE_BLOCK_LANG_FG}${label}${TRANSPARENT_RESET}`;
+	const labelW = visibleWidth(labelStyled);
+	const dotCount = Math.max(0, width - 6 - labelW);
+	return `${BORDER_COLOR}╭· ${TRANSPARENT_RESET}${labelStyled} ${mutedDotFill(dotCount)}${BORDER_COLOR} ╮${TRANSPARENT_RESET}`;
 }
 
 function roundedCodeBlockBottom(width: number): string {
 	if (width <= 1) return `${BORDER_COLOR}│${TRANSPARENT_RESET}`;
-	return `${BORDER_COLOR}╰${"─".repeat(Math.max(0, width - 2))}╯${TRANSPARENT_RESET}`;
+	const inner = Math.max(0, width - 2);
+	return `${BORDER_COLOR}╰${TRANSPARENT_RESET}${mutedDotFill(inner)}${BORDER_COLOR}╯${TRANSPARENT_RESET}`;
 }
 
 function borderedCodeBlockLine(line: string, width: number): string {
 	const innerWidth = Math.max(1, width - 4);
-	const content = clampLineWidth(line, innerWidth);
+	let content = line;
+	if (visibleWidth(content) > innerWidth) {
+		content = truncateToWidth(content, innerWidth, "", false);
+	}
 	const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
 	return `${BORDER_COLOR}│${TRANSPARENT_RESET} ${content}${padding} ${BORDER_COLOR}│${TRANSPARENT_RESET}`;
 }
@@ -261,7 +285,7 @@ function boxRenderedCodeBlock(bodyLines: string[], language: string, width: numb
 		...bodyLines.map((line) => borderedCodeBlockLine(line, safeWidth)),
 		roundedCodeBlockBottom(safeWidth),
 	];
-	return framed.map((line) => clampLineWidth(line, safeWidth));
+	return framed.map((line) => padRenderedLineToWidth(line, safeWidth));
 }
 
 function sanitizeRenderedTextBlockLines(lines: string[], width?: number): string[] {
@@ -1212,12 +1236,17 @@ class DottedParagraph {
 		const displayLines = looksLikeTaskStatus ? lines.map(normalizeLeadingCheckGlyph) : lines;
 		let dotPlaced = false;
 		const rendered = displayLines.map((line: string) => {
-			if (!dotPlaced && stripAnsi(line).trim()) {
+			if (!stripAnsi(line).trim()) return `   ${line}`;
+			if (isCodeBoxChromeLine(line)) return `   ${line}`;
+			if (!dotPlaced) {
 				dotPlaced = true;
 				return ` ● ${line}`;
 			}
 			return `   ${line}`;
-		}).map((line) => clampLineWidth(line, safeWidth));
+		}).map((line) => {
+			const gap = safeWidth - visibleWidth(line);
+			return gap > 0 ? line + " ".repeat(gap) : gap < 0 ? truncateToWidth(line, safeWidth, "", false) : line;
+		});
 		this.cachedWidth = width;
 		this.cachedLines = rendered;
 		return rendered;
@@ -2563,6 +2592,7 @@ const _explicitFgFields = new Set<"fgAdd" | "fgDel" | "fgDim" | "fgLnum" | "fgRu
 const _claudeStyleDefaults = {
 	BORDER_COLOR: "\x1b[38;5;238m",
 	WORKED_LINE_FG: "\x1b[38;2;140;140;140m",
+	CODE_BLOCK_LANG_FG: "\x1b[38;2;95;95;95m",
 	TOOL_RULE: "\x1b[38;2;153;153;153m",
 	FG_DIM: "\x1b[38;2;80;80;80m",
 	FG_LNUM: "\x1b[38;2;100;100;100m",
@@ -2579,6 +2609,7 @@ const _claudeStyleDefaults = {
 function resetThemePalette(): void {
 	BORDER_COLOR = _claudeStyleDefaults.BORDER_COLOR;
 	WORKED_LINE_FG = _claudeStyleDefaults.WORKED_LINE_FG;
+	CODE_BLOCK_LANG_FG = _claudeStyleDefaults.CODE_BLOCK_LANG_FG;
 	TOOL_RULE = _claudeStyleDefaults.TOOL_RULE;
 	TOOL_STATUS_SUCCESS = _claudeStyleDefaults.TOOL_STATUS_SUCCESS;
 	TOOL_STATUS_ERROR = _claudeStyleDefaults.TOOL_STATUS_ERROR;
@@ -2610,6 +2641,10 @@ function applyThemePaletteIfNeeded(theme: any): void {
 
 	// Tool branch rule (├─ / └─ connectors). Use `dim` if present, else `muted`.
 	const dim = safeFgAnsi(theme, "dim") ?? muted;
+
+	// Code-block language label: prefer `dim`, then border chrome, so it stays quieter than prose.
+	const langChrome = dim ?? borderMuted ?? safeFgAnsi(theme, "mdCode");
+	if (langChrome) CODE_BLOCK_LANG_FG = langChrome;
 	if (dim) TOOL_RULE = dim;
 
 	// Grouped-tool status counts follow the same semantic theme colors as regular tool dots.
