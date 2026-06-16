@@ -125,23 +125,20 @@ function readSettings(): SettingsFile {
 	if (_settingsCache && now - _settingsCache.timestamp < SETTINGS_CACHE_TTL_MS) {
 		return _settingsCache.value;
 	}
-	const paths = [`${process.cwd()}/.pi/settings.json`, `${process.env.HOME ?? ""}/.pi/settings.json`];
-	for (const path of paths) {
+	const cwdPath = `${process.cwd()}/.pi/settings.json`;
+	const homePath = `${process.env.HOME ?? ""}/.pi/settings.json`;
+	const merged: SettingsFile = {};
+	for (const path of [cwdPath, homePath]) {
 		try {
 			if (!path || !existsSync(path)) continue;
 			const raw = JSON.parse(readFileSync(path, "utf8"));
-			if (raw && typeof raw === "object") {
-				const result = raw as SettingsFile;
-				_settingsCache = { value: result, timestamp: now };
-				return result;
-			}
+			if (raw && typeof raw === "object") Object.assign(merged, raw as SettingsFile);
 		} catch {
 			// ignore invalid settings files
 		}
 	}
-	const empty: SettingsFile = {};
-	_settingsCache = { value: empty, timestamp: now };
-	return empty;
+	_settingsCache = { value: merged, timestamp: now };
+	return merged;
 }
 
 // Cross-extension bust signal for spinner.ts — it watches this counter on
@@ -936,6 +933,8 @@ const MIN_THINKING_SUMMARY_MS = 100;
 
 let lastThinkingBlockDurationMs: number | undefined;
 let thinkingBlockStartMs = 0;
+/** True from thinking_start until thinking_end on the current assistant stream. */
+let thinkingBlockInFlight = false;
 // WORKED_LINE_FG is theme-derived (from "muted") when themeAdaptive is on.
 let WORKED_LINE_FG = "\x1b[38;2;140;140;140m";
 let currentAgentWorkStartMs: number | undefined;
@@ -1022,18 +1021,24 @@ class HiddenThinkingSummary {
 	}
 }
 
+function assistantMessageThinkingComplete(message: any): boolean {
+	// toolUse is an intermediate assistant chunk — thinking may still be in progress on the next chunk.
+	const reason = message?.stopReason;
+	if (reason === "toolUse") return false;
+	return typeof reason === "string" && reason.length > 0;
+}
+
 function hiddenThinkingSummaryForMessage(message: any): string {
-	const finished = typeof message?.stopReason === "string" && message.stopReason.length > 0;
+	if (thinkingBlockInFlight) return thinkingActiveSummaryText();
 	const stored = (message as any)?.[THINKING_DURATION_KEY];
 	const durationMs = typeof stored === "number"
 		? stored
-		: typeof lastThinkingBlockDurationMs === "number"
+		: assistantMessageThinkingComplete(message) && typeof lastThinkingBlockDurationMs === "number"
 			? lastThinkingBlockDurationMs
 			: undefined;
-	if (finished && typeof durationMs === "number" && durationMs >= MIN_THINKING_SUMMARY_MS) {
+	if (typeof durationMs === "number" && durationMs >= MIN_THINKING_SUMMARY_MS) {
 		return thoughtDurationSummaryText(durationMs);
 	}
-	if (!finished) return thinkingActiveSummaryText();
 	return thinkingActiveSummaryText();
 }
 
@@ -2710,7 +2715,7 @@ let FG_DIM = "\x1b[38;2;80;80;80m";
 let FG_LNUM = "\x1b[38;2;100;100;100m";
 let FG_RULE = "\x1b[38;2;50;50;50m";
 // Tool branch connectors (├─ └─ │). Fixed fallback; theme adaptive overrides below.
-const DEFAULT_TOOL_BRANCH_GRAY = 124;
+const DEFAULT_TOOL_BRANCH_GRAY = 136;
 
 function toolBranchRgbAnsi(gray: number): string {
 	const g = Math.max(0, Math.min(255, Math.round(gray)));
@@ -2751,6 +2756,63 @@ function applyToolBranchColor(theme?: any): void {
 		TOOL_RULE = toolBranchRgbAnsi(getConfiguredToolBranchGray());
 	}
 	if (TOOL_RULE !== prev) bumpToolBranchVisualEpoch();
+}
+
+/** Strip baked ├─ └─ │ prefixes so branch color can be reapplied. */
+function stripBranchMarkupLine(line: string): string {
+	let plain = stripAnsi(line);
+	plain = plain.replace(/^\s*[├└]─\s*/, "");
+	plain = plain.replace(/^\s*│\s{0,2}/, "");
+	return plain;
+}
+
+function stripBranchMarkupBlock(text: string): string {
+	return text
+		.split("\n")
+		.map((line) => (stripAnsi(line).trim() ? stripBranchMarkupLine(line) : line))
+		.join("\n");
+}
+
+function liveBranchDisplay(state: Record<string, unknown> | undefined, theme: Theme): string | undefined {
+	if (!state || typeof state !== "object") return undefined;
+	const body = state._ptBody;
+	if (typeof body === "string" && body.trim() && !body.includes("(rendering")) {
+		return indentBranchBlock(withBranch(body, theme, false, true));
+	}
+	const display = state._ptDisplay;
+	if (typeof display === "string" && display.trim()) {
+		return indentBranchBlock(withBranch(stripBranchMarkupBlock(display), theme, false, true));
+	}
+	return undefined;
+}
+
+function refreshToolBranchDisplaysInState(state: Record<string, unknown> | undefined, theme: Theme): void {
+	if (!state || typeof state !== "object") return;
+	const body = state._ptBody;
+	if (typeof body === "string" && body.trim() && !body.includes("(rendering")) {
+		state._ptDisplay = indentBranchBlock(withBranch(body, theme, false, true));
+		return;
+	}
+	const display = state._ptDisplay;
+	if (typeof display === "string" && display.trim()) {
+		const stripped = stripBranchMarkupBlock(display);
+		state._ptDisplay = indentBranchBlock(withBranch(stripped, theme, false, true));
+	}
+}
+
+function refreshAllToolBranchVisuals(ctx: any): void {
+	_settingsCache = null;
+	_themePaletteCacheTheme = null;
+	applyToolBranchColor(ctx?.ui?.theme);
+	bumpToolBranchVisualEpoch();
+	// Tool rows recompute branch markup on next render (liveBranchDisplay + cache bust).
+	if (ctx?.hasUI) {
+		try {
+			ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+			ctx.ui.invalidate?.();
+			ctx.ui.requestRender?.();
+		} catch { /* noop */ }
+	}
 }
 
 let TOOL_RULE = toolBranchRgbAnsi(DEFAULT_TOOL_BRANCH_GRAY);
@@ -3938,17 +4000,34 @@ function prefixThinkingLine(text: string, _theme: Theme | undefined): string {
 	return `Thinking: ${normalized}`;
 }
 
-function trackThinkingBlockEvents(event: any): void {
+function trackThinkingBlockEvents(event: any, ctx?: any): void {
 	const evt = event?.assistantMessageEvent;
+	const message = event?.message;
 	if (!evt || typeof evt.type !== "string") return;
 	if (evt.type === "thinking_start") {
+		thinkingBlockInFlight = true;
 		thinkingBlockStartMs = Date.now();
 		lastThinkingBlockDurationMs = undefined;
+		if (message?.role === "assistant") delete (message as any)[THINKING_DURATION_KEY];
+		try {
+			ctx?.ui?.invalidate?.();
+			ctx?.ui?.requestRender?.();
+		} catch { /* noop */ }
 		return;
 	}
 	if (evt.type === "thinking_end") {
+		thinkingBlockInFlight = false;
 		const duration = Date.now() - thinkingBlockStartMs;
-		lastThinkingBlockDurationMs = duration >= MIN_THINKING_SUMMARY_MS ? duration : undefined;
+		if (duration >= MIN_THINKING_SUMMARY_MS) {
+			lastThinkingBlockDurationMs = duration;
+			if (message?.role === "assistant") (message as any)[THINKING_DURATION_KEY] = duration;
+		} else {
+			lastThinkingBlockDurationMs = undefined;
+		}
+		try {
+			ctx?.ui?.invalidate?.();
+			ctx?.ui?.requestRender?.();
+		} catch { /* noop */ }
 	}
 }
 
@@ -3973,6 +4052,7 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			currentAgentWorkStartMs = Date.now();
 		}
 		currentAssistantMessageStartMs = undefined;
+		thinkingBlockInFlight = false;
 	});
 	pi.on("agent_start", async () => {
 		if (currentAgentWorkStartMs === undefined) {
@@ -3988,10 +4068,11 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		if (message?.role === "assistant") {
 			currentAssistantMessageStartMs = Date.now();
 			(message as any)[WORKED_START_KEY] = currentAssistantMessageStartMs;
+			thinkingBlockInFlight = false;
 		}
 	});
 	pi.on("message_update", async (event, ctx) => {
-		trackThinkingBlockEvents(event);
+		trackThinkingBlockEvents(event, ctx);
 		patchMessage(event, ctx.ui?.theme);
 	});
 	pi.on("message_end", async (event, ctx) => {
@@ -5061,32 +5142,20 @@ export default function (pi: ExtensionAPI) {
 				if (arg === "reset") {
 					writeSettingsKey("toolBranchRgbGray", undefined);
 					writeSettingsKey("toolBranchColorMode", undefined);
-					_themePaletteCacheTheme = null;
-					if (ctx.hasUI) applyToolBranchColor(ctx.ui.theme);
-					if (ctx.hasUI) {
-						ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-						ctx.ui.notify(`Branch color → default (theme adaptive, gray ${DEFAULT_TOOL_BRANCH_GRAY} fallback)`, "info");
-					}
+					if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
+					if (ctx.hasUI) ctx.ui.notify(`Branch color → default (theme adaptive, gray ${DEFAULT_TOOL_BRANCH_GRAY} fallback)`, "info");
 					return;
 				}
 				if (arg === "theme") {
 					writeSettingsKey("toolBranchColorMode", "theme");
-					_themePaletteCacheTheme = null;
-					if (ctx.hasUI) applyToolBranchColor(ctx.ui.theme);
-					if (ctx.hasUI) {
-						ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-						ctx.ui.notify("Branch color → follow pi theme (borderMuted → dim → muted)", "info");
-					}
+					if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
+					if (ctx.hasUI) ctx.ui.notify("Branch color → follow pi theme (borderMuted → dim → muted)", "info");
 					return;
 				}
 				if (arg === "fixed") {
 					writeSettingsKey("toolBranchColorMode", "fixed");
-					_themePaletteCacheTheme = null;
-					if (ctx.hasUI) applyToolBranchColor(ctx.ui.theme);
-					if (ctx.hasUI) {
-						ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-						ctx.ui.notify(`Branch color → fixed rgb(${getConfiguredToolBranchGray()})`, "info");
-					}
+					if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
+					if (ctx.hasUI) ctx.ui.notify(`Branch color → fixed rgb(${getConfiguredToolBranchGray()})`, "info");
 					return;
 				}
 				const gray = Number.parseInt(arg, 10);
@@ -5096,12 +5165,8 @@ export default function (pi: ExtensionAPI) {
 				}
 				writeSettingsKey("toolBranchRgbGray", gray);
 				writeSettingsKey("toolBranchColorMode", "fixed");
-				_themePaletteCacheTheme = null;
-				if (ctx.hasUI) applyToolBranchColor(ctx.ui.theme);
-				if (ctx.hasUI) {
-					ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-					ctx.ui.notify(`Branch color → fixed rgb(${gray})`, "info");
-				}
+				if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
+				if (ctx.hasUI) ctx.ui.notify(`Branch color → fixed rgb(${gray})`, "info");
 				return;
 			}
 
@@ -5124,7 +5189,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (!(TOOL_MODES as readonly string[]).includes(sub)) {
-				if (ctx.hasUI) ctx.ui.notify(`Unknown option "${sub}". Try /cc-tools status, /cc-tools branch 124, or /cc-tools group toggle.`, "error");
+				if (ctx.hasUI) ctx.ui.notify(`Unknown option "${sub}". Try /cc-tools status, /cc-tools branch 136, or /cc-tools group toggle.`, "error");
 				return;
 			}
 			toolBackgroundOverride = sub as typeof toolBackgroundMode;
@@ -5754,7 +5819,7 @@ export default function (pi: ExtensionAPI) {
 						renderEditPreviewBody(ctx, key, theme, lg, operations, fallbackDiffs, fallbackDiffs.map((diff) => getFirstChangedNewLine(diff)), editSummary);
 					});
 			}
-			const body = ctx.state._ptDisplay as string | undefined;
+				const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state._ptDisplay as string | undefined);
 			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
