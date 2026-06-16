@@ -854,8 +854,13 @@ const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 const WORKED_DURATION_KEY = "_piClaudeStyleWorkedDurationMs";
+const THINKING_DURATION_KEY = "_piClaudeStyleThinkingDurationMs";
 const WORKED_START_KEY = "_piClaudeStyleWorkedStartMs";
 const WORKED_DURATION_MARKER = "Worked for";
+const MIN_THINKING_SUMMARY_MS = 100;
+
+let lastThinkingBlockDurationMs: number | undefined;
+let thinkingBlockStartMs = 0;
 // WORKED_LINE_FG is theme-derived (from "muted") when themeAdaptive is on.
 let WORKED_LINE_FG = "\x1b[38;2;140;140;140m";
 let currentAgentWorkStartMs: number | undefined;
@@ -885,6 +890,50 @@ function formatWorkedDuration(ms: number): string {
 	if (days > 0) return `${days}d ${hours}h ${minutes}m`;
 	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
 	return `${minutes}m ${seconds}s`;
+}
+
+function formatThoughtDuration(ms: number): string {
+	const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
+	if (safeMs < 60_000) return `${Math.max(1, Math.round(safeMs / 1000))}s`;
+	return formatWorkedDuration(safeMs);
+}
+
+function thinkingActiveSummaryText(): string {
+	return ` ${WORKED_LINE_FG}✻${RESET} Thinking…`;
+}
+
+function thoughtDurationSummaryText(ms: number): string {
+	return ` ${WORKED_LINE_FG}✻${RESET} Thought for ${formatThoughtDuration(ms)}`;
+}
+
+function hiddenThinkingSummaryForMessage(message: any): string {
+	const finished = typeof message?.stopReason === "string" && message.stopReason.length > 0;
+	const stored = (message as any)?.[THINKING_DURATION_KEY];
+	const durationMs = typeof stored === "number"
+		? stored
+		: typeof lastThinkingBlockDurationMs === "number"
+			? lastThinkingBlockDurationMs
+			: undefined;
+	if (finished && typeof durationMs === "number" && durationMs >= MIN_THINKING_SUMMARY_MS) {
+		return thoughtDurationSummaryText(durationMs);
+	}
+	if (!finished) return thinkingActiveSummaryText();
+	return thinkingActiveSummaryText();
+}
+
+function isHiddenThinkingPlaceholderText(child: unknown): child is InstanceType<typeof Text> {
+	if (!(child instanceof Text)) return false;
+	const plain = stripAnsi(String((child as any).text ?? "")).trim();
+	if (/^✻\s*Thinking/i.test(plain)) return true;
+	if (/^✻\s*Thought for/i.test(plain)) return true;
+	if (/^Thinking\.\.\.$/i.test(plain)) return true;
+	if (/^Thinking…$/i.test(plain)) return true;
+	return /^Thinking:?\s*$/i.test(plain);
+}
+
+function messageHasThinkingContent(message: any): boolean {
+	return Array.isArray(message?.content)
+		&& message.content.some((block: any) => block?.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim());
 }
 
 function workedDurationText(ms: number): string {
@@ -963,11 +1012,20 @@ const MATH_COMMANDS: Record<string, string> = {
 
 const COPY_SAFE_MARKDOWN_LINKS_FLAG = Symbol.for("pi-claude-style-tools:copy-safe-markdown-links");
 
+function assistantListBulletMarker(marker: string): string {
+	if (marker.startsWith("- ")) return `● ${marker.slice(2)}`;
+	return marker;
+}
+
 function copySafeMarkdownTheme(theme: MarkdownThemeLike): MarkdownThemeLike {
+	const listBullet = theme.listBullet;
 	return {
 		...theme,
 		link: (text: string) => stripAnsi(text),
 		linkUrl: (text: string) => stripAnsi(text),
+		listBullet: listBullet
+			? (marker: string) => listBullet(assistantListBulletMarker(marker))
+			: (marker: string) => assistantListBulletMarker(marker),
 	};
 }
 
@@ -1280,7 +1338,7 @@ class ThinkingParagraph {
 			quote: wrap,
 			quoteBorder: wrap,
 			hr: wrap,
-			listBullet: wrap,
+			listBullet: (marker: string) => wrap(assistantListBulletMarker(marker)),
 			bold: wrap,
 			italic: wrap,
 			strikethrough: wrap,
@@ -1538,11 +1596,20 @@ function patchAssistantMessages(): void {
 		if (!message || !Array.isArray(message.content)) {
 			return originalUpdateContent.call(this, message);
 		}
+		if ((this as any).hideThinkingBlock && messageHasThinkingContent(message)) {
+			(this as any).hiddenThinkingLabel = stripAnsi(thinkingActiveSummaryText()).trim();
+		}
 		// Call original to build all children (text, thinking, spacers, errors)
 		originalUpdateContent.call(this, message);
 		// Replace text-block Markdown children with DottedParagraph wrappers
 		const container = (this as any).contentContainer;
 		if (!container?.children) return;
+		if ((this as any).hideThinkingBlock && messageHasThinkingContent(message)) {
+			const summary = hiddenThinkingSummaryForMessage(message);
+			for (const child of container.children) {
+				if (isHiddenThinkingPlaceholderText(child)) child.setText(summary);
+			}
+		}
 		const mdTheme = (this as any).markdownTheme;
 		for (let i = container.children.length - 1; i >= 0; i--) {
 			const child = container.children[i];
@@ -3675,13 +3742,24 @@ function stripThinkingPresentationArtifacts(text: string): string {
 }
 
 function prefixThinkingLine(text: string, _theme: Theme | undefined): string {
-	if (!ANSI_PRESENT_RE.test(text) && text.startsWith("Thinking: ") && !/^Thinking:\s*thinking:\s*/i.test(text)) {
-		return text;
-	}
 	const normalized = stripThinkingPresentationArtifacts(text).trim();
 	if (!normalized) return text;
-	// Plain text — no ANSI colors, no theme. The ThinkingParagraph handles styling.
-	return `Thinking: ${normalized}`;
+	// Visible thinking uses ✻ on the first rendered line (ThinkingParagraph); no "Thinking:" prefix.
+	return normalized;
+}
+
+function trackThinkingBlockEvents(event: any): void {
+	const evt = event?.assistantMessageEvent;
+	if (!evt || typeof evt.type !== "string") return;
+	if (evt.type === "thinking_start") {
+		thinkingBlockStartMs = Date.now();
+		lastThinkingBlockDurationMs = undefined;
+		return;
+	}
+	if (evt.type === "thinking_end") {
+		const duration = Date.now() - thinkingBlockStartMs;
+		lastThinkingBlockDurationMs = duration >= MIN_THINKING_SUMMARY_MS ? duration : undefined;
+	}
 }
 
 function registerThinkingLabels(pi: ExtensionAPI): void {
@@ -3722,10 +3800,16 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			(message as any)[WORKED_START_KEY] = currentAssistantMessageStartMs;
 		}
 	});
-	pi.on("message_update", async (event, ctx) => patchMessage(event, ctx.ui?.theme));
+	pi.on("message_update", async (event, ctx) => {
+		trackThinkingBlockEvents(event);
+		patchMessage(event, ctx.ui?.theme);
+	});
 	pi.on("message_end", async (event, ctx) => {
 		const message = (event as any)?.message;
 		if (message?.role === "assistant") {
+			if (typeof lastThinkingBlockDurationMs === "number") {
+				(message as any)[THINKING_DURATION_KEY] = lastThinkingBlockDurationMs;
+			}
 			const started = typeof currentAgentWorkStartMs === "number"
 				? currentAgentWorkStartMs
 				: typeof (message as any)[WORKED_START_KEY] === "number"
