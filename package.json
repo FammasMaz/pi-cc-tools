@@ -1,6 +1,6 @@
 {
   "name": "pi-claude-style-tools",
-  "version": "1.0.57",
+  "version": "1.0.58",
   "description": "Claude Code-style grouped tool rows for pi with Ctrl+O/Ctrl+Shift+O previews, math rendering, and consistent built-in, MCP, and custom tool rendering",
   "keywords": [
     "pi-package",

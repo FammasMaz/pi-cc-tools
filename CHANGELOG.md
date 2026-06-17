@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.58 — 2026-06-17
+
+### Fixed
+
+- **Transparent tool rows after `/resume`** — Pi’s `ToolExecutionComponent` uses the global theme singleton for `toolPendingBg` / `toolSuccessBg` / `toolErrorBg`. Re-apply transparent overrides on that object and before every `updateDisplay()`, with extra deferred chrome rebind after history rebuild on resume/new/fork.
+- **Stale tool row chrome on theme switch** — bump branch/render epoch when the active theme name or color fingerprint changes so cached tool lines pick up new palette.
+
 ## 1.0.57 — 2026-06-17
 
 ### Changed

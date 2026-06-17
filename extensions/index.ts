@@ -48,12 +48,13 @@ const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
 const TRANSPARENT_RESET = `${RESET}${TRANSPARENT_BG}`;
 
-// Border / branch rule colors. Defaults match the previous hardcoded values
-// so behavior is identical when the theme is unavailable or themeAdaptive=false.
-// `applyThemePaletteIfNeeded(theme)` re-derives chrome from dim → muted → borderMuted.
+// User/code box borders and thinking/thought text: branch color + OUTLINE_CHROME_BRIGHTEN.
+// Branch ├─└─│ stay at `currentToolBranchAnsi` (see syncOutlineChromeFromBranch).
 let BORDER_COLOR = "\x1b[38;5;238m";
-// Fenced-code language tag — dimmer than body `muted` so it reads as chrome, not prose.
 let CODE_BLOCK_LANG_FG = "\x1b[38;2;95;95;95m";
+const CHROME_ITALIC = "\x1b[3m";
+/** Lift outline chrome above branch connectors so boxes and thought read brighter. */
+const OUTLINE_CHROME_BRIGHTEN = 64;
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const ANSI_PRESENT_RE = /\x1b\[[0-9;]*m/;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
@@ -194,14 +195,26 @@ function setThemeBg(theme: unknown, key: string, value: string): void {
 	}
 }
 
+const PI_GLOBAL_THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
+
+function getGlobalPiTheme(): unknown {
+	return (globalThis as any)[PI_GLOBAL_THEME_KEY];
+}
+
+/** Pi's ToolExecutionComponent reads `theme` from globalThis — keep it in sync with ctx.ui.theme. */
 function applyToolBackgroundMode(theme: unknown): void {
 	syncToolBackgroundMode();
-	setThemeBg(theme, "userMessageBg", TRANSPARENT_BG);
-	if (toolBackgroundMode === "default") return;
-
-	setThemeBg(theme, "toolPendingBg", TRANSPARENT_BG);
-	setThemeBg(theme, "toolSuccessBg", TRANSPARENT_BG);
-	setThemeBg(theme, "toolErrorBg", TRANSPARENT_BG);
+	const targets = new Set<unknown>();
+	if (theme) targets.add(theme);
+	const globalTheme = getGlobalPiTheme();
+	if (globalTheme) targets.add(globalTheme);
+	for (const t of targets) {
+		setThemeBg(t, "userMessageBg", TRANSPARENT_BG);
+		if (toolBackgroundMode === "default") continue;
+		setThemeBg(t, "toolPendingBg", TRANSPARENT_BG);
+		setThemeBg(t, "toolSuccessBg", TRANSPARENT_BG);
+		setThemeBg(t, "toolErrorBg", TRANSPARENT_BG);
+	}
 }
 
 function stripAnsi(text: string): string {
@@ -320,7 +333,7 @@ function roundedCodeBlockTop(width: number, language: string): string {
 		const inner = Math.max(0, width - 2);
 		return `${BORDER_COLOR}╭${TRANSPARENT_RESET}${mutedDotFill(inner)}${BORDER_COLOR}╮${TRANSPARENT_RESET}`;
 	}
-	const labelStyled = `${CODE_BLOCK_LANG_FG}${label}${TRANSPARENT_RESET}`;
+	const labelStyled = `${CODE_BLOCK_LANG_FG}${CHROME_ITALIC}${label}${RESET}${TRANSPARENT_RESET}`;
 	const labelW = visibleWidth(labelStyled);
 	const dotCount = Math.max(0, width - 6 - labelW);
 	return `${BORDER_COLOR}╭· ${TRANSPARENT_RESET}${labelStyled} ${mutedDotFill(dotCount)}${BORDER_COLOR} ╮${TRANSPARENT_RESET}`;
@@ -1455,18 +1468,20 @@ function replaceHiddenThinkingPlaceholders(container: { children?: any[] }, mess
 }
 
 class ThinkingParagraph {
-	private md: InstanceType<typeof Markdown>;
+	private text: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private chromeEpoch = -1;
 
 	constructor(
 		text: string,
 		_markdownTheme: ConstructorParameters<typeof Markdown>[3],
 		_defaultTextStyle?: ConstructorParameters<typeof Markdown>[4],
 	) {
-		// Use a plain theme that strips all color/formatting from thinking blocks.
-		// Every element gets the same dim italic treatment, tracking the active
-		// pi theme's "muted" color (falls back to the previous gray when no theme).
+		this.text = text;
+	}
+
+	private thinkingMarkdown(): InstanceType<typeof Markdown> {
 		const DIM_FG = WORKED_LINE_FG;
 		const ITALIC = "\x1b[3m";
 		const wrap = (s: string) => `${DIM_FG}${ITALIC}${s}`;
@@ -1481,37 +1496,42 @@ class ThinkingParagraph {
 			quote: wrap,
 			quoteBorder: wrap,
 			hr: wrap,
-			// Thinking blocks keep classic "- " bullets, not assistant ● markers.
 			listBullet: (marker: string) => wrap(marker),
 			bold: wrap,
 			italic: wrap,
 			strikethrough: wrap,
 			underline: wrap,
-			// Override code highlighting to return plain lines (no syntax colors)
-			highlightCode: (code: string, _lang?: string) => code.split("\n").map(line => `${DIM_FG}${ITALIC}${line}`),
+			highlightCode: (code: string, _lang?: string) => code.split("\n").map((line) => `${DIM_FG}${ITALIC}${line}`),
 		};
-		// Same dim gray italic as the base style for all inline text
 		const plainStyle: ConstructorParameters<typeof Markdown>[4] = {
 			italic: true,
 			color: (s: string) => `${DIM_FG}${ITALIC}${s}`,
 		};
-		this.md = new Markdown(text, 0, 0, plainTheme, plainStyle);
+		return new Markdown(this.text, 0, 0, plainTheme, plainStyle);
 	}
 
 	invalidate(): void {
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
-		this.md.invalidate();
+		this.chromeEpoch = -1;
 	}
 
 	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+		if (
+			this.cachedLines
+			&& this.cachedWidth === width
+			&& this.chromeEpoch === _toolBranchVisualEpoch
+		) {
+			return this.cachedLines;
+		}
 		const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
 		if (safeWidth <= 0) {
 			this.cachedWidth = width;
 			this.cachedLines = [""];
+			this.chromeEpoch = _toolBranchVisualEpoch;
 			return this.cachedLines;
 		}
+		const md = this.thinkingMarkdown();
 		// " ✻ " = 1 margin + symbol + space = 3 visible chars
 		const PREFIX_W = 3;
 		const prefix = `${WORKED_LINE_FG}✻${RESET}`;
@@ -1520,9 +1540,8 @@ class ThinkingParagraph {
 			this.cachedLines = [clampLineWidth(` ${prefix} `, safeWidth)];
 			return this.cachedLines;
 		}
-		const lines = sanitizeRenderedTextBlockLines(this.md.render(safeWidth - PREFIX_W), safeWidth - PREFIX_W);
+		const lines = sanitizeRenderedTextBlockLines(md.render(safeWidth - PREFIX_W), safeWidth - PREFIX_W);
 		let symbolPlaced = false;
-		// Match DottedParagraph / tool row glyph column: " <glyph> <text>"
 		const rendered = lines.map((line: string) => {
 			if (!symbolPlaced && stripAnsi(line).trim()) {
 				symbolPlaced = true;
@@ -1532,6 +1551,7 @@ class ThinkingParagraph {
 		}).map((line) => clampLineWidth(line, safeWidth));
 		this.cachedWidth = width;
 		this.cachedLines = rendered;
+		this.chromeEpoch = _toolBranchVisualEpoch;
 		return rendered;
 	}
 }
@@ -1801,6 +1821,21 @@ function patchAssistantMessages(): void {
 		}
 	};
 	proto[ASSISTANT_PATCH_FLAG] = true;
+}
+
+const TOOL_BG_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-bg-sync");
+
+function patchToolExecutionBackgroundSync(): void {
+	const proto = ToolExecutionComponent.prototype as any;
+	if (proto[TOOL_BG_PATCH_FLAG]) return;
+	const originalUpdateDisplay = proto.updateDisplay;
+	if (typeof originalUpdateDisplay !== "function") return;
+	proto.updateDisplay = function patchedToolBackgroundSync(this: any) {
+		syncToolBackgroundMode();
+		applyToolBackgroundMode(getGlobalPiTheme());
+		return originalUpdateDisplay.apply(this, arguments as any);
+	};
+	proto[TOOL_BG_PATCH_FLAG] = true;
 }
 
 function patchToolRenderCacheInvalidation(): void {
@@ -2769,6 +2804,30 @@ function toolBranchRgbAnsi(gray: number): string {
 	return `\x1b[38;2;${g};${g};${g}m`;
 }
 
+function ansiRgbBrightenedBy(ansi: string, delta: number): string | null {
+	const rgb = parseAnsiRgb(ansi);
+	if (!rgb) return null;
+	const bump = (c: number) => Math.max(0, Math.min(255, Math.round(c + delta)));
+	return `\x1b[38;2;${bump(rgb.r)};${bump(rgb.g)};${bump(rgb.b)}m`;
+}
+
+/** Outline chrome always brighter than branch; never falls back to identical branch ANSI. */
+function outlineChromeAnsiFromBranch(theme?: any): string {
+	const t = theme ?? _toolBranchThemeHint;
+	const branch = currentToolBranchAnsi(t);
+	const fromBranch = ansiRgbBrightenedBy(branch, OUTLINE_CHROME_BRIGHTEN);
+	if (fromBranch) return fromBranch;
+	let gray = DEFAULT_TOOL_BRANCH_GRAY;
+	if (toolBranchColorModeFixed()) {
+		gray = getConfiguredToolBranchGray();
+	} else if (t) {
+		const hint = safeFgAnsi(t, "dim") ?? safeFgAnsi(t, "muted") ?? safeFgAnsi(t, "borderMuted");
+		const rgb = hint ? parseAnsiRgb(hint) : null;
+		if (rgb) gray = Math.round((rgb.r + rgb.g + rgb.b) / 3);
+	}
+	return toolBranchRgbAnsi(Math.min(255, gray + OUTLINE_CHROME_BRIGHTEN));
+}
+
 function getConfiguredToolBranchGray(): number {
 	const raw = readSettings().toolBranchRgbGray;
 	return typeof raw === "number" && Number.isFinite(raw) ? Math.max(0, Math.min(255, Math.round(raw))) : DEFAULT_TOOL_BRANCH_GRAY;
@@ -2827,11 +2886,22 @@ function currentToolBranchAnsi(theme?: any): string {
 	return toolBranchRgbAnsi(getConfiguredToolBranchGray());
 }
 
+/** User box, code fences, thinking/thought: branch + OUTLINE_CHROME_BRIGHTEN (never same as branch). */
+function syncOutlineChromeFromBranch(theme?: any): void {
+	const outline = outlineChromeAnsiFromBranch(theme);
+	const prevBorder = BORDER_COLOR;
+	BORDER_COLOR = outline;
+	WORKED_LINE_FG = outline;
+	CODE_BLOCK_LANG_FG = outline;
+	if (outline !== prevBorder) bumpToolBranchVisualEpoch();
+}
+
 function applyToolBranchColor(theme?: any): void {
 	if (theme) _toolBranchThemeHint = theme;
 	const prev = TOOL_RULE;
 	TOOL_RULE = currentToolBranchAnsi(theme);
 	if (TOOL_RULE !== prev) bumpToolBranchVisualEpoch();
+	syncOutlineChromeFromBranch(theme);
 }
 
 /** Strip baked ├─ └─ │ prefixes so branch color can be reapplied. */
@@ -2878,7 +2948,9 @@ function refreshToolBranchDisplaysInState(state: Record<string, unknown> | undef
 
 function refreshAllToolBranchVisuals(ctx: any): void {
 	_settingsCache = null;
+	syncToolBackgroundMode();
 	invalidateThemePaletteCache();
+	applyToolBackgroundMode(ctx?.ui?.theme);
 	applyToolBranchColor(ctx?.ui?.theme);
 	bumpToolBranchVisualEpoch(); // always bust ToolText + container caches after /cc-tools branch
 	// Tool rows recompute branch markup on next render (liveBranchDisplay + cache bust).
@@ -2894,6 +2966,8 @@ function refreshAllToolBranchVisuals(ctx: any): void {
 /** Re-derive borders, branches, diffs, and spinner keys from the active pi theme (no cross-extension deps). */
 function rebindUiChromeToTheme(ctx: any): void {
 	if (!ctx?.hasUI) return;
+	_settingsCache = null;
+	syncToolBackgroundMode();
 	const theme = ctx.ui?.theme;
 	invalidateThemePaletteCache();
 	clearHighlightCache();
@@ -2906,6 +2980,7 @@ function rebindUiChromeToTheme(ctx: any): void {
 		autoDeriveBgFromTheme(theme);
 		autoDerivePending = false;
 	}
+	bumpToolBranchVisualEpoch();
 	refreshAllToolBranchVisuals(ctx);
 }
 
@@ -3077,6 +3152,7 @@ function applyThemePaletteIfNeeded(theme: any): void {
 	if (!theme) return;
 	if (!themeAdaptiveEnabled()) {
 		applyToolBranchColor(theme);
+		syncOutlineChromeFromBranch(theme);
 		return;
 	}
 	const themeName = typeof theme?.name === "string" ? theme.name : "";
@@ -3087,8 +3163,12 @@ function applyThemePaletteIfNeeded(theme: any): void {
 		_themePaletteCacheFingerprint === fingerprint
 	) {
 		applyToolBranchColor(theme);
+		syncOutlineChromeFromBranch(theme);
 		return;
 	}
+	const paletteChanged =
+		_themePaletteCacheName !== themeName || _themePaletteCacheFingerprint !== fingerprint;
+	if (paletteChanged) bumpToolBranchVisualEpoch();
 	_themePaletteCacheTheme = theme;
 	_themePaletteCacheName = themeName;
 	_themePaletteCacheFingerprint = fingerprint;
@@ -3097,22 +3177,10 @@ function applyThemePaletteIfNeeded(theme: any): void {
 	const muted = safeFgAnsi(theme, "muted");
 	const dim = safeFgAnsi(theme, "dim") ?? muted;
 
-	// User message frame, tool outline rules, code-block borders, branch connectors.
-	const chromeFg = resolveThemeChromeFg(theme);
-	if (chromeFg) {
-		const prevBorder = BORDER_COLOR;
-		BORDER_COLOR = chromeFg;
-		if (chromeFg !== prevBorder) bumpToolBranchVisualEpoch();
-	}
-
-	// "Worked for Ns" line + thinking-block italics share pi's `muted` color.
-	if (muted) WORKED_LINE_FG = muted;
-
+	// User box, code fences, thinking/thought text, and ├─ └─ │ all follow branch chrome.
 	applyToolBranchColor(theme);
 
-	// Code-block language label: prefer `dim`, then shared chrome, so it stays quieter than prose.
-	const langChrome = dim ?? chromeFg ?? borderMuted ?? safeFgAnsi(theme, "mdCode");
-	if (langChrome) CODE_BLOCK_LANG_FG = langChrome;
+	const chromeFg = BORDER_COLOR;
 
 	// Grouped-tool status counts follow the same semantic theme colors as regular tool dots.
 	TOOL_STATUS_SUCCESS = safeFgAnsi(theme, "success") ?? TOOL_STATUS_SUCCESS;
@@ -5197,6 +5265,7 @@ function renderOpenAiToolResult(name: string, result: any, expanded: boolean, is
 // ===========================================================================
 
 export default function (pi: ExtensionAPI) {
+	patchToolExecutionBackgroundSync();
 	patchToolRenderCacheInvalidation();
 	patchReadImageExpansion();
 	patchContainerParentTracking();
@@ -5570,6 +5639,8 @@ export default function (pi: ExtensionAPI) {
 		const reason = (event as { reason?: string })?.reason;
 		if (reason === "resume" || reason === "new" || reason === "fork") {
 			scheduleDeferredChromeRebind(ctx, 48);
+			// Chat history rebuild can run after session_start; re-sync transparent tool bgs.
+			scheduleDeferredChromeRebind(ctx, 120);
 		}
 	});
 
