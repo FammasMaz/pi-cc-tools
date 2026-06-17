@@ -2891,6 +2891,32 @@ function refreshAllToolBranchVisuals(ctx: any): void {
 	}
 }
 
+/** Re-derive borders, branches, diffs, and spinner keys from the active pi theme (no cross-extension deps). */
+function rebindUiChromeToTheme(ctx: any): void {
+	if (!ctx?.hasUI) return;
+	const theme = ctx.ui?.theme;
+	invalidateThemePaletteCache();
+	clearHighlightCache();
+	autoDerivePending = true;
+	bustSpinnerSettingsCache();
+	applyToolBackgroundMode(theme);
+	applyThemePaletteIfNeeded(theme);
+	syncDiffShikiTheme(theme);
+	if (themeAdaptiveEnabled() && theme?.getFgAnsi) {
+		autoDeriveBgFromTheme(theme);
+		autoDerivePending = false;
+	}
+	refreshAllToolBranchVisuals(ctx);
+}
+
+function scheduleDeferredChromeRebind(ctx: any, delayMs = 0): void {
+	setTimeout(() => {
+		try {
+			rebindUiChromeToTheme(ctx);
+		} catch { /* noop */ }
+	}, delayMs);
+}
+
 let TOOL_RULE = toolBranchRgbAnsi(DEFAULT_TOOL_BRANCH_GRAY);
 let FG_SAFE_MUTED = "\x1b[38;2;139;148;158m";
 let FG_STRIPE = "\x1b[38;2;40;40;40m";
@@ -5532,12 +5558,19 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		clearRtkRewriteState();
 		if (!ctx.hasUI) return;
 		patchRtkRewriteNotifications(ctx.ui);
-		applyToolBackgroundMode(ctx.ui.theme);
-		applyThemePaletteIfNeeded(ctx.ui.theme);
+		// Session switch (/resume, /new) can leave tool chrome from the previous
+		// theme; rebind from ctx.ui.theme (other extensions may setTheme in the
+		// same tick — deferred passes pick up the final theme without coupling).
+		rebindUiChromeToTheme(ctx);
+		scheduleDeferredChromeRebind(ctx, 0);
+		const reason = (event as { reason?: string })?.reason;
+		if (reason === "resume" || reason === "new" || reason === "fork") {
+			scheduleDeferredChromeRebind(ctx, 48);
+		}
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
@@ -6115,6 +6148,8 @@ export default function (pi: ExtensionAPI) {
 		_blinkContexts.clear();
 		clearRtkRewriteState();
 		clearHighlightCache();
+		invalidateThemePaletteCache();
+		bumpToolBranchVisualEpoch();
 		if (_globalBlinkTimer) {
 			clearTimeout(_globalBlinkTimer);
 			_globalBlinkTimer = null;

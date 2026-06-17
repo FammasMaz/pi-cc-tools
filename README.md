@@ -68,6 +68,8 @@ User-supplied `diffTheme` presets and `diffColors` overrides always win over the
 
 Set `themeAdaptive: false` to keep the original fixed Claude-style palette regardless of the active pi theme.
 
+On `/resume`, `/new`, or `/fork`, tool chrome is rebound from the **current** pi theme (no coupling to Ghostty or other theme extensions). If you use Ghostty sync, listing it **above** this extension in `settings.json` is recommended so `setTheme` runs before chrome rebind.
+
 #### Toggle at runtime with `/cc-theme`
 
 ```text
