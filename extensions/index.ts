@@ -992,7 +992,7 @@ const THINKING_ACTIVE_KEY = "_piClaudeStyleThinkingActive";
 const WORKED_START_KEY = "_piClaudeStyleWorkedStartMs";
 const WORKED_SESSION_TOTAL_KEY = "_piClaudeStyleWorkedSessionTotalMs";
 const WORKED_TURNS_KEY = "_piClaudeStyleWorkedTurns";
-const WORKED_DURATION_MARKER = "Worked for";
+const WORKED_DURATION_MARKER = "Turn took";
 const MIN_THINKING_SUMMARY_MS = 100;
 
 let lastThinkingBlockDurationMs: number | undefined;
@@ -1003,7 +1003,7 @@ let thinkingBlockInFlight = false;
 let WORKED_LINE_FG = "\x1b[38;2;140;140;140m";
 let currentAgentWorkStartMs: number | undefined;
 let currentAssistantMessageStartMs: number | undefined;
-// Session-wide accumulators for the "Worked for … (total time … · N turns)" line.
+// Session-wide accumulators for the "Turn took … (Total time … . N turns)" line.
 // Seeded from the `context` event (which carries the full message history,
 // including resumed sessions) so totals reflect the whole session, not just the
 // current process. `userTurnCount` counts role==="user" messages (= prompts sent).
@@ -1042,18 +1042,19 @@ function formatThoughtDuration(ms: number): string {
 	return formatWorkedDuration(safeMs);
 }
 
-/** Compact session-total duration: 45s, 12m, 1h 12m, 2d 4h. Seconds are dropped
- *  once a session reaches a minute — they're noise on long-running sessions. */
+/** Session-total duration: seconds are always shown; minutes and hours are
+ *  added only once the session has actually lasted that long.
+ *  e.g. 45s, 12m 30s, 1h 12m 30s. */
 function formatSessionTotal(ms: number): string {
 	const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
-	if (safeMs < 60_000) return `${Math.max(0, Math.floor(safeMs / 1000))}s`;
-	const totalMinutes = Math.floor(safeMs / 60_000);
-	const days = Math.floor(totalMinutes / 1_440);
-	const hours = Math.floor((totalMinutes % 1_440) / 60);
+	const totalSeconds = Math.floor(safeMs / 1000);
+	const seconds = totalSeconds % 60;
+	const totalMinutes = Math.floor(totalSeconds / 60);
 	const minutes = totalMinutes % 60;
-	if (days > 0) return `${days}d ${hours}h`;
-	if (hours > 0) return `${hours}h ${minutes}m`;
-	return `${minutes}m`;
+	const hours = Math.floor(totalMinutes / 60);
+	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+	if (totalMinutes > 0) return `${minutes}m ${seconds}s`;
+	return `${seconds}s`;
 }
 
 function pluralizeTurns(n: number): string {
@@ -1149,9 +1150,9 @@ function messageHasThinkingContent(message: any): boolean {
 }
 
 function workedDurationText(ms: number, sessionTotalMs?: number, turns?: number): string {
-	let text = `${WORKED_LINE_FG}✻ Worked for ${formatWorkedDuration(ms)}`;
+	let text = `${WORKED_LINE_FG}✻ Turn took ${formatWorkedDuration(ms)}`;
 	if (typeof sessionTotalMs === "number" && typeof turns === "number" && turns > 0) {
-		text += ` (total time ${formatSessionTotal(sessionTotalMs)} · ${pluralizeTurns(turns)})`;
+		text += ` (Total time ${formatSessionTotal(sessionTotalMs)} . ${pluralizeTurns(turns)})`;
 	}
 	return `${text}${RESET}`;
 }
@@ -1161,7 +1162,7 @@ function inlineWorkedDurationText(ms: number, sessionTotalMs?: number, turns?: n
 }
 
 function isWorkedDurationLine(line: string): boolean {
-	return line.includes(WORKED_DURATION_MARKER) && /^✻ Worked for [^\r\n]+$/.test(stripAnsi(line).trim());
+	return line.includes(WORKED_DURATION_MARKER) && /^✻ Turn took [^\r\n]+$/.test(stripAnsi(line).trim());
 }
 
 function stripWorkedDurationLine(text: string): string {
@@ -1912,7 +1913,7 @@ function patchAssistantMessages(): void {
 		const explicitSessionTotal = (message as any)[WORKED_SESSION_TOTAL_KEY];
 		const explicitTurns = (message as any)[WORKED_TURNS_KEY];
 		const componentStart = (this as any)[WORKED_START_KEY];
-		// Only the true end-of-run (stopReason === "stop") gets the "Worked for" line.
+		// Only the true end-of-run (stopReason === "stop") gets the "Turn took" line.
 		// Intermediate stops (toolUse / error / aborted / length / retries) must not,
 		// so the line shows once the model is actually done with all of its turns.
 		const isFinalAssistantMessage = message.stopReason === "stop";

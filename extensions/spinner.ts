@@ -729,7 +729,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (activeCtx?.hasUI) {
-			const message = `${STATUS_DIM}✻ Worked for ${formatDuration(elapsed)}${RESET}`;
+			const message = `${STATUS_DIM}✻ Turn took ${formatDuration(elapsed)}${RESET}`;
 			lastWorkingMessage = message;
 			try {
 				activeCtx.ui.setWorkingMessage(message);
@@ -751,7 +751,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", async () => {
 		turnActive = false;
 		agentStartTime = 0;
-		// Preserve the just-finished "Worked for …" line. Pi emits agent_end
+		// Preserve the just-finished "Turn took …" line. Pi emits agent_end
 		// immediately after the final turn, so clearing here made the completion
 		// status disappear before users could see it.
 		if (completionTimer) return;

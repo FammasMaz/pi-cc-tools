@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.61 — 2026-06-22
+
+### Changed
+
+- **Renamed "Worked for" → "Turn took"** — the end-of-run status line now reads `✻ Turn took 2m 30s (Total time 1h 12m 30s . 14 turns)`. The session-total duration now always shows seconds and only adds minutes/hours once the session has actually lasted that long (e.g. `45s`, `12m 30s`, `1h 12m 30s`), and the bracket uses "Total time" with a period separator instead of the prior middle-dot "total time" form.
+
 ## 1.0.60 — 2026-06-22
 
 ### Changed
