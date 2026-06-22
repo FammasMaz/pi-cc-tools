@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.60 — 2026-06-22
+
+### Changed
+
+- **"Worked for …" only on the true end of a run** — the line now appears only when the model finishes all of its turns for a prompt (`stopReason === "stop"`), instead of after every assistant message that didn't end in a tool call. Intermediate stops that pi retries through (`error`, `aborted`, `length`/max-tokens, compaction retries) no longer get a premature "Worked for" line — it shows once, when the model is actually done.
+- **Session total + turn count on the Worked line** — the line now reads `✻ Worked for 2m 30s (total time 1h 12m · 14 turns)`, where the bracket is the running session-wide elapsed time and the number of prompts you've sent. Totals are seeded from the full message history, so `/resume` picks up past prompts and the original session start. `/new` resets the counters.
+
 ## 1.0.59 — 2026-06-19
 
 ### Fixed

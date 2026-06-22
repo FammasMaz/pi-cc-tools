@@ -990,6 +990,8 @@ const WORKED_DURATION_KEY = "_piClaudeStyleWorkedDurationMs";
 const THINKING_DURATION_KEY = "_piClaudeStyleThinkingDurationMs";
 const THINKING_ACTIVE_KEY = "_piClaudeStyleThinkingActive";
 const WORKED_START_KEY = "_piClaudeStyleWorkedStartMs";
+const WORKED_SESSION_TOTAL_KEY = "_piClaudeStyleWorkedSessionTotalMs";
+const WORKED_TURNS_KEY = "_piClaudeStyleWorkedTurns";
 const WORKED_DURATION_MARKER = "Worked for";
 const MIN_THINKING_SUMMARY_MS = 100;
 
@@ -1001,6 +1003,12 @@ let thinkingBlockInFlight = false;
 let WORKED_LINE_FG = "\x1b[38;2;140;140;140m";
 let currentAgentWorkStartMs: number | undefined;
 let currentAssistantMessageStartMs: number | undefined;
+// Session-wide accumulators for the "Worked for … (total time … · N turns)" line.
+// Seeded from the `context` event (which carries the full message history,
+// including resumed sessions) so totals reflect the whole session, not just the
+// current process. `userTurnCount` counts role==="user" messages (= prompts sent).
+let sessionStartMs: number | undefined;
+let userTurnCount = 0;
 
 function formatWorkedDuration(ms: number): string {
 	const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
@@ -1032,6 +1040,24 @@ function formatThoughtDuration(ms: number): string {
 	const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
 	if (safeMs < 60_000) return `${Math.max(1, Math.round(safeMs / 1000))}s`;
 	return formatWorkedDuration(safeMs);
+}
+
+/** Compact session-total duration: 45s, 12m, 1h 12m, 2d 4h. Seconds are dropped
+ *  once a session reaches a minute — they're noise on long-running sessions. */
+function formatSessionTotal(ms: number): string {
+	const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
+	if (safeMs < 60_000) return `${Math.max(0, Math.floor(safeMs / 1000))}s`;
+	const totalMinutes = Math.floor(safeMs / 60_000);
+	const days = Math.floor(totalMinutes / 1_440);
+	const hours = Math.floor((totalMinutes % 1_440) / 60);
+	const minutes = totalMinutes % 60;
+	if (days > 0) return `${days}d ${hours}h`;
+	if (hours > 0) return `${hours}h ${minutes}m`;
+	return `${minutes}m`;
+}
+
+function pluralizeTurns(n: number): string {
+	return `${n} turn${n === 1 ? "" : "s"}`;
 }
 
 const THINKING_ITALIC = "\x1b[3m";
@@ -1122,12 +1148,16 @@ function messageHasThinkingContent(message: any): boolean {
 		&& message.content.some((block: any) => block?.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim());
 }
 
-function workedDurationText(ms: number): string {
-	return `${WORKED_LINE_FG}✻ Worked for ${formatWorkedDuration(ms)}${RESET}`;
+function workedDurationText(ms: number, sessionTotalMs?: number, turns?: number): string {
+	let text = `${WORKED_LINE_FG}✻ Worked for ${formatWorkedDuration(ms)}`;
+	if (typeof sessionTotalMs === "number" && typeof turns === "number" && turns > 0) {
+		text += ` (total time ${formatSessionTotal(sessionTotalMs)} · ${pluralizeTurns(turns)})`;
+	}
+	return `${text}${RESET}`;
 }
 
-function inlineWorkedDurationText(ms: number): string {
-	return `${WORKED_LINE_FG}✻ Worked for ${formatWorkedDuration(ms)}${RESET}`;
+function inlineWorkedDurationText(ms: number, sessionTotalMs?: number, turns?: number): string {
+	return workedDurationText(ms, sessionTotalMs, turns);
 }
 
 function isWorkedDurationLine(line: string): boolean {
@@ -1151,13 +1181,13 @@ function hasWorkedDurationLine(message: any): boolean {
 	});
 }
 
-function appendWorkedDurationLine(message: any, durationMs: number): void {
+function appendWorkedDurationLine(message: any, durationMs: number, sessionTotalMs?: number, turns?: number): void {
 	if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return;
 	const textBlocks = message.content.filter((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim());
 	const lastText = textBlocks[textBlocks.length - 1];
 	if (!lastText) return;
 	const text = lastText.text.includes(WORKED_DURATION_MARKER) ? stripWorkedDurationLine(lastText.text) : lastText.text;
-	lastText.text = `${text.trimEnd()}\n\n${inlineWorkedDurationText(durationMs)}`;
+	lastText.text = `${text.trimEnd()}\n\n${inlineWorkedDurationText(durationMs, sessionTotalMs, turns)}`;
 }
 
 type MarkdownThemeLike = ConstructorParameters<typeof Markdown>[3];
@@ -1879,18 +1909,28 @@ function patchAssistantMessages(): void {
 			}
 		}
 		const explicitDuration = (message as any)[WORKED_DURATION_KEY];
+		const explicitSessionTotal = (message as any)[WORKED_SESSION_TOTAL_KEY];
+		const explicitTurns = (message as any)[WORKED_TURNS_KEY];
 		const componentStart = (this as any)[WORKED_START_KEY];
-		const isFinished = typeof message.stopReason === "string" && message.stopReason.length > 0;
-		const isFinalAssistantMessage = isFinished && message.stopReason !== "toolUse";
+		// Only the true end-of-run (stopReason === "stop") gets the "Worked for" line.
+		// Intermediate stops (toolUse / error / aborted / length / retries) must not,
+		// so the line shows once the model is actually done with all of its turns.
+		const isFinalAssistantMessage = message.stopReason === "stop";
 		const fallbackStart = typeof currentAgentWorkStartMs === "number" ? currentAgentWorkStartMs : componentStart;
 		const workedDuration = typeof explicitDuration === "number"
 			? explicitDuration
 			: isFinalAssistantMessage && typeof fallbackStart === "number"
 				? Date.now() - fallbackStart
 				: undefined;
+		const workedSessionTotal = typeof explicitSessionTotal === "number"
+			? explicitSessionTotal
+			: typeof sessionStartMs === "number"
+				? Date.now() - sessionStartMs
+				: undefined;
+		const workedTurns = typeof explicitTurns === "number" ? explicitTurns : userTurnCount;
 		const hasAssistantText = message.content.some((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim());
 		if (typeof workedDuration === "number" && isFinalAssistantMessage && hasAssistantText && !hasWorkedDurationLine(message)) {
-			container.children.push(new Spacer(1), new Text(workedDurationText(workedDuration), 1, 0));
+			container.children.push(new Spacer(1), new Text(workedDurationText(workedDuration, workedSessionTotal, workedTurns), 1, 0));
 		}
 	};
 	proto[ASSISTANT_PATCH_FLAG] = true;
@@ -4365,6 +4405,7 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		if (currentAgentWorkStartMs === undefined) {
 			currentAgentWorkStartMs = Date.now();
 		}
+		if (sessionStartMs === undefined) sessionStartMs = Date.now();
 		currentAssistantMessageStartMs = undefined;
 		thinkingBlockInFlight = false;
 	});
@@ -4372,6 +4413,7 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		if (currentAgentWorkStartMs === undefined) {
 			currentAgentWorkStartMs = Date.now();
 		}
+		if (sessionStartMs === undefined) sessionStartMs = Date.now();
 		currentAssistantMessageStartMs = undefined;
 	});
 	pi.on("message_start", async (event: any) => {
@@ -4401,15 +4443,19 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 				: typeof (message as any)[WORKED_START_KEY] === "number"
 					? (message as any)[WORKED_START_KEY]
 					: currentAssistantMessageStartMs;
-			const isFinalAssistantMessage = message.stopReason !== "toolUse";
+			const isFinalAssistantMessage = message.stopReason === "stop";
 			if (started !== undefined && isFinalAssistantMessage) {
 				const durationMs = Date.now() - started;
+				const sessionTotalMs = typeof sessionStartMs === "number" ? Date.now() - sessionStartMs : undefined;
+				const turns = userTurnCount > 0 ? userTurnCount : undefined;
 				(message as any)[WORKED_DURATION_KEY] = durationMs;
+				if (typeof sessionTotalMs === "number") (message as any)[WORKED_SESSION_TOTAL_KEY] = sessionTotalMs;
+				if (typeof turns === "number") (message as any)[WORKED_TURNS_KEY] = turns;
 				// Mutate the message itself before pi renders/persists it. This is more
 				// reliable than the spinner because pi removes the loader on agent_end,
 				// and more reliable than component monkey-patching when extensions are
 				// loaded from a different package instance than the running TUI.
-				appendWorkedDurationLine(message, durationMs);
+				appendWorkedDurationLine(message, durationMs, sessionTotalMs, turns);
 			}
 			currentAssistantMessageStartMs = undefined;
 		}
@@ -4419,9 +4465,35 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		currentAgentWorkStartMs = undefined;
 		currentAssistantMessageStartMs = undefined;
 	});
+	pi.on("session_start", async () => {
+		// Reset session-wide accumulators on every session transition (new / resume /
+		// fork / reload). The `context` event re-seeds them from the new session's
+		// message history, so /new starts fresh while /resume picks up past prompts
+		// and the original session start time. Resetting here is what lets /new
+		// clear the totals (Math.min / Math.max seeding alone could never lower them).
+		sessionStartMs = undefined;
+		userTurnCount = 0;
+	});
 	pi.on("context", async (event) => {
-		if (!Array.isArray((event as any).messages)) return;
-		for (const msg of (event as any).messages) {
+		const messages = (event as any)?.messages;
+		if (!Array.isArray(messages)) return;
+		// Seed session-wide accumulators from the full message history (covers
+		// /resume — past prompts and the original session start time are included).
+		// Values are monotonic, so recomputing on every fire stays stable.
+		let earliest: number | undefined;
+		let userCount = 0;
+		for (const msg of messages) {
+			if (!msg) continue;
+			if (msg.role === "user") userCount++;
+			if (typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp)) {
+				if (earliest === undefined || msg.timestamp < earliest) earliest = msg.timestamp;
+			}
+		}
+		if (earliest !== undefined) {
+			sessionStartMs = sessionStartMs === undefined ? earliest : Math.min(sessionStartMs, earliest);
+		}
+		if (userCount > userTurnCount) userTurnCount = userCount;
+		for (const msg of messages) {
 			if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 			for (const block of msg.content) {
 				if (block && block.type === "thinking" && typeof block.thinking === "string") {
