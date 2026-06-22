@@ -1003,7 +1003,7 @@ let thinkingBlockInFlight = false;
 let WORKED_LINE_FG = "\x1b[38;2;140;140;140m";
 let currentAgentWorkStartMs: number | undefined;
 let currentAssistantMessageStartMs: number | undefined;
-// Session-wide accumulators for the "Turn took … (Total time … . N turns)" line.
+// Session-wide accumulators for the "Turn took … (Total time … · N turns)" line.
 // Seeded from the `context` event (which carries the full message history,
 // including resumed sessions) so totals reflect the whole session, not just the
 // current process. `userTurnCount` counts role==="user" messages (= prompts sent).
@@ -1152,7 +1152,7 @@ function messageHasThinkingContent(message: any): boolean {
 function workedDurationText(ms: number, sessionTotalMs?: number, turns?: number): string {
 	let text = `${WORKED_LINE_FG}✻ Turn took ${formatWorkedDuration(ms)}`;
 	if (typeof sessionTotalMs === "number" && typeof turns === "number" && turns > 0) {
-		text += ` (Total time ${formatSessionTotal(sessionTotalMs)} . ${pluralizeTurns(turns)})`;
+		text += ` (Total time ${formatSessionTotal(sessionTotalMs)} · ${pluralizeTurns(turns)})`;
 	}
 	return `${text}${RESET}`;
 }
@@ -1912,17 +1912,19 @@ function patchAssistantMessages(): void {
 		const explicitDuration = (message as any)[WORKED_DURATION_KEY];
 		const explicitSessionTotal = (message as any)[WORKED_SESSION_TOTAL_KEY];
 		const explicitTurns = (message as any)[WORKED_TURNS_KEY];
-		const componentStart = (this as any)[WORKED_START_KEY];
-		// Only the true end-of-run (stopReason === "stop") gets the "Turn took" line.
-		// Intermediate stops (toolUse / error / aborted / length / retries) must not,
-		// so the line shows once the model is actually done with all of its turns.
+		// The "Turn took" line must only appear once the stream has truly closed.
+		// `message.stopReason === "stop"` is NOT a safe "finished" signal here: the
+		// Anthropic provider initializes the live message's stopReason to "stop" at
+		// creation and only updates it to the real value when `message_delta` arrives
+		// near the end of the stream — so it is already "stop" while text is still
+		// streaming, which made the line appear mid-stream. `explicitDuration` is
+		// stamped onto the message by the `message_end` handler (which fires after
+		// `message_delta`, when stopReason is the real final value), so gating on it
+		// guarantees the line shows only after the run is actually done. The line is
+		// baked into the message text at message_end; this child is just a fallback
+		// for re-renders where that baked text isn't present.
 		const isFinalAssistantMessage = message.stopReason === "stop";
-		const fallbackStart = typeof currentAgentWorkStartMs === "number" ? currentAgentWorkStartMs : componentStart;
-		const workedDuration = typeof explicitDuration === "number"
-			? explicitDuration
-			: isFinalAssistantMessage && typeof fallbackStart === "number"
-				? Date.now() - fallbackStart
-				: undefined;
+		const workedDuration = typeof explicitDuration === "number" ? explicitDuration : undefined;
 		const workedSessionTotal = typeof explicitSessionTotal === "number"
 			? explicitSessionTotal
 			: typeof sessionStartMs === "number"

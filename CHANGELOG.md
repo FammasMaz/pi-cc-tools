@@ -1,10 +1,16 @@
 # Changelog
 
+## 1.0.62 — 2026-06-22
+
+### Fixed
+
+- **"Turn took" line no longer appears mid-stream** — the end-of-run status line was showing while the assistant was still streaming text. Root cause: the component render path gated on `message.stopReason === "stop"`, but the Anthropic provider initializes the live message's `stopReason` to `"stop"` at creation and only updates it to the real value when `message_delta` arrives near the end of the stream — so the gate was already true during streaming. The component path now gates on the `explicitDuration` flag stamped by the `message_end` handler (which fires after `message_delta`, once the real `stopReason` is known), so the line appears only after the stream truly closes. The `message_end` path was already correct (it fires post-`message_delta`); only the live component fallback was premature.
+
 ## 1.0.61 — 2026-06-22
 
 ### Changed
 
-- **Renamed "Worked for" → "Turn took"** — the end-of-run status line now reads `✻ Turn took 2m 30s (Total time 1h 12m 30s . 14 turns)`. The session-total duration now always shows seconds and only adds minutes/hours once the session has actually lasted that long (e.g. `45s`, `12m 30s`, `1h 12m 30s`), and the bracket uses "Total time" with a period separator instead of the prior middle-dot "total time" form.
+- **Renamed "Worked for" → "Turn took"** — the end-of-run status line now reads `✻ Turn took 2m 30s (Total time 1h 12m 30s · 14 turns)`. The session-total duration now always shows seconds and only adds minutes/hours once the session has actually lasted that long (e.g. `45s`, `12m 30s`, `1h 12m 30s`); the bracket label is now capitalized as "Total time".
 
 ## 1.0.60 — 2026-06-22
 
