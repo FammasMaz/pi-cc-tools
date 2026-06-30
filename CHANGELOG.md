@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.64 — 2026-07-01
+
+### Added
+
+- **`read` on `SKILL.md` shows as `[skill]`** — paths ending in `SKILL.md` use the same `[skill]` label styling as custom skill messages (krikchaip).
+
+### Fixed
+
+- **Finished tool rows no longer pulse as pending after reload** — only `isPartial` marks a row pending; missing `executionStarted` on history rows no longer triggers blink timers (krikchaip).
+- **Tool row backgrounds after `/reload`** — strip the outer `Box` success background ANSI on rebuilt rows so transparent/outline mode stays clean (krikchaip).
+- **Unmatched partial tool calls in old branches** — partial rows without `executionStarted` show a static muted dot instead of an endless pending blink (krikchaip).
+- **Partial rows at tree-navigated leaves** — when the result lives off the selected branch, blink only while an agent is actually running; settled history renders as finished (green when succeeded) (krikchaip).
+- **Duplicate bash expand hint** — finished bash rows keep “expand” on the summary line only; the preserved output preview no longer repeats it (krikchaip).
+
 ## 1.0.63 — 2026-07-01
 
 ### Fixed
