@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.63 — 2026-07-01
+
+### Fixed
+
+- **Random crash on large diffs** — rendering a large edit or `apply_patch` could throw `RangeError: Maximum call stack size exceeded`. Root cause: the split/unified diff renderers computed the max line number via `Math.max(...diff.lines.map(...))`, spreading the *entire* diff line array as function arguments — fine for small diffs, but a stack overflow on diffs with thousands of lines. Replaced with a loop-based `maxLineNumber()` that returns identical results. No visual or behavioral change.
+- **Shiki import no longer leaves a dangling rejected promise** — a failed `import("@shikijs/cli")` (missing dep, transient error) previously left a permanently-rejected promise that could surface as an unhandled-rejection crash under strict modes. The loader now resets on failure so the next render retries.
+
+### Changed
+
+- **Lower CPU / heat during long-running bash** — the bash tool's live preview re-split and re-filtered the *entire* output on every partial update (bash throttles updates every ~100ms and the pending-dot blink re-invalidates every 500ms), scaling linearly with output size. It now collects only the visible tail lines and a total count in a single pass, so cost no longer grows with output length.
+- **Bounded Shiki concurrency for multi-edit / multi-file diffs** — edit and `apply_patch` call-phase previews previously fired all syntax-highlighting jobs at once via `Promise.all`, causing CPU spikes on large multi-block diffs. They now run with a small concurrency cap (2), preserving ordered output.
+- **Spinner no longer keeps running after the UI stops** — the 250ms Loader animation loop (and its `requestRender` calls) kept firing after the TUI was stopped. It now short-circuits and stops itself when the UI is stopped, so it can't keep the event loop or CPU alive as an orphan.
+- **More timers `unref`'d** — the deferred chrome-rebind `setTimeout` (fired on `/resume` / `/new` / `/fork`) and the same-frame working-message `setTimeout` were not unref'd, keeping the Node event loop alive. Both now `unref` so they can't hold the process open or spin idle.
+
+No functionality changed in this release — output is byte-identical for all existing cases; the diffs above are strictly CPU/stability improvements verified by `npm run typecheck` and `bun scripts/benchmark-tools.ts`.
+
 ## 1.0.62 — 2026-06-22
 
 ### Fixed

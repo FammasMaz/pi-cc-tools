@@ -2653,16 +2653,16 @@ function collapsedPreviewCount(expanded: boolean, fallback: number): number {
 	return expanded ? expandedPreviewLimit() : fallback;
 }
 
-function buildPreviewText(lines: string[], expanded: boolean, theme: Theme, fallbackCollapsed = 8): string {
-	if (lines.length === 0) return theme.fg("muted", "(no output)");
+function buildPreviewText(lines: string[], expanded: boolean, theme: Theme, fallbackCollapsed = 8, totalLineCount = lines.length): string {
+	if (lines.length === 0 && totalLineCount === 0) return theme.fg("muted", "(no output)");
 	const maxLines = collapsedPreviewCount(expanded, fallbackCollapsed);
 	const shown = lines.slice(0, maxLines);
 	let text = shown.join("\n");
-	const remaining = lines.length - shown.length;
+	const remaining = Math.max(0, totalLineCount - shown.length);
 	if (remaining > 0) {
-		text += `\n${theme.fg("muted", `... (${remaining} more lines${toolOutputDetailHint(theme, expanded, true)})`)}`;
+		text += `${text ? "\n" : ""}${theme.fg("muted", `... (${remaining} more lines${toolOutputDetailHint(theme, expanded, true)})`)}`;
 	}
-	if (expanded && lines.length > maxLines) {
+	if (expanded && totalLineCount > maxLines) {
 		text += `\n${theme.fg("warning", `(display capped at ${maxLines} lines${deepExpandHint()})`)}`;
 	}
 	return text;
@@ -2887,6 +2887,7 @@ const MAX_PREVIEW_LINES = 60;
 const MAX_RENDER_LINES = 150;
 const MAX_HL_CHARS = 32_000;
 const CACHE_LIMIT = 48;
+const DIFF_RENDER_CONCURRENCY = 2;
 const WORD_DIFF_MIN_SIM = 0.15;
 const MAX_WRAP_ROWS_WIDE = 3;
 const MAX_WRAP_ROWS_MED = 2;
@@ -3101,11 +3102,12 @@ function rebindUiChromeToTheme(ctx: any): void {
 }
 
 function scheduleDeferredChromeRebind(ctx: any, delayMs = 0): void {
-	setTimeout(() => {
+	const timer = setTimeout(() => {
 		try {
 			rebindUiChromeToTheme(ctx);
 		} catch { /* noop */ }
 	}, delayMs);
+	unrefTimer(timer);
 }
 
 let TOOL_RULE = toolBranchRgbAnsi(DEFAULT_TOOL_BRANCH_GRAY);
@@ -3643,10 +3645,21 @@ function diffRule(width: number): string {
 	return `${BG_BASE}${FG_RULE}${"─".repeat(width)}${D_RST}`;
 }
 
+/** Max line number across diff lines. Loop-based (not Math.max(...spread)) so huge
+ *  diffs don't blow the call stack with a RangeError. Returns identical results. */
+function maxLineNumber(lines: DiffLine[]): number {
+	let max = 0;
+	for (let i = 0; i < lines.length; i++) {
+		const n = lines[i].oldNum ?? lines[i].newNum ?? 0;
+		if (n > max) max = n;
+	}
+	return max;
+}
+
 function shouldUseSplit(diff: ParsedDiff, tw: number, maxRows = MAX_PREVIEW_LINES): boolean {
 	if (!diff.lines.length) return false;
 	if (tw < SPLIT_MIN_WIDTH) return false;
-	const nw = Math.max(2, String(Math.max(...diff.lines.map((l) => l.oldNum ?? l.newNum ?? 0), 0)).length);
+	const nw = Math.max(2, String(maxLineNumber(diff.lines)).length);
 	const half = Math.floor((tw - 1) / 2);
 	const gw = nw + 5;
 	const cw = Math.max(12, half - gw);
@@ -3712,7 +3725,16 @@ function lang(filePath: string): BundledLanguage | undefined {
 
 async function codeToAnsiLazy(code: string, language: BundledLanguage, theme: BundledTheme): Promise<string> {
 	if (!codeToAnsiLoader) {
-		codeToAnsiLoader = import("@shikijs/cli").then((mod) => mod.codeToANSI);
+		// Self-healing: a failed import (missing dep, transient error) must not leave a
+		// permanently-rejected promise that later becomes an unhandled rejection. Reset
+		// on failure so the next call retries.
+		codeToAnsiLoader = import("@shikijs/cli").then(
+			(mod) => mod.codeToANSI,
+			(err) => {
+				codeToAnsiLoader = null;
+				throw err;
+			},
+		);
 	}
 	const codeToAnsi = await codeToAnsiLoader;
 	return codeToAnsi(code, language, theme);
@@ -3748,6 +3770,20 @@ async function hlBlock(code: string, language: BundledLanguage | undefined): Pro
 	} catch {
 		return code.split("\n");
 	}
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, mapItem: (item: T, index: number) => Promise<R>): Promise<R[]> {
+	const safeLimit = Math.max(1, Math.min(items.length || 1, Math.floor(limit)));
+	const results = new Array<R>(items.length);
+	let nextIndex = 0;
+	await Promise.all(Array.from({ length: safeLimit }, async () => {
+		while (true) {
+			const index = nextIndex++;
+			if (index >= items.length) return;
+			results[index] = await mapItem(items[index], index);
+		}
+	}));
+	return results;
 }
 
 function parseDiff(oldContent: string, newContent: string, ctxLines = 3): ParsedDiff {
@@ -3879,7 +3915,7 @@ async function renderUnified(
 	if (!diff.lines.length) return "";
 	const vis = diff.lines.slice(0, max);
 	const tw = width;
-	const nw = Math.max(2, String(Math.max(...vis.map((l) => l.oldNum ?? l.newNum ?? 0), 0)).length);
+	const nw = Math.max(2, String(maxLineNumber(vis)).length);
 	const gw = nw + 5;
 	const cw = Math.max(20, tw - gw);
 	const canHL = diff.chars <= MAX_HL_CHARS && vis.length <= MAX_RENDER_LINES;
@@ -3998,7 +4034,7 @@ async function renderSplit(
 
 	const vis = rows.slice(0, max);
 	const half = Math.floor((tw - 1) / 2);
-	const nw = Math.max(2, String(Math.max(...diff.lines.map((l) => l.oldNum ?? l.newNum ?? 0), 0)).length);
+	const nw = Math.max(2, String(maxLineNumber(diff.lines)).length);
 	const gw = nw + 5;
 	const cw = Math.max(12, half - gw);
 	const canHL = diff.chars <= MAX_HL_CHARS && vis.length * 2 <= MAX_RENDER_LINES * 2;
@@ -4298,14 +4334,12 @@ function renderEditPreviewBody(
 	const previewLines = ctx.expanded
 		? Math.max(6, Math.floor(MAX_RENDER_LINES / Math.max(1, maxShown)))
 		: Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
-	Promise.all(
-		diffs.slice(0, maxShown).map((diff, index) => {
-			const line = lines[index] ?? getFirstChangedNewLine(diff);
-			return renderSplit(diff, language, previewLines, dc, branchWidth)
-				.then((rendered) => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)}\n${rendered}`)
-				.catch(() => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)} ${summarizeDiff(diff.added, diff.removed)}`);
-		}),
-	)
+	mapWithConcurrency(diffs.slice(0, maxShown), DIFF_RENDER_CONCURRENCY, async (diff, index) => {
+		const line = lines[index] ?? getFirstChangedNewLine(diff);
+		return renderSplit(diff, language, previewLines, dc, branchWidth)
+			.then((rendered) => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)}\n${rendered}`)
+			.catch(() => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)} ${summarizeDiff(diff.added, diff.removed)}`);
+	})
 		.then((sections) => {
 			if (ctx.state._pk !== key) return;
 			const remainder = operations.length - maxShown;
@@ -4619,6 +4653,31 @@ function getLivePreviewLines(result: any): string[] {
 	return raw.split("\n").filter((line) => line.trim().length > 0);
 }
 
+function collectNonEmptyLines(text: string, tailLimit?: number): { lines: string[]; total: number } {
+	const keepTail = typeof tailLimit === "number" && Number.isFinite(tailLimit);
+	const limit = keepTail ? Math.max(0, Math.floor(tailLimit)) : 0;
+	const lines: string[] = [];
+	let total = 0;
+	let start = 0;
+	while (start <= text.length) {
+		const newline = text.indexOf("\n", start);
+		const end = newline === -1 ? text.length : newline;
+		const line = text.slice(start, end);
+		if (line.trim().length > 0) {
+			total++;
+			if (!keepTail) {
+				lines.push(line);
+			} else if (limit > 0) {
+				if (lines.length === limit) lines.shift();
+				lines.push(line);
+			}
+		}
+		if (newline === -1) break;
+		start = newline + 1;
+	}
+	return { lines, total };
+}
+
 function lineCountLabel(count: number): string {
 	return `${count} line${count === 1 ? "" : "s"}`;
 }
@@ -4629,22 +4688,26 @@ function runningPreviewBlock(
 	expanded: boolean,
 	theme: Theme,
 	ctx: any,
-	options: { lines?: string[]; styleLine?: (line: string) => string; tail?: boolean } = {},
+	options: { lines?: string[]; totalLineCount?: number; styleLine?: (line: string) => string; tail?: boolean } = {},
 ): string {
 	setupBlinkTimer(ctx);
 	const limit = liveToolPreviewLimit();
+	if (!liveToolPreviewEnabled() || limit <= 0) {
+		return withBranch(statusText, theme);
+	}
 	const lines = options.lines ?? getLivePreviewLines(result);
-	if (!liveToolPreviewEnabled() || limit <= 0 || lines.length === 0) {
+	const totalLineCount = options.totalLineCount ?? lines.length;
+	if (totalLineCount === 0) {
 		return withBranch(statusText, theme);
 	}
 
 	const styleLine = options.styleLine ?? ((line: string) => theme.fg("dim", line || " "));
 	const previewLines = options.tail && !expanded ? lines.slice(-limit) : lines;
 	let preview = buildPreviewText(previewLines.map(styleLine), expanded, theme, limit);
-	if (options.tail && !expanded && lines.length > previewLines.length) {
-		preview = `${theme.fg("muted", `... (${lines.length - previewLines.length} earlier lines${toolOutputDetailHint(theme, expanded, true)})`)}\n${preview}`;
+	if (options.tail && !expanded && totalLineCount > previewLines.length) {
+		preview = `${theme.fg("muted", `... (${totalLineCount - previewLines.length} earlier lines${toolOutputDetailHint(theme, expanded, true)})`)}\n${preview}`;
 	}
-	return withBranch(`${statusText} ${theme.fg("muted", `(${lineCountLabel(lines.length)})`)}\n${preview}`, theme);
+	return withBranch(`${statusText} ${theme.fg("muted", `(${lineCountLabel(totalLineCount)})`)}\n${preview}`, theme);
 }
 
 function buildPersistentBashPreview(lines: string[], theme: Theme): string {
@@ -5052,12 +5115,10 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 			const previewLines = ctx.expanded
 				? Math.max(6, Math.floor(MAX_RENDER_LINES / Math.max(1, maxShown)))
 				: Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
-			Promise.all(
-				preview.changes.slice(0, maxShown).map((change, index) =>
-					renderSplit(change.diff, change.language, previewLines, dc, diffWidth)
-						.then((rendered) => `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`)
-						.catch(() => `${index + 1}. ${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`),
-				),
+			mapWithConcurrency(preview.changes.slice(0, maxShown), DIFF_RENDER_CONCURRENCY, async (change, index) =>
+				renderSplit(change.diff, change.language, previewLines, dc, diffWidth)
+					.then((rendered) => `${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}\n${rendered}`)
+					.catch(() => `${index + 1}. ${describeApplyPatchChange(change)} ${change.summary}${formatApplyPatchLine(change, theme)}`),
 			)
 				.then((sections) => {
 					if (ctx.state._applyPatchPreviewKey !== key) return;
@@ -5878,16 +5939,18 @@ export default function (pi: ExtensionAPI) {
 			const details = result.details as BashToolDetails | undefined;
 			const rewrite = ensureRtkRewriteForContext(ctx, ctx.args);
 			const output = result.content[0]?.type === "text" ? result.content[0].text : "";
-			const nonEmpty = output.split("\n").filter((line) => line.trim().length > 0);
 			if (isPartial) {
+				const preview = collectNonEmptyLines(output, expanded ? undefined : liveToolPreviewLimit());
 				const running = runningPreviewBlock(result, theme.fg("warning", "Running..."), expanded, theme, ctx, {
-					lines: nonEmpty,
+					lines: preview.lines,
+					totalLineCount: preview.total,
 					styleLine: (line) => theme.fg("dim", line),
 					tail: true,
 				});
 				const withRewrite = expanded && rewrite ? `${running}\n${withBranch(formatRtkRewriteDetails(rewrite, theme), theme)}` : running;
 				return makeText(ctx.lastComponent, withRewrite);
 			}
+			const nonEmpty = collectNonEmptyLines(output).lines;
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
 			if (nonEmpty.length > 0 && ctx.state?._bashPreviewReleased !== true) {

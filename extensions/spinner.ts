@@ -144,7 +144,14 @@ function unrefTimer(timer: ReturnType<typeof setTimeout> | null | undefined): vo
 	(timer as any)?.unref?.();
 }
 
+function stopLoaderIfUiStopped(loader: any): boolean {
+	if (!loader?.ui || !(loader.ui as any).stopped) return false;
+	loader.stop?.();
+	return true;
+}
+
 (Loader.prototype as any).updateDisplay = function patchedUpdateDisplay() {
+	if (stopLoaderIfUiStopped(this)) return;
 	const frame = OB_FRAMES[this.currentFrame % OB_FRAMES.length];
 	const message = typeof this.message === "string" && RAW_ANSI_RE.test(this.message)
 		? this.message
@@ -166,12 +173,13 @@ Loader.prototype.start = function patchedStart() {
 	(this as any)[LOADER_GENERATION] = generation;
 	delete (this as any)[LOADER_LAST_TEXT];
 	(this as any).updateDisplay();
+	if (OB_FRAMES.length <= 1 || stopLoaderIfUiStopped(this)) return;
 	const scheduleNext = () => {
-		if ((this as any)[LOADER_ACTIVE] !== true || (this as any)[LOADER_GENERATION] !== generation) return;
+		if ((this as any)[LOADER_ACTIVE] !== true || (this as any)[LOADER_GENERATION] !== generation || stopLoaderIfUiStopped(this)) return;
 		const intervalMs = getLoaderIntervalMs(this);
 		const timer = setTimeout(() => {
 			(this as any).intervalId = null;
-			if ((this as any)[LOADER_ACTIVE] !== true || (this as any)[LOADER_GENERATION] !== generation) return;
+			if ((this as any)[LOADER_ACTIVE] !== true || (this as any)[LOADER_GENERATION] !== generation || stopLoaderIfUiStopped(this)) return;
 			(this as any).currentFrame = ((this as any).currentFrame + 1) % OB_FRAMES.length;
 			(this as any).updateDisplay();
 			scheduleNext();
@@ -704,7 +712,8 @@ export default function (pi: ExtensionAPI) {
 			syncWorkingMessage(true);
 			rescheduleRefreshLoop();
 			// Same-frame ordering: ensure footer updates even if pi rendered first.
-			setTimeout(() => syncWorkingMessage(true), 0);
+			const timer = setTimeout(() => syncWorkingMessage(true), 0);
+			unrefTimer(timer);
 			return;
 		}
 
