@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.65 — 2026-07-01
+
+### Fixed
+
+- **Idle crash / "job failed" while pi sits stale** — leaked blink entries (a tool that completed without clearing, or a turn that ended without `turn_end`) kept the 500 ms blink timer re-arming forever, forcing full TUI re-renders twice a second while idle. Each re-render re-ran the layout and either tripped pi's render width-assertion (crash) or grew RSS until the OS killed pi (silent crash → Ghostty "job failed"). Added an `agent_end` clear and a 15 s staleness watchdog so leaked entries can't sustain the re-render loop.
+- **Render width-assertion crash on wide content** — `clampLineWidth`/`padRenderedLineToWidth` now cap at `process.stdout.columns`, so the extension never emits a line wider than the real terminal even when pi hands it a too-wide width (e.g. content later placed in a narrower side panel).
+
 ## 1.0.64 — 2026-07-01
 
 ### Added

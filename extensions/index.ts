@@ -249,7 +249,8 @@ function mutedDotFill(count: number): string {
 
 function padRenderedLineToWidth(line: string, width: number): string {
 	if (width <= 0) return "";
-	const gap = width - visibleWidth(line);
+	const ceiling = Math.min(width, terminalColumnCeiling() || width);
+	const gap = ceiling - visibleWidth(line);
 	if (gap <= 0) return line;
 	return line + " ".repeat(gap);
 }
@@ -412,9 +413,19 @@ function borderLine(width: number): string {
 	return `${BORDER_COLOR}${"─".repeat(Math.max(1, width))}${TRANSPARENT_RESET}`;
 }
 
+function terminalColumnCeiling(): number {
+	const cols = typeof process !== "undefined" ? process.stdout?.columns : undefined;
+	return Number.isFinite(cols) && (cols as number) > 0 ? (cols as number) : 0;
+}
+
 function clampLineWidth(line: string, width: number): string {
 	if (width <= 0) return "";
-	return visibleWidth(line) > width ? truncateToWidth(line, width) : line;
+	// Hard ceiling: never emit a line wider than the real terminal. pi sometimes
+	// hands renderers a width wider than stdout.columns (e.g. content later placed
+	// in a narrower side panel), which trips pi's render width-assertion crash.
+	const ceiling = Math.min(width, terminalColumnCeiling() || width);
+	if (ceiling <= 0) return "";
+	return visibleWidth(line) > ceiling ? truncateToWidth(line, ceiling) : line;
 }
 
 function isToolExecutionLike(value: unknown): value is { toolName: string; toolCallId: string } {
@@ -2376,6 +2387,15 @@ function indentBranchBlock(block: string): string {
 
 const MAX_BLINKING_TOOLS = 5;
 const BLINK_INTERVAL_MS = 500;
+// If no streaming event occurs for this long, assume blink entries are leaked
+// (a tool completed without clearing, or the turn ended without turn_end) and
+// stop the re-render storm. Prevents idle TUI crashes and unbounded memory growth.
+const BLINK_STALE_TIMEOUT_MS = 15000;
+let _lastBlinkActivity = 0;
+
+function markBlinkActivity(): void {
+	_lastBlinkActivity = Date.now();
+}
 
 type BlinkEntry = { key: any; order: number; invalidate: () => void };
 
@@ -2416,6 +2436,17 @@ function _scheduleGlobalBlinkTimer(): void {
 	_globalBlinkTimer = setTimeout(() => {
 		_globalBlinkTimer = null;
 		if (_blinkContexts.size === 0) {
+			updateBlinkActiveStates();
+			return;
+		}
+		// Watchdog: if nothing has streamed for a while, the remaining entries are
+		// almost certainly leaked. Clear them and stop re-arming so we don't keep
+		// forcing full TUI re-renders while idle (render-assertion crash / OOM).
+		if (_lastBlinkActivity && Date.now() - _lastBlinkActivity > BLINK_STALE_TIMEOUT_MS) {
+			for (const entry of _blinkContexts.values()) {
+				try { entry.key._blinkActive = false; } catch { /* noop */ }
+			}
+			_blinkContexts.clear();
 			updateBlinkActiveStates();
 			return;
 		}
@@ -6433,6 +6464,24 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async () => {
 		registerOpenAiToolOverrides();
 		registerMcpToolOverrides();
+	});
+
+	// Streaming activity keeps the blink timer alive; agent_end clears leaked
+	// entries so the re-render loop can't keep running while idle.
+	pi.on("turn_start", async () => { markBlinkActivity(); });
+	pi.on("message_start", async () => { markBlinkActivity(); });
+	pi.on("message_update", async () => { markBlinkActivity(); });
+	pi.on("tool_execution_start", async () => { markBlinkActivity(); });
+	pi.on("agent_end", async () => {
+		markBlinkActivity();
+		for (const entry of _blinkContexts.values()) {
+			entry.key._blinkActive = false;
+		}
+		_blinkContexts.clear();
+		if (_globalBlinkTimer) {
+			clearTimeout(_globalBlinkTimer);
+			_globalBlinkTimer = null;
+		}
 	});
 
 	// Safety net: clear all blink timers on turn/session boundaries
