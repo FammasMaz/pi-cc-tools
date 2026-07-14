@@ -6,11 +6,11 @@ initTheme("dark", false);
 
 // Load the extension onto a fake pi so the render patches apply.
 const fakePi = {
-	tools: new Map(), commands: new Map(),
+	tools: new Map(), commands: new Map(), handlers: new Map<string, any[]>(),
 	registerTool(d: any) { this.tools.set(d.name, d); },
 	registerCommand(n: string, c: any) { this.commands.set(n, c); },
 	registerShortcut(_k: string, _s: any) {},
-	on(_n: string, _h: any) {},
+	on(n: string, h: any) { this.handlers.set(n, [...(this.handlers.get(n) ?? []), h]); },
 	getThinkingLevel() { return "off"; },
 	getAllTools() { return [...this.tools.values()]; },
 };
@@ -153,6 +153,52 @@ const neq = (a: string[], b: string[], label: string) => {
 		process.env.HOME = realHome;
 		fs.rmSync(tmpHome, { recursive: true, force: true });
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 6. Magic Context todo overlay receives local branch chrome and one indent.
+// ---------------------------------------------------------------------------
+{
+	const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+	const widget = new Container();
+	widget.addChild({
+		render: () => [
+			theme.fg("accent", "● Todos — 1/2 completed"),
+			`${theme.fg("dim", "├─")} ${theme.fg("success", "✓")} #done Done`,
+			`${theme.fg("dim", "└─")} ${theme.fg("warning", "◐")} #next Next`,
+		],
+		invalidate() {},
+	} as any);
+	const lines = widget.render(W);
+	const plain = lines.map(stripAnsi);
+	if (plain[0] !== " ● Todos — 1/2 completed") throw new Error("todo overlay heading did not gain one indent");
+	if (plain[1] !== " ├─ ✓ #done Done" || plain[2] !== " └─ ◐ #next Next") {
+		throw new Error("todo overlay branch rows did not gain one indent");
+	}
+	if (!lines[1].includes("\x1b[38;")) throw new Error("todo overlay branch did not receive branch chrome");
+	console.log("OK  todo overlay: branch chrome + one indent");
+}
+
+// ---------------------------------------------------------------------------
+// 7. Hermes auto-review notice is restyled locally without changing Hermes.
+// ---------------------------------------------------------------------------
+{
+	const notices: string[] = [];
+	const ui = {
+		theme,
+		notify(message: string) { notices.push(message); },
+		getToolsExpanded() { return false; },
+		setToolsExpanded() {},
+	};
+	const turnStart = (fakePi as any).handlers.get("turn_start")?.[0];
+	if (!turnStart) throw new Error("turn_start handler not registered");
+	await turnStart({}, { hasUI: true, ui });
+	ui.notify("💾 Memory auto-reviewed and updated");
+	const notice = notices.at(-1) ?? "";
+	if (!notice.includes("\x1b[2m✻ Memory auto-reviewed and updated\x1b[22m")) {
+		throw new Error("Hermes auto-review notice was not rewritten to dim ✻ styling");
+	}
+	console.log("OK  Hermes notice: dim ✻ styling");
 }
 
 console.log("\nAll correctness checks passed.");

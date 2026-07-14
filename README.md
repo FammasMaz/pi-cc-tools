@@ -58,7 +58,7 @@ When `themeAdaptive` is `true` (default), the following colors are derived from 
 | User box, tool rules, code fences | `dim` → `muted` → `borderMuted` → `thinkingText` |
 | Branch connectors (`├─`, `└─`, `│`) | **fixed rgb(72)** by default (theme-independent); `/cc-tools branch theme` to follow pi theme |
 | "✻ Turn took Ns" line (final message only, with session total + turn count) | `muted` |
-| Thinking-block italic gray | `muted` |
+| Thinking-block text and `∴` marker (marker hidden when thinking is collapsed) | `muted` |
 | Diff add/remove accents | `toolDiffAdded` / `toolDiffRemoved` |
 | Diff background tints | mixed against `toolSuccessBg` base |
 | Spinner verb text (`Working…`) | `borderAccent` (fallback: `accent`) |

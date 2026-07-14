@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.66 — 2026-07-15
+
+### Fixed
+
+- **Thinking presentation** — thinking text is no longer italic, visible thinking uses the `∴` marker, and collapsed “Thinking…” / “Thought for…” rows omit the marker while retaining the correct text indentation.
+- **Hermes memory notice styling** — the `💾 Memory auto-reviewed and updated` notification is restyled locally as a translucent `✻ Memory auto-reviewed and updated`, without modifying the pi-hermes-memory extension.
+- **Todo overlay alignment** — todo headings and task rows now have the missing indent, and their `├─` / `└─` connectors follow the configured tool branch color.
+
 ## 1.0.65 — 2026-07-01
 
 ### Fixed

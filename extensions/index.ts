@@ -65,7 +65,7 @@ const TOOL_CACHE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-cac
 const TOOL_IMAGE_EXPAND_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-read-image-expansion");
 const CUSTOM_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-custom-message-render");
 const USER_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-user-message-render");
-const RTK_NOTIFY_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-rtk-notify");
+const UI_NOTIFY_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-ui-notifications-v2");
 const WRAP_MARK = "\uE000";
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_IMAGE_PREFIX = "\x1b]1337;File=";
@@ -817,6 +817,18 @@ function patchContainerParentTracking(): void {
 	proto[PARENT_TRACKING_PATCH_FLAG] = true;
 }
 
+function formatTodoOverlayLines(lines: string[], width: number): string[] {
+	const firstContent = lines.find((line) => stripAnsi(line).trim().length > 0);
+	if (!firstContent || !/^[●○]\s+Todos\s+—/.test(stripAnsi(firstContent))) return lines;
+	return lines.map((line) => {
+		const plain = stripAnsi(line);
+		if (/^[●○]\s+Todos\s+—/.test(plain)) return clampLineWidth(` ${line}`, width);
+		if (!/^[├└]─\s+[✓○◐✗]\s/.test(plain)) return line;
+		const colored = line.replace(/[├└]─/, (branch) => `${currentToolBranchAnsi()}${branch}${TRANSPARENT_RESET}`);
+		return clampLineWidth(` ${colored}`, width);
+	});
+}
+
 function patchGlobalToolBorders(): void {
 	const proto = Container.prototype as any;
 	if (proto[PATCH_FLAG]) return;
@@ -838,7 +850,8 @@ function patchGlobalToolBorders(): void {
 
 		const rendered = originalRender.call(this, width);
 		if (!Array.isArray(rendered) || rendered.length === 0) return rendered;
-		if (!isToolExecutionLike(this)) return rendered;
+		const todoOverlay = formatTodoOverlayLines(rendered, width);
+		if (!isToolExecutionLike(this)) return todoOverlay;
 		const branchCache = { branchKey: toolBranchRenderCacheKey(), branchEpoch: _toolBranchVisualEpoch };
 		if (toolBackgroundMode === "default") {
 			(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: rendered, ...branchCache };
@@ -1078,10 +1091,9 @@ function pluralizeTurns(n: number): string {
 	return `${n} turn${n === 1 ? "" : "s"}`;
 }
 
-const THINKING_ITALIC = "\x1b[3m";
-
 function thinkingSummaryStyledText(body: string): string {
-	return ` ${WORKED_LINE_FG}${THINKING_ITALIC}✻ ${body}${RESET}`;
+	// Preserve the visible thinking text column while omitting ∴ when collapsed.
+	return `   ${WORKED_LINE_FG}${body}${RESET}`;
 }
 
 function thinkingActiveSummaryText(): string {
@@ -1092,7 +1104,7 @@ function thoughtDurationSummaryText(ms: number): string {
 	return thinkingSummaryStyledText(`Thought for ${formatThoughtDuration(ms)}`);
 }
 
-/** Single-line hidden thinking row — no Text paddingX, full muted italic styling. */
+/** Single-line hidden thinking row — no Text paddingX or thinking symbol. */
 class HiddenThinkingSummary {
 	private summaryText: string;
 	private cachedWidth?: number;
@@ -1154,8 +1166,9 @@ function hiddenThinkingSummaryForMessage(message: any): string {
 function isHiddenThinkingPlaceholderText(child: unknown): child is InstanceType<typeof Text> {
 	if (!(child instanceof Text)) return false;
 	const plain = stripAnsi(String((child as any).text ?? "")).trim();
-	if (/^✻\s*Thinking/i.test(plain)) return true;
-	if (/^✻\s*Thought for/i.test(plain)) return true;
+	if (/^[✻∴]\s*Thinking/i.test(plain)) return true;
+	if (/^[✻∴]\s*Thought for/i.test(plain)) return true;
+	if (/^Thought for\b/i.test(plain)) return true;
 	if (/^Thinking\.\.\.$/i.test(plain)) return true;
 	if (/^Thinking…$/i.test(plain)) return true;
 	return /^Thinking:?\s*$/i.test(plain);
@@ -1577,8 +1590,7 @@ class ThinkingParagraph {
 
 	private thinkingMarkdown(): InstanceType<typeof Markdown> {
 		const DIM_FG = WORKED_LINE_FG;
-		const ITALIC = "\x1b[3m";
-		const wrap = (s: string) => `${DIM_FG}${ITALIC}${s}`;
+		const wrap = (s: string) => `${DIM_FG}${s}`;
 		const wrapPlain = (s: string) => wrap(stripAnsi(s));
 		const plainTheme: ConstructorParameters<typeof Markdown>[3] = {
 			heading: wrap,
@@ -1595,11 +1607,11 @@ class ThinkingParagraph {
 			italic: wrap,
 			strikethrough: wrap,
 			underline: wrap,
-			highlightCode: (code: string, _lang?: string) => code.split("\n").map((line) => `${DIM_FG}${ITALIC}${line}`),
+			highlightCode: (code: string, _lang?: string) => code.split("\n").map((line) => `${DIM_FG}${line}`),
 		};
 		const plainStyle: ConstructorParameters<typeof Markdown>[4] = {
-			italic: true,
-			color: (s: string) => `${DIM_FG}${ITALIC}${s}`,
+			italic: false,
+			color: (s: string) => `${DIM_FG}${s}`,
 		};
 		return new Markdown(this.text, 0, 0, plainTheme, plainStyle);
 	}
@@ -1626,9 +1638,9 @@ class ThinkingParagraph {
 			return this.cachedLines;
 		}
 		const md = this.thinkingMarkdown();
-		// " ✻ " = 1 margin + symbol + space = 3 visible chars
+		// " ∴ " = 1 margin + symbol + space = 3 visible chars
 		const PREFIX_W = 3;
-		const prefix = `${WORKED_LINE_FG}✻${RESET}`;
+		const prefix = `${WORKED_LINE_FG}∴${RESET}`;
 		if (safeWidth <= PREFIX_W) {
 			this.cachedWidth = width;
 			this.cachedLines = [clampLineWidth(` ${prefix} `, safeWidth)];
@@ -2282,21 +2294,24 @@ function formatRtkRewriteDetails(record: RtkRewriteRecord, theme: Theme): string
 	].join("\n");
 }
 
-function patchRtkRewriteNotifications(ui: any): void {
-	if (!ui || ui[RTK_NOTIFY_PATCH_FLAG]) return;
+function patchUiNotifications(ui: any): void {
+	if (!ui || ui[UI_NOTIFY_PATCH_FLAG]) return;
 	const originalNotify = ui.notify;
 	if (typeof originalNotify !== "function") return;
-	ui.notify = function patchedRtkNotify(message: string, type?: "info" | "warning" | "error") {
+	ui.notify = function patchedUiNotify(message: string, type?: "info" | "warning" | "error") {
 		if (typeof message === "string") {
 			const rewrite = parseRtkRewriteNotice(message);
 			if (rewrite) {
 				rememberRtkRewrite(rewrite);
 				return;
 			}
+			if (message === "💾 Memory auto-reviewed and updated") {
+				message = "\x1b[2m✻ Memory auto-reviewed and updated\x1b[22m";
+			}
 		}
 		return originalNotify.call(this, message, type);
 	};
-	ui[RTK_NOTIFY_PATCH_FLAG] = true;
+	ui[UI_NOTIFY_PATCH_FLAG] = true;
 }
 
 function trackRtkOriginalBashCommand(toolCallId: unknown, args: unknown): void {
@@ -5884,7 +5899,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (event, ctx) => {
 		clearRtkRewriteState();
 		if (!ctx.hasUI) return;
-		patchRtkRewriteNotifications(ctx.ui);
+		patchUiNotifications(ctx.ui);
 		// Session switch (/resume, /new) can leave tool chrome from the previous
 		// theme; rebind from ctx.ui.theme (other extensions may setTheme in the
 		// same tick — deferred passes pick up the final theme without coupling).
@@ -5900,7 +5915,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("turn_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
-		patchRtkRewriteNotifications(ctx.ui);
+		patchUiNotifications(ctx.ui);
 		applyToolBackgroundMode(ctx.ui.theme);
 		applyThemePaletteIfNeeded(ctx.ui.theme);
 	});
