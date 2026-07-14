@@ -14,6 +14,20 @@ const fakePi = {
 	getThinkingLevel() { return "off"; },
 	getAllTools() { return [...this.tools.values()]; },
 };
+const magicContextToolNames = ["ctx_search", "ctx_memory", "ctx_note", "ctx_expand", "ctx_reduce", "todowrite"];
+const oldMagicRenderCall = () => new Container();
+const oldMagicRenderResult = () => new Container();
+for (const name of magicContextToolNames) {
+	fakePi.registerTool({
+		name,
+		label: name,
+		description: `${name} test tool`,
+		parameters: {},
+		execute: async (_id: string, params: any) => ({ content: [{ type: "text", text: `${name}:${params.value}` }] }),
+		renderCall: oldMagicRenderCall,
+		renderResult: oldMagicRenderResult,
+	});
+}
 const ext = await import("../extensions/index.ts");
 ext.default(fakePi as any);
 
@@ -156,7 +170,26 @@ const neq = (a: string[], b: string[], label: string) => {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Magic Context todo overlay receives local branch chrome and one indent.
+// 6. Magic Context tool definitions are re-registered with local renderers.
+// ---------------------------------------------------------------------------
+{
+	const sessionStartHandlers = (fakePi as any).handlers.get("session_start") ?? [];
+	if (sessionStartHandlers.length === 0) throw new Error("session_start handler not registered");
+	for (const handler of sessionStartHandlers) await handler({}, { hasUI: false });
+	for (const name of magicContextToolNames) {
+		const tool = (fakePi as any).tools.get(name);
+		if (!tool) throw new Error(`${name} was not preserved during override registration`);
+		if (tool.renderCall === oldMagicRenderCall || tool.renderResult === oldMagicRenderResult) {
+			throw new Error(`${name} kept its old Magic Context renderer`);
+		}
+		const result = await tool.execute("test", { value: "ok" }, undefined, undefined, {});
+		if (result.content?.[0]?.text !== `${name}:ok`) throw new Error(`${name} execute behavior changed`);
+	}
+	console.log("OK  Magic Context tools: local renderers replace extension defaults");
+}
+
+// ---------------------------------------------------------------------------
+// 7. Magic Context todo overlay receives local branch chrome and one indent.
 // ---------------------------------------------------------------------------
 {
 	const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -172,8 +205,8 @@ const neq = (a: string[], b: string[], label: string) => {
 	const lines = widget.render(W);
 	const plain = lines.map(stripAnsi);
 	if (plain[0] !== " ● Todos — 1/2 completed") throw new Error("todo overlay heading did not gain one indent");
-	if (plain[1] !== " ├─ ✓ #done Done" || plain[2] !== " └─ ◐ #next Next") {
-		throw new Error("todo overlay branch rows did not gain one indent");
+	if (plain[1] !== " ├─ ✓ done Done" || plain[2] !== " └─ ◐ next Next") {
+		throw new Error("todo overlay branch rows did not gain one indent and remove todo ID hashes");
 	}
 	if (!lines[1].includes("\x1b[38;")) throw new Error("todo overlay branch did not receive branch chrome");
 	console.log("OK  todo overlay: branch chrome + one indent");
@@ -195,10 +228,10 @@ const neq = (a: string[], b: string[], label: string) => {
 	await turnStart({}, { hasUI: true, ui });
 	ui.notify("💾 Memory auto-reviewed and updated");
 	const notice = notices.at(-1) ?? "";
-	if (!notice.includes("\x1b[2m✻ Memory auto-reviewed and updated\x1b[22m")) {
-		throw new Error("Hermes auto-review notice was not rewritten to dim ✻ styling");
+	if (!notice.includes("✻ Memory auto-reviewed and updated") || !notice.includes("\x1b[38;") || notice.includes("\x1b[2m")) {
+		throw new Error("Hermes auto-review notice did not adopt thinking-text color without extra dimming");
 	}
-	console.log("OK  Hermes notice: dim ✻ styling");
+	console.log("OK  Hermes notice: thinking-text color without extra dimming");
 }
 
 console.log("\nAll correctness checks passed.");

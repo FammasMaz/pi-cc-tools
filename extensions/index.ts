@@ -824,7 +824,8 @@ function formatTodoOverlayLines(lines: string[], width: number): string[] {
 		const plain = stripAnsi(line);
 		if (/^[●○]\s+Todos\s+—/.test(plain)) return clampLineWidth(` ${line}`, width);
 		if (!/^[├└]─\s+[✓○◐✗]\s/.test(plain)) return line;
-		const colored = line.replace(/[├└]─/, (branch) => `${currentToolBranchAnsi()}${branch}${TRANSPARENT_RESET}`);
+		const withoutTodoHash = line.replace(/#(?=[A-Za-z0-9_-]+)/, "");
+		const colored = withoutTodoHash.replace(/[├└]─/, (branch) => `${currentToolBranchAnsi()}${branch}${TRANSPARENT_RESET}`);
 		return clampLineWidth(` ${colored}`, width);
 	});
 }
@@ -2306,7 +2307,8 @@ function patchUiNotifications(ui: any): void {
 				return;
 			}
 			if (message === "💾 Memory auto-reviewed and updated") {
-				message = "\x1b[2m✻ Memory auto-reviewed and updated\x1b[22m";
+				applyThemePaletteIfNeeded(ui.theme);
+				message = `${BORDER_COLOR}✻ Memory auto-reviewed and updated${TRANSPARENT_RESET}`;
 			}
 		}
 		return originalNotify.call(this, message, type);
@@ -4642,6 +4644,15 @@ const OPENAI_STYLE_TOOL_NAMES = new Set([
 	"TaskOutput",
 	"TaskStop",
 	"TaskExecute",
+	// Magic Context registers specialized renderers of its own. Re-register its
+	// tools through the public API so they use the same Claude-style rows as
+	// every other external tool handled by this extension.
+	"ctx_search",
+	"ctx_memory",
+	"ctx_note",
+	"ctx_expand",
+	"ctx_reduce",
+	"todowrite",
 ]);
 
 function isMcpToolCandidate(tool: unknown): boolean {
