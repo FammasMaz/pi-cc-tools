@@ -2,6 +2,11 @@
 
 ## 1.0.68 — 2026-07-15
 
+### Changed
+
+- **Snappier spinner glyphs** — loader frame interval `250ms → 170ms` so `· ✢ ✳ ✶ ✻ ✽` cycles feel more lively while working.
+- **Bigger verb pool** — many more whimsical working verbs (debugging, refactoring, brainstorming, overthinking, …) so the status line repeats less often.
+
 ### Fixed
 
 - **Stale tool-group headers / weird counts** — settled `ToolGroupComponent` rows no longer keep serving a cached header after a child tool finishes or updates. Child mutations now mark only the parent group dirty (no sibling cascade), so counts like `N running` clear immediately instead of lingering until the next tool/message.
