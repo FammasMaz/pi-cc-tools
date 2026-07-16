@@ -3,6 +3,17 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.70 — 2026-07-17
+
+### Fixed
+
+- **Live tool status dots blink again while commands stream** — partial tool rows re-arm the blink timer from both the call header and the live preview path, and `tool_execution_update` keeps the 15s stale watchdog from killing blink mid-bash.
+- **Interrupted / resumed tools no longer blink forever** — only tools with `executionStarted` during a live agent run count as pending. History partials (resume, compaction, `/tree`, aborted runs without a toolResult) settle to a static green/dim dot and clear blink timers on `session_start`.
+
+### Changed
+
+- **No more `Running...` status row** — the blinking `●` on the tool heading is the only in-flight indicator. Live non-empty line count moves to the heading as muted `(N lines)`; the body shows only the output tail while streaming.
+
 ## 1.0.69 — 2026-07-17
 
 ### Changed

@@ -483,7 +483,13 @@ type ToolStatus = "pending" | "success" | "error";
 function getToolStatusForGroup(tool: any): ToolStatus {
 	if (tool?.result?.isError) return "error";
 	if (tool?.result && tool?.isPartial !== true) return "success";
-	return "pending";
+	// Only in-flight tools that actually started this agent run count as pending.
+	// History rows reconstructed without a matching toolResult stay isPartial=true
+	// forever; treating them as pending made interrupted tools blink again on resume.
+	if (tool?.isPartial === true && tool?.executionStarted === true && currentAgentWorkStartMs !== undefined) {
+		return "pending";
+	}
+	return "success";
 }
 
 let TOOL_STATUS_SUCCESS = "\x1b[32m";
@@ -2117,6 +2123,28 @@ function patchToolExecutionBackgroundSync(): void {
 	proto[TOOL_BG_PATCH_FLAG] = true;
 }
 
+function syncLiveToolRenderState(component: any): void {
+	// updateDisplay paints call header BEFORE result. Pre-seed status + live line
+	// count so the header's blinking ● and `(N lines)` trail stay in sync with
+	// the partial result that is about to render underneath.
+	const state = component?.rendererState;
+	if (!state || typeof state !== "object") return;
+	const ctxLike = {
+		state,
+		isPartial: component?.isPartial === true,
+		executionStarted: component?.executionStarted === true,
+		isError: component?.result?.isError === true,
+	};
+	syncToolCallStatus(ctxLike);
+	if (component?.isPartial === true && component?.result) {
+		const raw = getTextContent(component.result).replace(/\r\n/g, "\n").trimEnd();
+		// tailLimit=0 → count-only (no line materialization) so huge bash tails stay cheap.
+		state._liveLineCount = collectNonEmptyLines(raw, 0).total;
+	} else if (component?.isPartial !== true) {
+		delete state._liveLineCount;
+	}
+}
+
 function patchToolRenderCacheInvalidation(): void {
 	const proto = ToolExecutionComponent.prototype as any;
 	if (proto[TOOL_CACHE_PATCH_FLAG]) return;
@@ -2138,6 +2166,9 @@ function patchToolRenderCacheInvalidation(): void {
 		if (typeof original !== "function") continue;
 		proto[method] = function patchedToolMutation(...args: any[]) {
 			clearToolRenderCache(this);
+			if (method === "updateDisplay" || method === "updateResult" || method === "invalidate") {
+				syncLiveToolRenderState(this);
+			}
 			const result = original.apply(this, args);
 			clearToolRenderCache(this);
 			return result;
@@ -2240,31 +2271,50 @@ function isBlinkOn(): boolean {
 	return Math.floor(Date.now() / 500) % 2 === 0;
 }
 
-function toolHeader(tool: string, summary: string, theme: Theme, prefix = ""): string {
+function toolHeader(tool: string, summary: string, theme: Theme, prefix = "", trailing = ""): string {
 	applyThemePaletteIfNeeded(theme);
 	const label = theme.fg("toolTitle", theme.bold(tool));
-	if (!summary) return `${prefix}${label}`;
-	return `${prefix}${label} ${WRAP_MARK}${theme.fg("accent", summary)}`;
+	const body = summary
+		? `${label} ${WRAP_MARK}${theme.fg("accent", summary)}`
+		: label;
+	return trailing ? `${prefix}${body}${trailing}` : `${prefix}${body}`;
 }
 
-function setToolStatus(ctx: any, status: "pending" | "success" | "error"): void {
-	ctx.state._toolStatus = status;
+function liveLineCountTrailing(ctx: any, theme: Theme): string {
+	if (ctx?.isPartial !== true) return "";
+	const count = ctx?.state?._liveLineCount;
+	if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) return "";
+	return ` ${theme.fg("muted", `(${lineCountLabel(count)})`)}`;
+}
+
+function setToolStatus(ctx: any, status: "pending" | "success" | "error" | "idle"): void {
+	if (ctx?.state) ctx.state._toolStatus = status;
 }
 
 function syncToolCallStatus(ctx: any): void {
 	if (ctx?.isPartial) {
-		// A partial tool row blinks only while an agent is actually running.
-		// When reconstructed from session history (initial load, compaction
-		// rebuild, or /tree navigation to a node ending in a tool call) the
-		// matching tool result lives outside the selected branch, so core never
-		// calls updateResult() and isPartial stays true. With no active agent
-		// that row is settled, not live: aborted calls already carry an isError
-		// result (isPartial=false), so a leftover partial here has succeeded.
-		const live = currentAgentWorkStartMs !== undefined;
-		setToolStatus(ctx, live ? "pending" : "success");
+		// Blink only for tools that actually started in the current agent run.
+		// History rebuilds (resume, compaction, /tree) leave unmatched tool calls
+		// with isPartial=true forever and never set executionStarted — those must
+		// render settled, not keep a pending blink alive across sessions.
+		const agentLive = currentAgentWorkStartMs !== undefined;
+		const started = ctx?.executionStarted === true;
+		if (agentLive && started) {
+			setToolStatus(ctx, "pending");
+			return;
+		}
+		if (agentLive && !started) {
+			// Args still streaming before tool_execution_start — static, no blink.
+			setToolStatus(ctx, "idle");
+			clearBlinkTimer(ctx);
+			return;
+		}
+		setToolStatus(ctx, "success");
+		clearBlinkTimer(ctx);
 		return;
 	}
 	setToolStatus(ctx, ctx.isError ? "error" : "success");
+	clearBlinkTimer(ctx);
 }
 
 function shouldRevealCallArgs(ctx: any): boolean {
@@ -2480,9 +2530,10 @@ function getWriteWasNewFile(ctx: any, cwd: string, filePath: string, reveal = sh
 }
 
 function toolStatusDot(ctx: any, theme: Theme): string {
-	const status = ctx.state?._toolStatus as "pending" | "success" | "error" | undefined;
+	const status = ctx.state?._toolStatus as "pending" | "success" | "error" | "idle" | undefined;
 	if (status === "success") return `${themeStatusDot(theme, "success")} `;
 	if (status === "error") return `${themeStatusDot(theme, "error")} `;
+	if (status === "idle") return `${themeStatusDot(theme, "dim")} `;
 	return `${blinkDot(ctx, theme)} `;
 }
 
@@ -2651,6 +2702,11 @@ function pendingToolChromeColor(theme: Theme): "dim" | "muted" | "thinkingText" 
 }
 
 function blinkDot(ctx: any, theme: Theme): string {
+	// Only true in-flight tools arm the blink timer. Idle partials (args still
+	// streaming, or history rows left isPartial without a result) stay static.
+	if (ctx?.state?._toolStatus !== "pending") {
+		return themeStatusDot(theme, "dim");
+	}
 	setupBlinkTimer(ctx);
 	const key = getBlinkKey(ctx);
 	// Claude Code: solid filled circle that either shows or fully disappears —
@@ -4724,6 +4780,10 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		// message history, so /new starts fresh while /resume picks up past prompts
 		// and the original session start time. Resetting here is what lets /new
 		// clear the totals (Math.min / Math.max seeding alone could never lower them).
+		// Also drop the live-agent marker so history partials rebuilt during resume
+		// never look "in flight" and re-arm blink timers.
+		currentAgentWorkStartMs = undefined;
+		currentAssistantMessageStartMs = undefined;
 		sessionStartMs = undefined;
 		userTurnCount = 0;
 	});
@@ -4847,7 +4907,10 @@ function renderGenericToolCall(name: string, args: any, theme: Theme, ctx: any):
 	ctx.state._openAiPatchFiles = [];
 	const sp = (path: string) => shortPath(ctx.cwd ?? process.cwd(), path);
 	const summary = stableCallSummary(ctx, "_callSummary", () => summarizeGenericToolCall(name, args, theme, sp));
-	return makeText(ctx.lastComponent, toolHeader(genericToolLabel(name), summary, theme, toolStatusDot(ctx, theme)));
+	return makeText(
+		ctx.lastComponent,
+		toolHeader(genericToolLabel(name), summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme)),
+	);
 }
 
 function renderGenericToolResult(name: string, result: any, options: any, theme: Theme, ctx: any): Text {
@@ -4903,17 +4966,20 @@ function lineCountLabel(count: number): string {
 
 function runningPreviewBlock(
 	result: any,
-	statusText: string,
+	_statusText: string,
 	expanded: boolean,
 	theme: Theme,
 	ctx: any,
 	options: { lines?: string[]; totalLineCount?: number; styleLine?: (line: string) => string; tail?: boolean } = {},
 ): string {
-	setupBlinkTimer(ctx);
+	// Keep the header status dot blinking while partial output streams. Call/result
+	// renderers share rendererState, so setupBlinkTimer here re-arms the same key
+	// the call header uses — but only when this tool actually started executing.
+	syncToolCallStatus(ctx);
+	if (ctx?.state?._toolStatus === "pending") setupBlinkTimer(ctx);
+	else clearBlinkTimer(ctx);
+
 	const limit = liveToolPreviewLimit();
-	if (!liveToolPreviewEnabled() || limit <= 0) {
-		return withBranch(statusText, theme);
-	}
 	let lines: string[];
 	let totalLineCount: number;
 	if (options.lines) {
@@ -4926,8 +4992,13 @@ function runningPreviewBlock(
 		lines = collected.lines;
 		totalLineCount = collected.total;
 	}
-	if (totalLineCount === 0) {
-		return withBranch(statusText, theme);
+	// Line count lives on the tool heading (via liveLineCountTrailing); keep it in
+	// renderer state so the next renderCall pass can pick it up.
+	if (ctx?.state) ctx.state._liveLineCount = totalLineCount;
+
+	if (!liveToolPreviewEnabled() || limit <= 0 || totalLineCount === 0) {
+		// No status row — the blinking ● on the header is the only running indicator.
+		return "";
 	}
 
 	const styleLine = options.styleLine ?? ((line: string) => theme.fg("dim", line || " "));
@@ -4942,7 +5013,7 @@ function runningPreviewBlock(
 	if (options.tail && !expanded && totalLineCount > previewSource.length) {
 		preview = `${theme.fg("muted", `... (${totalLineCount - previewSource.length} earlier lines${toolOutputDetailHint(theme, expanded, true)})`)}\n${preview}`;
 	}
-	return withBranch(`${statusText} ${theme.fg("muted", `(${lineCountLabel(totalLineCount)})`)}\n${preview}`, theme);
+	return withBranch(preview, theme);
 }
 
 function buildPersistentBashPreview(lines: string[], theme: Theme): string {
@@ -5317,7 +5388,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 	syncToolCallStatus(ctx);
 	const patchText = getStringArg(args, "patchText", "patch_text");
 	const summary = stableCallSummary(ctx, "_callSummary", () => summarizeOpenAiToolCall("apply_patch", args, theme, sp));
-	const hdr = toolHeader("Apply Patch", summary, theme, toolStatusDot(ctx, theme));
+	const hdr = toolHeader("Apply Patch", summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme));
 
 	if (!ctx.argsComplete) return makeText(ctx.lastComponent, hdr);
 	const preview = getCachedApplyPatchPreview(patchText, sp, ctx);
@@ -6150,7 +6221,7 @@ export default function (pi: ExtensionAPI) {
 				const line =
 					theme.fg("customMessageLabel", `\x1b[1m[skill]\x1b[22m `) +
 					theme.fg("customMessageText", skillName);
-				return makeText(ctx.lastComponent, `${toolStatusDot(ctx, theme)}${line}`);
+				return makeText(ctx.lastComponent, `${toolStatusDot(ctx, theme)}${line}${liveLineCountTrailing(ctx, theme)}`);
 			}
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
 				let value = sp(args.path ?? "");
@@ -6162,7 +6233,10 @@ export default function (pi: ExtensionAPI) {
 				}
 				return value;
 			});
-			return makeText(ctx.lastComponent, toolHeader("Read", summary, theme, toolStatusDot(ctx, theme)));
+			return makeText(
+				ctx.lastComponent,
+				toolHeader("Read", summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme)),
+			);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
@@ -6197,7 +6271,10 @@ export default function (pi: ExtensionAPI) {
 			const rewrite = ensureRtkRewriteForContext(ctx, args);
 			const summary = stableCallSummary(ctx, "_callSummary", () => summarizeText(args.command, 72));
 			const rtkBadge = rewrite ? theme.fg("muted", " (RTK)") : "";
-			return makeText(ctx.lastComponent, toolHeader("Bash", `${summary}${rtkBadge}`, theme, toolStatusDot(ctx, theme)));
+			return makeText(
+				ctx.lastComponent,
+				toolHeader("Bash", `${summary}${rtkBadge}`, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme)),
+			);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			const details = result.details as BashToolDetails | undefined;
@@ -6205,13 +6282,15 @@ export default function (pi: ExtensionAPI) {
 			const output = result.content[0]?.type === "text" ? result.content[0].text : "";
 			if (isPartial) {
 				const preview = collectNonEmptyLines(output, expanded ? undefined : liveToolPreviewLimit());
-				const running = runningPreviewBlock(result, theme.fg("warning", "Running..."), expanded, theme, ctx, {
+				const running = runningPreviewBlock(result, "", expanded, theme, ctx, {
 					lines: preview.lines,
 					totalLineCount: preview.total,
 					styleLine: (line) => theme.fg("dim", line),
 					tail: true,
 				});
-				const withRewrite = expanded && rewrite ? `${running}\n${withBranch(formatRtkRewriteDetails(rewrite, theme), theme)}` : running;
+				const withRewrite = expanded && rewrite
+					? [running, withBranch(formatRtkRewriteDetails(rewrite, theme), theme)].filter(Boolean).join("\n")
+					: running;
 				return makeText(ctx.lastComponent, withRewrite);
 			}
 			// Collapsed: only keep the live-preview tail (or nothing). Expanded: full list.
@@ -6255,7 +6334,10 @@ export default function (pi: ExtensionAPI) {
 				if (args.path) value += ` in ${args.path}`;
 				return value;
 			});
-			return makeText(ctx.lastComponent, toolHeader("Grep", summary, theme, toolStatusDot(ctx, theme)));
+			return makeText(
+				ctx.lastComponent,
+				toolHeader("Grep", summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme)),
+			);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
@@ -6292,7 +6374,10 @@ export default function (pi: ExtensionAPI) {
 				if (args.path) value += ` in ${args.path}`;
 				return value;
 			});
-			return makeText(ctx.lastComponent, toolHeader("Find", summary, theme, toolStatusDot(ctx, theme)));
+			return makeText(
+				ctx.lastComponent,
+				toolHeader("Find", summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme)),
+			);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
@@ -6336,7 +6421,10 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			const summary = stableCallSummary(ctx, "_callSummary", () => sp(args.path ?? "."));
-			return makeText(ctx.lastComponent, toolHeader("List", summary, theme, toolStatusDot(ctx, theme)));
+			return makeText(
+				ctx.lastComponent,
+				toolHeader("List", summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme)),
+			);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
@@ -6411,12 +6499,12 @@ export default function (pi: ExtensionAPI) {
 				const base = sp(fp);
 				return shouldRevealCallArgs(ctx) ? `${base} ${theme.fg("muted", `(${lineCount(args.content ?? "")} lines)`)}` : base;
 			}, revealSummary);
-			const hdr = toolHeader(label, summary, theme, toolStatusDot(ctx, theme));
+			const hdr = toolHeader(label, summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme));
 			return makeText(ctx.lastComponent, hdr);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
-				return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "Writing..."), expanded, theme, ctx));
+				return makeText(ctx.lastComponent, runningPreviewBlock(result, "", expanded, theme, ctx));
 			}
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
@@ -6534,7 +6622,7 @@ export default function (pi: ExtensionAPI) {
 			const revealSummary = shouldRevealCallArgs(ctx) || (!!fp && hasOwnArg(args, "edits"));
 			const summary = stableCallSummary(ctx, "_callSummary", () => shouldRevealCallArgs(ctx) && operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp), revealSummary);
 			syncToolCallStatus(ctx);
-			const hdr = toolHeader("Edit", summary, theme, ` ${toolStatusDot(ctx, theme)}`);
+			const hdr = toolHeader("Edit", summary, theme, ` ${toolStatusDot(ctx, theme)}`, liveLineCountTrailing(ctx, theme));
 			if (!(ctx.argsComplete && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
 			const diffWidth = branchDiffWidth();
 			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
@@ -6620,7 +6708,10 @@ export default function (pi: ExtensionAPI) {
 					syncToolCallStatus(ctx);
 					ctx.state._openAiPatchFiles = [];
 					const summary = stableCallSummary(ctx, "_callSummary", () => summarizeOpenAiToolCall(name, args, theme, sp));
-					return makeText(ctx.lastComponent, toolHeader(label, summary, theme, toolStatusDot(ctx, theme)));
+					return makeText(
+						ctx.lastComponent,
+						toolHeader(label, summary, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme)),
+					);
 				},
 				renderResult(result: any, { expanded, isPartial }: any, theme: Theme, ctx: any) {
 					if (name === "apply_patch") return renderApplyPatchResult(result, isPartial, theme, ctx);
@@ -6683,6 +6774,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_start", async () => { markBlinkActivity(); });
 	pi.on("message_update", async () => { markBlinkActivity(); });
 	pi.on("tool_execution_start", async () => { markBlinkActivity(); });
+	// Partial tool output is the main long-running signal (bash streams for minutes).
+	// Without this, the 15s stale watchdog can kill blink while a quiet command runs.
+	pi.on("tool_execution_update", async () => { markBlinkActivity(); });
+	pi.on("tool_execution_end", async () => { markBlinkActivity(); });
 	pi.on("agent_end", async () => {
 		markBlinkActivity();
 		for (const entry of _blinkContexts.values()) {
@@ -6695,11 +6790,22 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// Safety net: clear all blink timers on turn boundaries.
+	// Safety net: clear blink timers after a turn's tools finish.
 	// Keep Shiki hlCache across turns — it's an LRU (CACHE_LIMIT=48) and
 	// re-highlighting the same diffs every turn was a free long-chat tax.
 	// Full clear still happens on session_shutdown / theme rebind.
 	pi.on("turn_end", async () => {
+		for (const entry of _blinkContexts.values()) {
+			entry.key._blinkActive = false;
+		}
+		_blinkContexts.clear();
+		if (_globalBlinkTimer) {
+			clearTimeout(_globalBlinkTimer);
+			_globalBlinkTimer = null;
+		}
+	});
+	// Session rebuild (resume/reload/fork) must not leave history partials blinking.
+	pi.on("session_start", async () => {
 		for (const entry of _blinkContexts.values()) {
 			entry.key._blinkActive = false;
 		}
