@@ -1,5 +1,16 @@
 # pi-claude-code-ui
 
+> [!IMPORTANT]
+> **Package renamed in 1.0.69.** This project is now published as [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui) (was `pi-claude-style-tools`).
+>
+> Install / migrate:
+> ```bash
+> pi install npm:pi-claude-code-ui
+> # or
+> npm i pi-claude-code-ui
+> ```
+> See [CHANGELOG 1.0.69](./CHANGELOG.md#1069--2026-07-17) for the full release notes (status dots, bare branch connectors, and more).
+
 Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots, branch connectors, file icons, and configurable output modes.
 
 ## Features

@@ -1,5 +1,8 @@
 # Changelog
 
+> [!IMPORTANT]
+> **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
+
 ## 1.0.69 — 2026-07-17
 
 ### Changed
