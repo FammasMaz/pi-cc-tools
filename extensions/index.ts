@@ -434,10 +434,16 @@ function isToolExecutionLike(value: unknown): value is { toolName: string; toolC
 	return typeof candidate.toolName === "string" && typeof candidate.toolCallId === "string";
 }
 
+const AGENT_FAMILY_TOOL_NAMES = new Set(["Agent", "Agents", "get_subagent_result", "steer_subagent"]);
+
+function isAgentFamilyToolName(name: unknown): boolean {
+	return typeof name === "string" && AGENT_FAMILY_TOOL_NAMES.has(name);
+}
+
 function shouldIndentToolExecution(value: unknown): boolean {
 	if (!value || typeof value !== "object") return false;
 	const toolName = (value as Record<string, unknown>).toolName;
-	return typeof toolName === "string" && ["Agent", "Agents", "get_subagent_result", "steer_subagent"].includes(toolName);
+	return isAgentFamilyToolName(toolName);
 }
 
 function isTerminalImageLine(line: string): boolean {
@@ -541,9 +547,11 @@ function getToolGroupOverallStatus(tools: any[]): ToolStatus {
 
 // Claude Code: solid filled circle that is either fully present or fully gone
 // while pending — never a hollow outlined ○. Classic ● + bold is the sweet
-// spot (⬤ was too large in most mono fonts).
+// spot for ordinary tools. Agent-family tools use a breathing size cycle.
 const STATUS_DOT_FILLED = "●";
 const STATUS_DOT_BOLD = "\x1b[1m";
+// big → medium → small → invisible → small → medium (then back to big)
+const AGENT_BREATHE_GLYPHS = ["⬤", "●", "•", " ", "•", "●"] as const;
 
 function paintStatusDot(colorAnsi: string): string {
 	return `${colorAnsi}${STATUS_DOT_BOLD}${STATUS_DOT_FILLED}${TRANSPARENT_RESET}`;
@@ -552,6 +560,12 @@ function paintStatusDot(colorAnsi: string): string {
 function themeStatusDot(theme: Theme, colorKey: "success" | "error" | "dim" | "muted"): string {
 	// theme.fg may not preserve nested SGR cleanly — color the glyph string itself.
 	return theme.fg(colorKey, `${STATUS_DOT_BOLD}${STATUS_DOT_FILLED}`);
+}
+
+function agentBreatheDot(theme: Theme): string {
+	const glyph = AGENT_BREATHE_GLYPHS[_globalBlinkPhaseIndex % AGENT_BREATHE_GLYPHS.length];
+	if (glyph === " ") return " ";
+	return theme.fg("success", `${STATUS_DOT_BOLD}${glyph}`);
 }
 
 function groupStatusLight(status: ToolStatus): string {
@@ -2606,6 +2620,9 @@ type BlinkEntry = { key: any; order: number; invalidate: () => void };
 const _blinkContexts = new Map<any, BlinkEntry>();
 let _globalBlinkTimer: ReturnType<typeof setTimeout> | null = null;
 let _blinkOrder = 0;
+// Shared phase for all blinkers. Ordinary tools use even/odd (on/off ●).
+// Agent-family tools map the index onto a 6-step size breath cycle.
+let _globalBlinkPhaseIndex = 0;
 let _globalBlinkPhase = true;
 
 function getBlinkIntervalMs(): number {
@@ -2664,7 +2681,8 @@ function _scheduleGlobalBlinkTimer(): void {
 			_clearAllBlinkContexts();
 			return;
 		}
-		_globalBlinkPhase = !_globalBlinkPhase;
+		_globalBlinkPhaseIndex = (_globalBlinkPhaseIndex + 1) % AGENT_BREATHE_GLYPHS.length;
+		_globalBlinkPhase = _globalBlinkPhaseIndex % 2 === 0;
 		for (const entry of getBlinkingEntries()) {
 			try { entry.invalidate(); } catch { /* noop */ }
 		}
@@ -2726,9 +2744,13 @@ function blinkDot(ctx: any, theme: Theme): string {
 	}
 	setupBlinkTimer(ctx);
 	const key = getBlinkKey(ctx);
+	if (key?._blinkActive !== true) return " ";
+	// Agent-family tools breathe through sizes; ordinary tools still on/off ●.
+	if (ctx?.state?._agentBreathe === true) {
+		return agentBreatheDot(theme);
+	}
 	// Claude Code: solid filled circle that either shows or fully disappears —
 	// never a hollow outlined ○ in the off phase.
-	if (key?._blinkActive !== true) return " ";
 	return _globalBlinkPhase ? themeStatusDot(theme, "success") : " ";
 }
 
@@ -4922,6 +4944,8 @@ function genericToolLabel(name: string): string {
 function renderGenericToolCall(name: string, args: any, theme: Theme, ctx: any): Text {
 	syncToolCallStatus(ctx);
 	ctx.state._openAiPatchFiles = [];
+	// Agent / subagent tools get a size-breathing pending marker, not on/off ●.
+	if (isAgentFamilyToolName(name)) ctx.state._agentBreathe = true;
 	const sp = (path: string) => shortPath(ctx.cwd ?? process.cwd(), path);
 	const summary = stableCallSummary(ctx, "_callSummary", () => summarizeGenericToolCall(name, args, theme, sp));
 	return makeText(

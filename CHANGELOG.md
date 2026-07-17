@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.72 — 2026-07-18
+
+### Changed
+
+- **Agent tools breathe** — `Agent` / subagent tools use a size cycle while pending (`⬤ → ● → • → (invisible) → • → ●`) instead of the ordinary on/off `●` blink, so agent work reads as a different kind of tool.
+
 ## 1.0.71 — 2026-07-18
 
 ### Fixed
