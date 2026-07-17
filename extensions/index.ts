@@ -2590,9 +2590,10 @@ function indentBranchBlock(block: string): string {
 
 const MAX_BLINKING_TOOLS = 5;
 const BLINK_INTERVAL_MS = 500;
-// If no streaming event occurs for this long, assume blink entries are leaked
-// (a tool completed without clearing, or the turn ended without turn_end) and
-// stop the re-render storm. Prevents idle TUI crashes and unbounded memory growth.
+// Safety net ONLY for leaked entries after the agent has stopped. Quiet
+// long-running tools (sleep, sparse builds, waiting on network) legitimately
+// emit no tool_execution_update for minutes — treating that silence as "stale"
+// is what made their ● freeze mid-run.
 const BLINK_STALE_TIMEOUT_MS = 15000;
 let _lastBlinkActivity = 0;
 
@@ -2632,6 +2633,18 @@ function updateBlinkActiveStates(): void {
 	}
 }
 
+function _clearAllBlinkContexts(): void {
+	for (const entry of _blinkContexts.values()) {
+		try { entry.key._blinkActive = false; } catch { /* noop */ }
+	}
+	_blinkContexts.clear();
+	if (_globalBlinkTimer) {
+		clearTimeout(_globalBlinkTimer);
+		_globalBlinkTimer = null;
+	}
+	updateBlinkActiveStates();
+}
+
 function _scheduleGlobalBlinkTimer(): void {
 	if (_globalBlinkTimer) return;
 	const intervalMs = getBlinkIntervalMs();
@@ -2642,15 +2655,13 @@ function _scheduleGlobalBlinkTimer(): void {
 			updateBlinkActiveStates();
 			return;
 		}
-		// Watchdog: if nothing has streamed for a while, the remaining entries are
-		// almost certainly leaked. Clear them and stop re-arming so we don't keep
-		// forcing full TUI re-renders while idle (render-assertion crash / OOM).
-		if (_lastBlinkActivity && Date.now() - _lastBlinkActivity > BLINK_STALE_TIMEOUT_MS) {
-			for (const entry of _blinkContexts.values()) {
-				try { entry.key._blinkActive = false; } catch { /* noop */ }
-			}
-			_blinkContexts.clear();
-			updateBlinkActiveStates();
+		// While an agent run is live, quiet tools are still in flight — keep blinking.
+		// Heartbeat here so sparse/no-output commands never look "stale".
+		if (currentAgentWorkStartMs !== undefined) {
+			markBlinkActivity();
+		} else if (_lastBlinkActivity && Date.now() - _lastBlinkActivity > BLINK_STALE_TIMEOUT_MS) {
+			// Agent already finished; leftover entries are leaks. Stop the re-render storm.
+			_clearAllBlinkContexts();
 			return;
 		}
 		_globalBlinkPhase = !_globalBlinkPhase;
@@ -2675,12 +2686,18 @@ function setupBlinkTimer(ctx: any): void {
 	const invalidate = typeof ctx?.invalidate === "function" ? () => safeInvalidate(ctx) : () => {};
 	const existing = _blinkContexts.get(key);
 	if (existing) {
-		// Already tracked — just refresh the invalidate fn, skip expensive recalc
+		// Already tracked — refresh invalidate + ensure the global timer is alive.
+		// If a prior watchdog/pass stopped the timer without removing this entry
+		// (or the timer simply died), a quiet long-running tool would otherwise
+		// stay registered forever with a frozen ●.
 		existing.invalidate = invalidate;
+		markBlinkActivity();
+		_scheduleGlobalBlinkTimer();
 		return;
 	}
 	_blinkContexts.set(key, { key, order: ++_blinkOrder, invalidate });
 	key._blinkActive = false;
+	markBlinkActivity();
 	updateBlinkActiveStates();
 	_stopGlobalBlinkTimerIfEmpty();
 	_scheduleGlobalBlinkTimer();
@@ -6768,66 +6785,40 @@ export default function (pi: ExtensionAPI) {
 		registerMcpToolOverrides();
 	});
 
-	// Streaming activity keeps the blink timer alive; agent_end clears leaked
-	// entries so the re-render loop can't keep running while idle.
+	// Streaming activity keeps the blink timer alive. Do NOT clear blink contexts
+	// on turn_end — a turn ends when the assistant message finishes, BEFORE its
+	// tools run. agent_end / agent_settled are the real "work finished" signals.
 	pi.on("turn_start", async () => { markBlinkActivity(); });
 	pi.on("message_start", async () => { markBlinkActivity(); });
 	pi.on("message_update", async () => { markBlinkActivity(); });
 	pi.on("tool_execution_start", async () => { markBlinkActivity(); });
 	// Partial tool output is the main long-running signal (bash streams for minutes).
-	// Without this, the 15s stale watchdog can kill blink while a quiet command runs.
 	pi.on("tool_execution_update", async () => { markBlinkActivity(); });
 	pi.on("tool_execution_end", async () => { markBlinkActivity(); });
+	// agent_end fires when a low-level run finishes (tools for that assistant message
+	// are done). registerThinkingLabels clears currentAgentWorkStartMs on the same
+	// event; defer so we only wipe blink state once the work marker is gone.
+	// Do not use agent_settled here — older peer types don't include it, and the
+	// live-agent heartbeat already keeps quiet long tools blinking until agent_end.
 	pi.on("agent_end", async () => {
-		markBlinkActivity();
-		for (const entry of _blinkContexts.values()) {
-			entry.key._blinkActive = false;
-		}
-		_blinkContexts.clear();
-		if (_globalBlinkTimer) {
-			clearTimeout(_globalBlinkTimer);
-			_globalBlinkTimer = null;
-		}
-	});
-
-	// Safety net: clear blink timers after a turn's tools finish.
-	// Keep Shiki hlCache across turns — it's an LRU (CACHE_LIMIT=48) and
-	// re-highlighting the same diffs every turn was a free long-chat tax.
-	// Full clear still happens on session_shutdown / theme rebind.
-	pi.on("turn_end", async () => {
-		for (const entry of _blinkContexts.values()) {
-			entry.key._blinkActive = false;
-		}
-		_blinkContexts.clear();
-		if (_globalBlinkTimer) {
-			clearTimeout(_globalBlinkTimer);
-			_globalBlinkTimer = null;
-		}
+		queueMicrotask(() => {
+			if (currentAgentWorkStartMs !== undefined) {
+				markBlinkActivity();
+				return;
+			}
+			_clearAllBlinkContexts();
+		});
 	});
 	// Session rebuild (resume/reload/fork) must not leave history partials blinking.
 	pi.on("session_start", async () => {
-		for (const entry of _blinkContexts.values()) {
-			entry.key._blinkActive = false;
-		}
-		_blinkContexts.clear();
-		if (_globalBlinkTimer) {
-			clearTimeout(_globalBlinkTimer);
-			_globalBlinkTimer = null;
-		}
+		_clearAllBlinkContexts();
 	});
 	pi.on("session_shutdown", async () => {
-		for (const entry of _blinkContexts.values()) {
-			entry.key._blinkActive = false;
-		}
-		_blinkContexts.clear();
+		_clearAllBlinkContexts();
 		clearRtkRewriteState();
 		WRITE_EXISTED_BEFORE.clear();
 		clearHighlightCache();
 		invalidateThemePaletteCache();
 		bumpToolBranchVisualEpoch();
-		if (_globalBlinkTimer) {
-			clearTimeout(_globalBlinkTimer);
-			_globalBlinkTimer = null;
-		}
 	});
 }

@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.71 — 2026-07-18
+
+### Fixed
+
+- **Long-running tools no longer freeze their status dots** — the 15s stale watchdog was treating quiet tools (no `tool_execution_update`) as leaked and killing the blink timer mid-run. While an agent is live the timer now heartbeats itself; stale cleanup only runs after the agent finishes. Also stop clearing blink state on `turn_end` (turns end before tools run).
+
 ## 1.0.70 — 2026-07-17
 
 ### Fixed
