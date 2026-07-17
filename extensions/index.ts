@@ -440,12 +440,6 @@ function isAgentFamilyToolName(name: unknown): boolean {
 	return typeof name === "string" && AGENT_FAMILY_TOOL_NAMES.has(name);
 }
 
-function shouldIndentToolExecution(value: unknown): boolean {
-	if (!value || typeof value !== "object") return false;
-	const toolName = (value as Record<string, unknown>).toolName;
-	return isAgentFamilyToolName(toolName);
-}
-
 function isTerminalImageLine(line: string): boolean {
 	return line.includes(KITTY_IMAGE_PREFIX) || line.includes(ITERM2_IMAGE_PREFIX);
 }
@@ -550,8 +544,11 @@ function getToolGroupOverallStatus(tools: any[]): ToolStatus {
 // spot for ordinary tools. Agent-family tools use a breathing size cycle.
 const STATUS_DOT_FILLED = "●";
 const STATUS_DOT_BOLD = "\x1b[1m";
-// big → medium → small → invisible → small → medium (then back to big)
-const AGENT_BREATHE_GLYPHS = ["⬤", "●", "•", " ", "•", "●"] as const;
+// Single-cell glyphs only (⬤ is often double-width and walks the baseline).
+// Optical sizes share the same cell so the center stays put while breathing:
+// big ● → medium • → small · → invisible → small · → medium •
+const AGENT_BREATHE_GLYPHS = ["●", "•", "·", " ", "·", "•"] as const;
+const AGENT_BREATHE_LEN = AGENT_BREATHE_GLYPHS.length;
 
 function paintStatusDot(colorAnsi: string): string {
 	return `${colorAnsi}${STATUS_DOT_BOLD}${STATUS_DOT_FILLED}${TRANSPARENT_RESET}`;
@@ -563,9 +560,12 @@ function themeStatusDot(theme: Theme, colorKey: "success" | "error" | "dim" | "m
 }
 
 function agentBreatheDot(theme: Theme): string {
-	const glyph = AGENT_BREATHE_GLYPHS[_globalBlinkPhaseIndex % AGENT_BREATHE_GLYPHS.length];
+	// Always exactly one display cell — matches ordinary tool dots, keeps titles aligned.
+	const glyph = AGENT_BREATHE_GLYPHS[_globalBlinkPhaseIndex % AGENT_BREATHE_LEN];
 	if (glyph === " ") return " ";
-	return theme.fg("success", `${STATUS_DOT_BOLD}${glyph}`);
+	// Bold only on the largest frame so weight changes without shifting the cell.
+	const bold = glyph === "●" ? STATUS_DOT_BOLD : "";
+	return theme.fg("success", `${bold}${glyph}`);
 }
 
 function groupStatusLight(status: ToolStatus): string {
@@ -1018,10 +1018,11 @@ function patchGlobalToolBorders(): void {
 			(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: rendered, ...branchCache };
 			return rendered;
 		}
-		const indentTool = shouldIndentToolExecution(this);
+		// Agent-family tools stay column-aligned with every other tool row — no extra
+		// leading indent (the old nested pad made Agent look offset from Read/Bash).
 		const core = textLines.map((line) => {
 			const normalized = normalizeLeadingCheckGlyph(line);
-			return clampLineWidth(stripOuterBackgroundAnsi(indentTool && normalized ? ` ${normalized}` : normalized), width);
+			return clampLineWidth(stripOuterBackgroundAnsi(normalized), width);
 		});
 		const spacerLine = " ".repeat(width);
 		let result: string[];
@@ -2681,7 +2682,7 @@ function _scheduleGlobalBlinkTimer(): void {
 			_clearAllBlinkContexts();
 			return;
 		}
-		_globalBlinkPhaseIndex = (_globalBlinkPhaseIndex + 1) % AGENT_BREATHE_GLYPHS.length;
+		_globalBlinkPhaseIndex = (_globalBlinkPhaseIndex + 1) % AGENT_BREATHE_LEN;
 		_globalBlinkPhase = _globalBlinkPhaseIndex % 2 === 0;
 		for (const entry of getBlinkingEntries()) {
 			try { entry.invalidate(); } catch { /* noop */ }

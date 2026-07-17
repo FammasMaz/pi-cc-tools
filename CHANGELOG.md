@@ -3,11 +3,18 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.73 — 2026-07-18
+
+### Fixed
+
+- **Agent rows align with other tools again** — removed the extra leading indent that only applied to Agent-family tool rows.
+- **Agent breathe stays centered** — drop double-width `⬤` (it walked the baseline). Cycle is now single-cell glyphs `● → • → · → (invisible) → · → •` so the optical center never moves.
+
 ## 1.0.72 — 2026-07-18
 
 ### Changed
 
-- **Agent tools breathe** — `Agent` / subagent tools use a size cycle while pending (`⬤ → ● → • → (invisible) → • → ●`) instead of the ordinary on/off `●` blink, so agent work reads as a different kind of tool.
+- **Agent tools breathe** — `Agent` / subagent tools use a size cycle while pending instead of the ordinary on/off `●` blink, so agent work reads as a different kind of tool.
 
 ## 1.0.71 — 2026-07-18
 
