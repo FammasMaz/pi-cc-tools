@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.74 — 2026-07-18
+
+### Fixed
+
+- **Grouped tool boxes keep Agent breathe aligned** — group rows strip all breathe glyphs (including `·` and the blank off-phase) before re-prefixing a fresh light, so titles no longer walk sideways. Group header/child lights also follow the shared blink phase (and Agent breathe) instead of wall-clock `isBlinkOn()`.
+
 ## 1.0.73 — 2026-07-18
 
 ### Fixed

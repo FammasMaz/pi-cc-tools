@@ -559,20 +559,33 @@ function themeStatusDot(theme: Theme, colorKey: "success" | "error" | "dim" | "m
 	return theme.fg(colorKey, `${STATUS_DOT_BOLD}${STATUS_DOT_FILLED}`);
 }
 
-function agentBreatheDot(theme: Theme): string {
+function agentBreatheGlyphRaw(): string {
 	// Always exactly one display cell — matches ordinary tool dots, keeps titles aligned.
-	const glyph = AGENT_BREATHE_GLYPHS[_globalBlinkPhaseIndex % AGENT_BREATHE_LEN];
+	return AGENT_BREATHE_GLYPHS[_globalBlinkPhaseIndex % AGENT_BREATHE_LEN];
+}
+
+function paintAgentBreatheDot(colorAnsi: string = TOOL_STATUS_SUCCESS): string {
+	const glyph = agentBreatheGlyphRaw();
 	if (glyph === " ") return " ";
 	// Bold only on the largest frame so weight changes without shifting the cell.
+	const bold = glyph === "●" ? STATUS_DOT_BOLD : "";
+	return `${colorAnsi}${bold}${glyph}${TRANSPARENT_RESET}`;
+}
+
+function agentBreatheDot(theme: Theme): string {
+	const glyph = agentBreatheGlyphRaw();
+	if (glyph === " ") return " ";
 	const bold = glyph === "●" ? STATUS_DOT_BOLD : "";
 	return theme.fg("success", `${bold}${glyph}`);
 }
 
-function groupStatusLight(status: ToolStatus): string {
+function groupStatusLight(status: ToolStatus, options?: { agentBreathe?: boolean }): string {
 	const color = status === "success" ? TOOL_STATUS_SUCCESS : status === "error" ? TOOL_STATUS_ERROR : TOOL_STATUS_PENDING;
 	if (status === "pending") {
-		// On phase: solid green. Off phase: disappear completely (space keeps alignment).
-		return isBlinkOn() ? paintStatusDot(TOOL_STATUS_SUCCESS) : " ";
+		// Prefer the shared blink phase over wall-clock so group lights stay in sync
+		// with the global timer (and Agent breathe). Space keeps column alignment.
+		if (options?.agentBreathe) return paintAgentBreatheDot(TOOL_STATUS_SUCCESS);
+		return _globalBlinkPhase ? paintStatusDot(TOOL_STATUS_SUCCESS) : " ";
 	}
 	return paintStatusDot(color);
 }
@@ -610,7 +623,13 @@ function stripToolChrome(lines: string[]): string[] {
 }
 
 function stripLeadingToolStatus(line: string): string {
-	return line.replace(/^((?:\x1b\[[0-9;]*m|[ \t]|[├└│─])*)(?:\x1b\[[0-9;]*m)*[●○✗■⬤•](?:\x1b\[[0-9;]*m)*\s+/, "$1");
+	// Drop the single-cell status marker so group rows can re-prefix a fresh light.
+	// Include Agent breathe glyphs (·) and the blank off-phase (space) so the title
+	// never keeps a leftover marker that shifts when size changes.
+	return line.replace(
+		/^((?:\x1b\[[0-9;]*m|[ \t]|[├└│─])*)(?:\x1b\[[0-9;]*m)*(?:[●○✗■⬤•·]| )(?:\x1b\[[0-9;]*m)*\s+/,
+		"$1",
+	);
 }
 
 function trimAnsiLeft(text: string): string {
@@ -684,19 +703,30 @@ function branchContinuation(index: number, total: number, theme?: Theme): string
 	return index === total - 1 ? "   " : ` ${rule}│${TRANSPARENT_RESET} `;
 }
 
-function formatBranchedToolLines(lines: string[], index: number, total: number, width: number, status: ToolStatus): string[] {
+function formatBranchedToolLines(
+	lines: string[],
+	index: number,
+	total: number,
+	width: number,
+	status: ToolStatus,
+	options?: { agentBreathe?: boolean },
+): string[] {
 	const output: string[] = [];
 	const content = lines.filter((line) => isTerminalImageLine(line) || stripAnsi(line).trim().length > 0);
 	const safeContent = content.length > 0 ? content : [""];
-	const light = groupStatusLight(status);
+	const light = groupStatusLight(status, options);
 	for (let lineIndex = 0; lineIndex < safeContent.length; lineIndex++) {
 		const line = safeContent[lineIndex];
 		if (isTerminalImageLine(line)) {
 			output.push(line);
 			continue;
 		}
+		// Always strip any leftover status marker from the child call line before
+		// re-prefixing. Agent breathe used · which the old stripper missed, so the
+		// title walked sideways as size changed inside groups.
+		const body = lineIndex === 0 ? removeGroupedToolPrefix(line) : trimAnsiLeft(line);
 		const prefix = lineIndex === 0 ? `${branchPrefix(index, total)}${light} ` : `${branchContinuation(index, total)}  `;
-		output.push(clampLineWidth(`${prefix}${trimAnsiLeft(line)}`, width));
+		output.push(clampLineWidth(`${prefix}${body}`, width));
 	}
 	return output;
 }
@@ -818,7 +848,11 @@ class ToolGroupComponent extends Container {
 		const label = getToolGroupLabel(this.tools);
 		const names = groupedName ? "" : formatToolNameList(this.tools);
 		const overall: ToolStatus = status.error > 0 ? "error" : status.pending > 0 ? "pending" : "success";
-		const light = groupStatusLight(overall);
+		// Group header breathes only when every pending member is Agent-family;
+		// mixed groups keep the ordinary on/off light.
+		const pendingTools = this.tools.filter((tool) => getToolStatusForGroup(tool) === "pending");
+		const headerBreathe = pendingTools.length > 0 && pendingTools.every((tool) => isAgentFamilyToolName(getToolName(tool)));
+		const light = groupStatusLight(overall, { agentBreathe: headerBreathe });
 		const summaryLabel = `${label}:`;
 		const countParts: string[] = [];
 		if (status.pending) countParts.push(statusText("pending", status.pending));
@@ -835,7 +869,14 @@ class ToolGroupComponent extends Container {
 			const rawLines = this.expanded
 				? getExpandedToolGroupLines(tool, childWidth, groupedName ? label : undefined)
 				: [getCompactToolLine(tool, childWidth, groupedName ? label : undefined)];
-			const branched = formatBranchedToolLines(rawLines, index, total, safeWidth, getToolStatusForGroup(tool));
+			const branched = formatBranchedToolLines(
+				rawLines,
+				index,
+				total,
+				safeWidth,
+				getToolStatusForGroup(tool),
+				{ agentBreathe: isAgentFamilyToolName(getToolName(tool)) },
+			);
 			for (let i = 0; i < branched.length; i++) {
 				lines.push(clampLineWidth(branched[i], safeWidth));
 			}
