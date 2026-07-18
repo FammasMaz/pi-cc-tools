@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Fixed
+
+- **Custom tool titles no longer render twice** — generic call summaries no longer fall back to `humanizeToolName(name)`, which produced headers like `Ask User Question Ask User Question` and `Advisor Advisor` for tools without a path/query/prompt arg. `ask_user_question` / `questionnaire` now summarize as `N question(s)`; `advisor` as muted `consult`; `AskClaude` uses the prompt. `toolHeader` also drops a summary that only repeats the title.
+
 ## 1.0.74 — 2026-07-18
 
 ### Fixed

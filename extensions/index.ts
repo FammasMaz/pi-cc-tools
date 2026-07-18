@@ -664,7 +664,12 @@ function getToolArgSummary(tool: any): string {
 	if (name === "grep") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "find") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "ls") return shortPath(process.cwd(), args.path ?? ".");
-	return summarizeText(getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt") || name, 72);
+	if (name === "ask_user_question" || name === "questionnaire") {
+		const questions = Array.isArray(args?.questions) ? args.questions.length : 0;
+		return questions > 0 ? `${questions} question${questions === 1 ? "" : "s"}` : "";
+	}
+	// Never fall back to the tool name — that duplicates the title in toolHeader().
+	return summarizeText(getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt"), 72);
 }
 
 function getToolCallLine(tool: any): string {
@@ -2330,8 +2335,12 @@ function isBlinkOn(): boolean {
 function toolHeader(tool: string, summary: string, theme: Theme, prefix = "", trailing = ""): string {
 	applyThemePaletteIfNeeded(theme);
 	const label = theme.fg("toolTitle", theme.bold(tool));
-	const body = summary
-		? `${label} ${WRAP_MARK}${theme.fg("accent", summary)}`
+	// Drop summary when it only repeats the tool title (ansi-stripped).
+	const summaryText = typeof summary === "string" ? stripAnsi(summary).trim() : "";
+	const toolText = stripAnsi(tool).trim();
+	const usefulSummary = summaryText && summaryText.toLowerCase() !== toolText.toLowerCase() ? summary : "";
+	const body = usefulSummary
+		? `${label} ${WRAP_MARK}${theme.fg("accent", usefulSummary)}`
 		: label;
 	return trailing ? `${prefix}${body}${trailing}` : `${prefix}${body}`;
 }
@@ -2397,7 +2406,7 @@ function stableCallSummary(ctx: any, key: string, build: () => string, reveal = 
 }
 
 function hasOwnArg(args: any, key: string): boolean {
-	return !!args && Object.prototype.hasOwnProperty.call(args, key);
+	return !!args && Object.hasOwn(args, key);
 }
 
 function fileExistsForTool(cwd: string, filePath: string): boolean {
@@ -2878,7 +2887,7 @@ function padToWidth(line: string, width: number): string {
 function markedContinuationPrefix(prefix: string): string {
 	const plain = stripAnsi(prefix);
 	// Match bare leads (`├ `/`└ `/`│ `) and legacy armed forms (`├─ `/`└─ `/`│  `).
-	const branchMatch = /^(\s*)(│  |│ |├─ |└─ |├ |└ )/.exec(plain);
+	const branchMatch = /^(\s*)(│ {2}|│ |├─ |└─ |├ |└ )/.exec(plain);
 	if (branchMatch) {
 		const indent = branchMatch[1];
 		// Keep the same structure width as the lead glyph so wraps stay aligned.
@@ -5645,10 +5654,17 @@ function summarizeOpenAiToolCall(name: string, args: any, theme: Theme, sp: (pat
 			return summarizeText(getStringArg(args, "query") || "search code", 72);
 		case "question":
 			return summarizeText(getStringArg(args, "question") || "ask user", 72);
+		case "ask_user_question":
 		case "questionnaire": {
 			const questions = Array.isArray(args?.questions) ? args.questions.length : 0;
-			return questions > 0 ? `${questions} questions` : theme.fg("muted", "questionnaire");
+			return questions > 0
+				? `${questions} question${questions === 1 ? "" : "s"}`
+				: theme.fg("muted", "questionnaire");
 		}
+		case "advisor":
+			return theme.fg("muted", "consult");
+		case "AskClaude":
+			return summarizeText(getStringArg(args, "prompt") || "delegate", 72);
 		case "context_tag":
 			return getStringArg(args, "name") || theme.fg("muted", "save point");
 		case "context_log":
@@ -5692,11 +5708,32 @@ function summarizeOpenAiToolCall(name: string, args: any, theme: Theme, sp: (pat
 			if (taskIds.length === 0) return theme.fg("muted", "start tasks");
 			return taskIds.length === 1 ? taskIds[0] : `${taskIds[0]} ${theme.fg("muted", `(+${taskIds.length - 1} tasks)`)}`;
 		}
-		default:
-			return summarizeText(
-				getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt") || humanizeToolName(name),
-				72,
+		default: {
+			// Prefer a real arg summary. Never fall back to humanizeToolName(name) —
+			// that becomes "Ask User Question Ask User Question" / "Advisor Advisor".
+			if (Array.isArray(args?.questions)) {
+				const questions = args.questions.length;
+				return questions > 0
+					? `${questions} question${questions === 1 ? "" : "s"}`
+					: theme.fg("muted", "questionnaire");
+			}
+			const arg = getStringArg(
+				args,
+				"path",
+				"file_path",
+				"url",
+				"query",
+				"name",
+				"subject",
+				"tool",
+				"description",
+				"prompt",
 			);
+			if (!arg) return "";
+			const humanized = humanizeToolName(name);
+			if (arg === name || arg === humanized) return "";
+			return summarizeText(arg, 72);
+		}
 	}
 }
 
@@ -6413,7 +6450,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
-				let value = `\"${summarizeText(args.pattern, 40)}\"`;
+				let value = `"${summarizeText(args.pattern, 40)}"`;
 				if (args.path) value += ` in ${args.path}`;
 				return value;
 			});
@@ -6453,7 +6490,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
-				let value = `\"${summarizeText(args.pattern, 40)}\"`;
+				let value = `"${summarizeText(args.pattern, 40)}"`;
 				if (args.path) value += ` in ${args.path}`;
 				return value;
 			});
