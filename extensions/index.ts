@@ -669,17 +669,20 @@ function getToolArgSummary(tool: any): string {
 		const questions = Array.isArray(args?.questions) ? args.questions.length : 0;
 		return questions > 0 ? `${questions} question${questions === 1 ? "" : "s"}` : "";
 	}
-	if (name === "advisor") return getConfiguredAdvisorModel();
+	if (name === "advisor") return getConfiguredAdvisorSummary();
 	// Never fall back to the tool name — that duplicates the title in toolHeader().
 	return summarizeText(getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt"), 72);
 }
 
-function getConfiguredAdvisorModel(): string {
+function getConfiguredAdvisorSummary(): string {
 	try {
+		const home = process.env.HOME?.trim() || homedir();
 		const config = JSON.parse(
-			readFileSync(`${homedir()}/.config/rpiv-advisor/advisor.json`, "utf8"),
-		) as { modelKey?: unknown };
-		return typeof config.modelKey === "string" ? config.modelKey.trim() : "";
+			readFileSync(`${home}/.config/rpiv-advisor/advisor.json`, "utf8"),
+		) as { modelKey?: unknown; effort?: unknown };
+		const model = typeof config.modelKey === "string" ? config.modelKey.trim() : "";
+		const effort = typeof config.effort === "string" ? config.effort.trim() : "";
+		return model ? `${model}${effort ? ` (${effort})` : ""}` : "";
 	} catch {
 		return "";
 	}
@@ -5675,8 +5678,8 @@ function summarizeOpenAiToolCall(name: string, args: any, theme: Theme, sp: (pat
 				: theme.fg("muted", "questionnaire");
 		}
 		case "advisor": {
-			const model = getConfiguredAdvisorModel();
-			return model ? theme.fg("muted", model) : "";
+			const summary = getConfiguredAdvisorSummary();
+			return summary ? theme.fg("muted", summary) : "";
 		}
 		case "AskClaude":
 			return summarizeText(getStringArg(args, "prompt") || "delegate", 72);
