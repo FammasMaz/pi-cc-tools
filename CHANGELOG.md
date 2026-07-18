@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Added
+
+- **Configurable assistant list bullets** — setting `assistantListBulletStyle` (`fisheye` default, or `dash`) and runtime `/cc-tools bullets fisheye|dash|toggle|status`. Only assistant Markdown unordered lists are affected; thinking blocks stay unchanged.
+
 ## 1.0.74 — 2026-07-18
 
 ### Fixed
@@ -69,7 +75,7 @@
 Bench (`bun scripts/benchmark-tools.ts`, width 120):
 
 | Case | baseline warm | full (this package) warm |
-|------|---------------|---------------------------|
+| ------ | --------------- | --------------------------- |
 | assistant-history-120 | ~0.44 ms | **~0.09 ms** (faster than stock) |
 | tool-history-120 (grouped) | ~0.43 ms | **~0.27 ms** (faster than stock) |
 | tool-history-240 (grouped) | ~0.90 ms | ~1.2 ms (first-render still heavier due to outlines/diffs; warm path much closer) |
