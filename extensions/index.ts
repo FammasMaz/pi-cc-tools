@@ -1500,10 +1500,12 @@ function assistantListBulletStyle(): AssistantListBulletStyle {
 
 /** Unordered list marker for assistant Markdown (thinking blocks skip this path). */
 function assistantListBulletMarker(marker: string): string {
-	if (!marker.startsWith("- ")) return marker;
-	// `dash` keeps stock markdown `- `; `fisheye` (default) uses monochrome ◉.
-	if (assistantListBulletStyle() === "dash") return marker;
-	return `◉ ${marker.slice(2)}`;
+	// Pi TUI currently passes the source marker as `-` (without its rendered
+	// spacing), while older versions passed `- `. Accept all Markdown unordered
+	// markers and preserve surrounding ANSI/spacing.
+	if (!/^((?:(?:\x1b\[[0-9;]*m)|\s)*)[-*+]/u.test(marker)) return marker;
+	const glyph = assistantListBulletStyle() === "dash" ? "-" : "◉";
+	return marker.replace(/^((?:(?:\x1b\[[0-9;]*m)|\s)*)[-*+]/u, `$1${glyph}`);
 }
 
 function refreshAssistantListBulletStyle(ctx: any): void {
@@ -1524,15 +1526,28 @@ function refreshAssistantListBulletStyle(ctx: any): void {
 	}
 }
 
+export function renderAssistantListBullet(
+	marker: string,
+	listBullet?: (marker: string) => string,
+): string {
+	const desired = assistantListBulletMarker(marker);
+	if (!listBullet) return desired;
+	const rendered = listBullet(marker);
+	const glyph = Array.from(stripAnsi(desired).trimStart())[0];
+	if (!glyph) return rendered;
+	// Pi's theme renderer chooses its own bullet glyph. Replace only that first
+	// visible glyph after styling so configured dash/fisheye survives while ANSI
+	// color and spacing remain intact.
+	return rendered.replace(/^((?:(?:\x1b\[[0-9;]*m)|\s)*)\S/u, `$1${glyph}`);
+}
+
 function copySafeMarkdownTheme(theme: MarkdownThemeLike): MarkdownThemeLike {
 	const listBullet = theme.listBullet;
 	return {
 		...theme,
 		link: (text: string) => stripAnsi(text),
 		linkUrl: (text: string) => stripAnsi(text),
-		listBullet: listBullet
-			? (marker: string) => listBullet(assistantListBulletMarker(marker))
-			: (marker: string) => assistantListBulletMarker(marker),
+		listBullet: (marker: string) => renderAssistantListBullet(marker, listBullet),
 	};
 }
 

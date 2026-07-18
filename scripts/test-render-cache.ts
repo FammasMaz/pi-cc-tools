@@ -304,4 +304,37 @@ const neq = (a: string[], b: string[], label: string) => {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 9. Assistant list-bullet setting controls final rendered glyph.
+// ---------------------------------------------------------------------------
+{
+	const realHome = process.env.HOME;
+	const tmpHome = `${realHome}/.pi-bullet-render-test-${Date.now()}`;
+	const fs = await import("node:fs");
+	fs.mkdirSync(`${tmpHome}/.pi`, { recursive: true });
+	const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+	const ccTools = (fakePi as any).commands.get("cc-tools");
+	if (!ccTools) throw new Error("cc-tools command not registered");
+	const ctx = { hasUI: false } as any;
+	const piCircleStyle = (_marker: string) => "\x1b[90m○\x1b[0m ";
+	process.env.HOME = tmpHome;
+	try {
+		await ccTools.handler("bullets dash", ctx);
+		const dash = stripAnsi(ext.renderAssistantListBullet("- ", piCircleStyle));
+		if (dash !== "- ") {
+			throw new Error(`dash setting did not replace Pi theme circle: ${JSON.stringify(dash)}`);
+		}
+
+		await ccTools.handler("bullets fisheye", ctx);
+		const fisheye = stripAnsi(ext.renderAssistantListBullet("- ", piCircleStyle));
+		if (fisheye !== "◉ ") {
+			throw new Error(`fisheye setting did not replace Pi theme circle: ${JSON.stringify(fisheye)}`);
+		}
+		console.log("OK  assistant lists: dash/fisheye replace final themed glyph");
+	} finally {
+		process.env.HOME = realHome;
+		fs.rmSync(tmpHome, { recursive: true, force: true });
+	}
+}
+
 console.log("\nAll correctness checks passed.");
