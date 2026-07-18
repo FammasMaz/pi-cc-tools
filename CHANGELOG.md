@@ -10,6 +10,10 @@
 - **Interactive `/cc-tools` settings panel** — bare `/cc-tools` (or `/cc-tools ui`) opens an overlay with all major display options. Cycling a value applies it live and refreshes an ASCII preview of tool chrome, grouping, bullets, and output modes. Existing subcommands (`outlines`, `group`, `bullets`, `branch`, `status`, …) still work.
 - **Configurable assistant list bullets** — setting `assistantListBulletStyle` (`fisheye` default, or `dash`) and runtime `/cc-tools bullets fisheye|dash|toggle|status`. Only assistant Markdown unordered lists are affected; thinking blocks stay unchanged.
 
+### Fixed
+
+- **Custom tool titles no longer render twice** — generic call summaries no longer fall back to `humanizeToolName(name)`, which produced headers like `Ask User Question Ask User Question` and `Advisor Advisor` for tools without a path/query/prompt arg. `ask_user_question` / `questionnaire` now summarize as `N question(s)`; `advisor` as muted `consult`; `AskClaude` uses the prompt. `toolHeader` also drops a summary that only repeats the title.
+
 ## 1.0.74 — 2026-07-18
 
 ### Fixed
