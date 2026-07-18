@@ -12,7 +12,7 @@
 
 ### Fixed
 
-- **Custom tool titles no longer render twice** — generic call summaries no longer fall back to `humanizeToolName(name)`, which produced headers like `Ask User Question Ask User Question` and `Advisor Advisor` for tools without a path/query/prompt arg. `ask_user_question` / `questionnaire` now summarize as `N question(s)`; `advisor` shows its configured reviewer model; `AskClaude` uses the prompt. `toolHeader` also drops a summary that only repeats the title.
+- **Custom tool titles no longer render twice** — generic call summaries no longer fall back to `humanizeToolName(name)`, which produced headers like `Ask User Question Ask User Question` and `Advisor Advisor` for tools without a path/query/prompt arg. `ask_user_question` / `questionnaire` now summarize as `N question(s)`; `advisor` shows its configured reviewer model and thinking effort; `AskClaude` uses the prompt. `toolHeader` also drops a summary that only repeats the title.
 
 ## 1.0.74 — 2026-07-18
 

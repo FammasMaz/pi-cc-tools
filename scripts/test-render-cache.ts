@@ -278,17 +278,26 @@ const neq = (a: string[], b: string[], label: string) => {
 			JSON.stringify({ modelKey: "openai-codex/gpt-5.6-sol", effort: "high" }),
 		);
 		const configured = renderAdvisor();
-		if (!configured.includes("Advisor openai-codex/gpt-5.6-sol")) {
-			throw new Error("advisor call did not show configured model");
+		if (!configured.includes("Advisor openai-codex/gpt-5.6-sol (high)")) {
+			throw new Error("advisor call did not show configured model and effort");
 		}
 		if (configured.includes("Advisor Advisor")) throw new Error("advisor title duplicated");
+
+		fs.writeFileSync(
+			`${tmpHome}/.config/rpiv-advisor/advisor.json`,
+			JSON.stringify({ modelKey: "openai-codex/gpt-5.6-sol" }),
+		);
+		const modelOnly = renderAdvisor();
+		if (!modelOnly.includes("Advisor openai-codex/gpt-5.6-sol") || modelOnly.includes("(high)")) {
+			throw new Error("advisor call did not support model-only config");
+		}
 
 		fs.rmSync(`${tmpHome}/.config/rpiv-advisor/advisor.json`);
 		const unconfigured = renderAdvisor();
 		if ((unconfigured.match(/Advisor/g) ?? []).length !== 1) {
 			throw new Error("advisor fallback did not render title only");
 		}
-		console.log("OK  advisor call: configured model + title-only fallback");
+		console.log("OK  advisor call: model + effort + title-only fallback");
 	} finally {
 		process.env.HOME = realHome;
 		fs.rmSync(tmpHome, { recursive: true, force: true });
