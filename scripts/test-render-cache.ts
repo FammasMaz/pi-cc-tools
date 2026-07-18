@@ -1,4 +1,4 @@
-import { AssistantMessageComponent, CustomMessageComponent, UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, CustomMessageComponent, ToolExecutionComponent, UserMessageComponent } from "@earendil-works/pi-coding-agent";
 import { Container } from "@earendil-works/pi-tui";
 import { initTheme, theme } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 
@@ -232,6 +232,67 @@ const neq = (a: string[], b: string[], label: string) => {
 		throw new Error("Hermes auto-review notice did not adopt thinking-text color without extra dimming");
 	}
 	console.log("OK  Hermes notice: thinking-text color without extra dimming");
+}
+
+// ---------------------------------------------------------------------------
+// 8. Advisor call rows show configured model, never a duplicate title.
+// ---------------------------------------------------------------------------
+{
+	const realHome = process.env.HOME;
+	const tmpHome = `${realHome}/.pi-advisor-render-test-${Date.now()}`;
+	const fs = await import("node:fs");
+	fs.mkdirSync(`${tmpHome}/.config/rpiv-advisor`, { recursive: true });
+	const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+	const definition = {
+		name: "advisor",
+		label: "Advisor",
+		description: "test advisor",
+		parameters: {},
+		execute: async () => ({ content: [] }),
+	};
+	const ui = { theme, getToolsExpanded() { return false; }, notify() {}, setToolsExpanded() {} };
+	const renderAdvisor = () => {
+		const component = new ToolExecutionComponent(
+			"advisor",
+			"advisor-test",
+			{},
+			{ showImages: false },
+			definition as any,
+			ui as any,
+			process.cwd(),
+		);
+		const renderCall = (component as any).getCallRenderer();
+		const rendered = renderCall({}, theme, {
+			state: {},
+			lastComponent: undefined,
+			cwd: process.cwd(),
+			isPartial: false,
+			argsComplete: true,
+		});
+		return rendered.render(W).map(stripAnsi).join("\n");
+	};
+	process.env.HOME = tmpHome;
+	try {
+		fs.writeFileSync(
+			`${tmpHome}/.config/rpiv-advisor/advisor.json`,
+			JSON.stringify({ modelKey: "openai-codex/gpt-5.6-sol", effort: "high" }),
+		);
+		const configured = renderAdvisor();
+		if (!configured.includes("Advisor openai-codex/gpt-5.6-sol")) {
+			throw new Error("advisor call did not show configured model");
+		}
+		if (configured.includes("Advisor Advisor")) throw new Error("advisor title duplicated");
+
+		fs.rmSync(`${tmpHome}/.config/rpiv-advisor/advisor.json`);
+		const unconfigured = renderAdvisor();
+		if ((unconfigured.match(/Advisor/g) ?? []).length !== 1) {
+			throw new Error("advisor fallback did not render title only");
+		}
+		console.log("OK  advisor call: configured model + title-only fallback");
+	} finally {
+		process.env.HOME = realHome;
+		fs.rmSync(tmpHome, { recursive: true, force: true });
+	}
 }
 
 console.log("\nAll correctness checks passed.");

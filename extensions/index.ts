@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
 import { basename, dirname, extname, relative, resolve } from "node:path";
+import { homedir } from "node:os";
 
 import type {
 	BashToolDetails,
@@ -668,8 +669,20 @@ function getToolArgSummary(tool: any): string {
 		const questions = Array.isArray(args?.questions) ? args.questions.length : 0;
 		return questions > 0 ? `${questions} question${questions === 1 ? "" : "s"}` : "";
 	}
+	if (name === "advisor") return getConfiguredAdvisorModel();
 	// Never fall back to the tool name — that duplicates the title in toolHeader().
 	return summarizeText(getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt"), 72);
+}
+
+function getConfiguredAdvisorModel(): string {
+	try {
+		const config = JSON.parse(
+			readFileSync(`${homedir()}/.config/rpiv-advisor/advisor.json`, "utf8"),
+		) as { modelKey?: unknown };
+		return typeof config.modelKey === "string" ? config.modelKey.trim() : "";
+	} catch {
+		return "";
+	}
 }
 
 function getToolCallLine(tool: any): string {
@@ -5661,8 +5674,10 @@ function summarizeOpenAiToolCall(name: string, args: any, theme: Theme, sp: (pat
 				? `${questions} question${questions === 1 ? "" : "s"}`
 				: theme.fg("muted", "questionnaire");
 		}
-		case "advisor":
-			return theme.fg("muted", "consult");
+		case "advisor": {
+			const model = getConfiguredAdvisorModel();
+			return model ? theme.fg("muted", model) : "";
+		}
 		case "AskClaude":
 			return summarizeText(getStringArg(args, "prompt") || "delegate", 72);
 		case "context_tag":
