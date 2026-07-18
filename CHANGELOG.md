@@ -7,6 +7,7 @@
 
 ### Added
 
+- **Interactive `/cc-tools` settings panel** — bare `/cc-tools` (or `/cc-tools ui`) opens an overlay with all major display options. Cycling a value applies it live and refreshes an ASCII preview of tool chrome, grouping, bullets, and output modes. Existing subcommands (`outlines`, `group`, `bullets`, `branch`, `status`, …) still work.
 - **Configurable assistant list bullets** — setting `assistantListBulletStyle` (`fisheye` default, or `dash`) and runtime `/cc-tools bullets fisheye|dash|toggle|status`. Only assistant Markdown unordered lists are affected; thinking blocks stay unchanged.
 
 ## 1.0.74 — 2026-07-18

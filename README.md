@@ -120,7 +120,9 @@ The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in `~/.p
 Use `/cc-tools` to control tool UI at runtime:
 
 ```text
-/cc-tools status          # show style, grouping, bullets, and extra-detail state
+/cc-tools                 # open interactive settings panel (live ASCII preview)
+/cc-tools ui              # same as bare /cc-tools
+/cc-tools status          # text dump of style, grouping, bullets, branch
 /cc-tools outlines        # tool style: outlines, transparent, or default
 /cc-tools group toggle    # toggle grouped adjacent/concurrent tool calls
 /cc-tools group off       # disable grouping (also ungroups current grouped rows)
@@ -129,6 +131,8 @@ Use `/cc-tools` to control tool UI at runtime:
 /cc-tools bullets fisheye # monochrome ◉ list markers (default)
 /cc-tools bullets toggle  # flip dash ↔ fisheye
 ```
+
+The settings panel lists style, grouping, extra detail, branch color, list bullets, theme-adaptive, live preview, and read/bash output modes. Each change applies immediately; the preview block under the list shows a mock tool tree for the current combination.
 
 `assistantListBulletStyle` only affects **assistant Markdown unordered lists** (the rows that this package restyles). Thinking blocks and user messages are unchanged.
 

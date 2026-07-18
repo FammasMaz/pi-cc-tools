@@ -40,6 +40,15 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import {
+	openCcToolsSettingsPanel,
+	type BranchPreset,
+	type BulletStyle,
+	type CcToolsSettingsController,
+	type CcToolsUiSnapshot,
+	type OutputMode,
+	type ToolStyle,
+} from "./cc-tools-settings-ui.js";
 
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
@@ -5940,10 +5949,121 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// /cc-tools command — control tool chrome, grouping, and detail level.
+	// /cc-tools command — control tool chrome, grouping, detail, bullets, and settings UI.
+	const getBranchPreset = (): BranchPreset => {
+		if (!toolBranchColorModeFixed()) return "theme";
+		const gray = getConfiguredToolBranchGray();
+		if (gray === 110) return "fixed-110";
+		if (gray === 40) return "fixed-40";
+		return "fixed-72";
+	};
+	const getCcToolsUiSnapshot = (): CcToolsUiSnapshot => {
+		const settings = readSettings();
+		const styleRaw = settings.toolBackground === "border" ? "outlines" : settings.toolBackground;
+		const toolBackground = (styleRaw === "transparent" || styleRaw === "default" || styleRaw === "outlines"
+			? styleRaw
+			: toolBackgroundMode) as ToolStyle;
+		const readOutputMode = (["hidden", "summary", "preview"].includes(String(settings.readOutputMode))
+			? settings.readOutputMode
+			: "preview") as OutputMode;
+		const bashOutputMode = (["opencode", "summary", "preview"].includes(String(settings.bashOutputMode))
+			? settings.bashOutputMode
+			: "opencode") as CcToolsUiSnapshot["bashOutputMode"];
+		return {
+			toolBackground,
+			groupToolCalls: toolGroupingEnabled(),
+			extraToolOutputExpanded,
+			themeAdaptive: themeAdaptiveEnabled(),
+			liveToolPreview: settings.liveToolPreview !== false,
+			assistantListBulletStyle: assistantListBulletStyle() as BulletStyle,
+			branchPreset: getBranchPreset(),
+			readOutputMode,
+			bashOutputMode,
+		};
+	};
+	const applyCcToolsUiSetting = (id: string, value: string, ctx: any): void => {
+		switch (id) {
+			case "toolBackground": {
+				if (value !== "outlines" && value !== "transparent" && value !== "default") return;
+				toolBackgroundOverride = value;
+				toolBackgroundMode = value;
+				writeSettingsKey("toolBackground", value);
+				if (ctx.hasUI) applyToolBackgroundMode(ctx.ui.theme);
+				break;
+			}
+			case "groupToolCalls": {
+				const enabled = value === "on";
+				setToolGroupingEnabled(enabled);
+				if (!enabled) ungroupActiveToolGroups();
+				if (ctx.hasUI) ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+				break;
+			}
+			case "extraToolOutputExpanded": {
+				setExtraToolDetailMode(value === "on");
+				if (ctx.hasUI) ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+				break;
+			}
+			case "branchPreset": {
+				if (value === "theme") {
+					writeSettingsKey("toolBranchColorMode", "theme");
+				} else if (value.startsWith("fixed-")) {
+					const gray = Number.parseInt(value.slice("fixed-".length), 10);
+					if (!Number.isFinite(gray)) return;
+					writeSettingsKey("toolBranchColorMode", "fixed");
+					writeSettingsKey("toolBranchRgbGray", gray);
+				} else return;
+				if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
+				break;
+			}
+			case "assistantListBulletStyle": {
+				if (value !== "fisheye" && value !== "dash") return;
+				writeSettingsKey("assistantListBulletStyle", value);
+				refreshAssistantListBulletStyle(ctx);
+				break;
+			}
+			case "themeAdaptive": {
+				writeSettingsKey("themeAdaptive", value === "on");
+				bustSpinnerSettingsCache();
+				invalidateThemePaletteCache();
+				autoDerivePending = true;
+				if (value === "on") {
+					if (ctx.hasUI) applyThemePaletteIfNeeded(ctx.ui.theme);
+				} else {
+					resetThemePalette();
+				}
+				if (ctx.hasUI) {
+					bumpToolBranchVisualEpoch();
+					ctx.ui.requestRender?.();
+				}
+				break;
+			}
+			case "liveToolPreview": {
+				writeSettingsKey("liveToolPreview", value === "on");
+				break;
+			}
+			case "readOutputMode": {
+				if (!["hidden", "summary", "preview"].includes(value)) return;
+				writeSettingsKey("readOutputMode", value);
+				break;
+			}
+			case "bashOutputMode": {
+				if (!["opencode", "summary", "preview"].includes(value)) return;
+				writeSettingsKey("bashOutputMode", value);
+				break;
+			}
+			default:
+				return;
+		}
+		if (ctx.hasUI) ctx.ui.requestRender?.();
+	};
+	const ccToolsSettingsController: CcToolsSettingsController = {
+		getSnapshot: getCcToolsUiSnapshot,
+		apply: applyCcToolsUiSetting,
+	};
+
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
 	const TOOL_BOOL_MODES = ["on", "off", "toggle", "status"] as const;
-	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "branch", "bullets", "status"] as const;
+	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "branch", "bullets", "ui", "settings", "status"] as const;
 	const booleanMode = (raw: string | undefined, current: boolean): boolean | "status" | undefined => {
 		const mode = raw || "toggle";
 		if (mode === "on") return true;
@@ -5974,7 +6094,7 @@ export default function (pi: ExtensionAPI) {
 		].join("\n"), "info");
 	};
 	pi.registerCommand("cc-tools", {
-		description: "Control tool UI: style, grouped rows, list bullets, and Ctrl+Shift+O extra-detail mode",
+		description: "Open cc-tools settings UI (or style/group/bullets/branch subcommands)",
 		getArgumentCompletions(prefix) {
 			const parts = prefix.trimStart().split(/\s+/);
 			const first = parts[0] ?? "";
@@ -5989,7 +6109,8 @@ export default function (pi: ExtensionAPI) {
 							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
 							: m === "branch" ? "├ └ │ gray (0-255), theme, fixed, or reset"
 							: m === "bullets" ? "Assistant list markers: fisheye (◉) or dash (-)"
-							: m === "status" ? "Show tool UI settings"
+							: m === "ui" || m === "settings" ? "Open interactive settings panel with live preview"
+							: m === "status" ? "Show tool UI settings as text"
 							: m === "outlines" ? "Horizontal rules around each tool (default)"
 							: m === "transparent" ? "No borders or backgrounds"
 							: "Pi built-in tool backgrounds",
@@ -6028,7 +6149,12 @@ export default function (pi: ExtensionAPI) {
 		async handler(args, ctx) {
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const sub = parts[0] ?? "";
-			if (!sub || sub === "status") {
+			// Bare /cc-tools (or ui/settings) opens the interactive panel with live previews.
+			if (!sub || sub === "ui" || sub === "settings") {
+				await openCcToolsSettingsPanel(ctx, ccToolsSettingsController);
+				return;
+			}
+			if (sub === "status") {
 				notifyToolStatus(ctx);
 				return;
 			}
