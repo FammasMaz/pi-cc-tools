@@ -4,11 +4,13 @@
 > **Package renamed in 1.0.69.** This project is now published as [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui) (was `pi-claude-style-tools`).
 >
 > Install / migrate:
+>
 > ```bash
 > pi install npm:pi-claude-code-ui
 > # or
 > npm i pi-claude-code-ui
 > ```
+>
 > See [CHANGELOG 1.0.69](./CHANGELOG.md#1069--2026-07-17) for the full release notes (status dots, bare branch connectors, and more).
 
 Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots, branch connectors, file icons, and configurable output modes.
@@ -56,7 +58,8 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
   "liveToolPreviewLines": 5,
   "diffCollapsedLines": 24,
   "themeAdaptive": true,
-  "diffTheme": "github-dark"
+  "diffTheme": "github-dark",
+  "assistantListBulletStyle": "default"
 }
 ```
 
@@ -65,7 +68,7 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
 When `themeAdaptive` is `true` (default), the following colors are derived from the active pi theme on every render and re-derived whenever the theme changes:
 
 | Element | Derived from |
-|---------|--------------|
+| --------- | -------------- |
 | User box, tool rules, code fences | `dim` → `muted` → `borderMuted` → `thinkingText` |
 | Branch connectors (`├`, `└`, `│`) | **fixed rgb(72)** by default (theme-independent); `/cc-tools branch theme` to follow pi theme |
 | "✻ Turn took Ns" line (final message only, with session total + turn count) | `muted` |
@@ -109,7 +112,7 @@ The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in `~/.p
 ### Tool background modes
 
 | Value | Behavior |
-|-------|----------|
+| ------- | ---------- |
 | `default` | Standard Pi tool backgrounds |
 | `transparent` | Transparent tool backgrounds |
 | `border` | Transparent backgrounds with top/bottom border lines |
@@ -117,17 +120,26 @@ The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in `~/.p
 Use `/cc-tools` to control tool UI at runtime:
 
 ```text
-/cc-tools status          # show style, grouping, and extra-detail state
+/cc-tools                 # open interactive settings panel (live ASCII preview)
+/cc-tools ui              # same as bare /cc-tools
+/cc-tools status          # text dump of style, grouping, bullets, branch
 /cc-tools outlines        # tool style: outlines, transparent, or default
 /cc-tools group toggle    # toggle grouped adjacent/concurrent tool calls
 /cc-tools group off       # disable grouping (also ungroups current grouped rows)
 /cc-tools detail toggle   # same mode as Ctrl+Shift+O
+/cc-tools bullets default # use Pi theme's native list marker
+/cc-tools bullets dash    # force plain markdown "-" markers
+/cc-tools bullets toggle  # flip default ↔ dash
 ```
+
+The settings panel lists style, grouping, extra detail, branch color, list bullets, theme-adaptive, live preview, and read/bash output modes. Each change applies immediately; the preview block under the list shows a mock tool tree for the current combination.
+
+`assistantListBulletStyle` only affects **assistant Markdown unordered lists** (the rows that this package restyles). Thinking blocks and user messages are unchanged.
 
 ### Output modes
 
 | Setting | Values | Default |
-|---------|--------|---------|
+| --------- | -------- | --------- |
 | `readOutputMode` | `hidden`, `summary`, `preview` | `preview` |
 | `searchOutputMode` | `hidden`, `count`, `preview` | `preview` |
 | `mcpOutputMode` | `hidden`, `summary`, `preview` | `preview` |
@@ -136,7 +148,7 @@ Use `/cc-tools` to control tool UI at runtime:
 ### Display settings
 
 | Setting | Default | Description |
-|---------|---------|-------------|
+| --------- | --------- | ------------- |
 | `previewLines` | `8` | Lines shown in collapsed preview mode |
 | `expandedPreviewMaxLines` | `4000` | Max lines when expanded with Ctrl+O |
 | `extraExpandedPreviewMaxLines` | `12000` | Max lines after Ctrl+Shift+O extra-detail mode |
@@ -146,6 +158,7 @@ Use `/cc-tools` to control tool UI at runtime:
 | `liveToolPreview` | `true` | Show a small live output preview while tools are still running |
 | `liveToolPreviewLines` | `5` | Lines shown in the collapsed live preview |
 | `diffCollapsedLines` | `24` | Diff lines before collapsing |
+| `assistantListBulletStyle` | `default` | Assistant unordered list markers: Pi theme `default` or forced `dash` (`-`) |
 
 ## Notes
 

@@ -3,6 +3,18 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Added
+
+- **Interactive `/cc-tools` settings panel** — bare `/cc-tools` (or `/cc-tools ui`) opens an overlay with all major display options. Cycling a value applies it live and refreshes an ASCII preview of tool chrome, grouping, bullets, and output modes. Existing subcommands (`outlines`, `group`, `bullets`, `branch`, `status`, …) still work.
+- **Configurable assistant list bullets** — setting `assistantListBulletStyle` (`default` delegates to Pi's theme, `dash` forces `-`) and runtime `/cc-tools bullets default|dash|toggle|status`. Legacy `fisheye` config maps to `default`. Only assistant Markdown unordered lists are affected; thinking blocks stay unchanged.
+
+### Fixed
+
+- **Assistant list-bullet setting now preserves Pi defaults correctly** — `default` delegates unchanged to Pi's theme; only `dash` replaces the final glyph while preserving theme color and spacing.
+- **Custom tool titles no longer render twice** — generic call summaries no longer fall back to `humanizeToolName(name)`, which produced headers like `Ask User Question Ask User Question` and `Advisor Advisor` for tools without a path/query/prompt arg. `ask_user_question` / `questionnaire` now summarize as `N question(s)`; `advisor` shows its configured reviewer model and thinking effort; `AskClaude` uses the prompt. `toolHeader` also drops a summary that only repeats the title.
+
 ## 1.0.74 — 2026-07-18
 
 ### Fixed
@@ -69,7 +81,7 @@
 Bench (`bun scripts/benchmark-tools.ts`, width 120):
 
 | Case | baseline warm | full (this package) warm |
-|------|---------------|---------------------------|
+| ------ | --------------- | --------------------------- |
 | assistant-history-120 | ~0.44 ms | **~0.09 ms** (faster than stock) |
 | tool-history-120 (grouped) | ~0.43 ms | **~0.27 ms** (faster than stock) |
 | tool-history-240 (grouped) | ~0.90 ms | ~1.2 ms (first-render still heavier due to outlines/diffs; warm path much closer) |

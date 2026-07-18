@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
 import { basename, dirname, extname, relative, resolve } from "node:path";
+import { homedir } from "node:os";
 
 import type {
 	BashToolDetails,
@@ -40,6 +41,15 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import {
+	openCcToolsSettingsPanel,
+	type BranchPreset,
+	type BulletStyle,
+	type CcToolsSettingsController,
+	type CcToolsUiSnapshot,
+	type OutputMode,
+	type ToolStyle,
+} from "./cc-tools-settings-ui.js";
 
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
@@ -116,6 +126,12 @@ interface SettingsFile {
 	toolBranchRgbGray?: number;
 	/** `fixed` (default): rgb gray 72, theme-independent. `theme`: dim → muted → borderMuted. */
 	toolBranchColorMode?: "theme" | "fixed";
+	/**
+	 * Unordered list markers in assistant Markdown (not thinking blocks).
+	 * `default` delegates to Pi's theme; `dash` forces plain `-`.
+	 * Legacy `fisheye` values are treated as `default`.
+	 */
+	assistantListBulletStyle?: "default" | "dash" | "fisheye";
 }
 
 let _settingsCache: { value: SettingsFile; timestamp: number } | null = null;
@@ -664,7 +680,27 @@ function getToolArgSummary(tool: any): string {
 	if (name === "grep") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "find") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "ls") return shortPath(process.cwd(), args.path ?? ".");
-	return summarizeText(getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt") || name, 72);
+	if (name === "ask_user_question" || name === "questionnaire") {
+		const questions = Array.isArray(args?.questions) ? args.questions.length : 0;
+		return questions > 0 ? `${questions} question${questions === 1 ? "" : "s"}` : "";
+	}
+	if (name === "advisor") return getConfiguredAdvisorSummary();
+	// Never fall back to the tool name — that duplicates the title in toolHeader().
+	return summarizeText(getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt"), 72);
+}
+
+function getConfiguredAdvisorSummary(): string {
+	try {
+		const home = process.env.HOME?.trim() || homedir();
+		const config = JSON.parse(
+			readFileSync(`${home}/.config/rpiv-advisor/advisor.json`, "utf8"),
+		) as { modelKey?: unknown; effort?: unknown };
+		const model = typeof config.modelKey === "string" ? config.modelKey.trim() : "";
+		const effort = typeof config.effort === "string" ? config.effort.trim() : "";
+		return model ? `${model}${effort ? ` (${effort})` : ""}` : "";
+	} catch {
+		return "";
+	}
 }
 
 function getToolCallLine(tool: any): string {
@@ -1455,10 +1491,43 @@ const MATH_COMMANDS: Record<string, string> = {
 
 const COPY_SAFE_MARKDOWN_LINKS_FLAG = Symbol.for("pi-claude-style-tools:copy-safe-markdown-links");
 
-/** Unordered list marker: monochrome ◉ (fisheye) instead of "- " (thinking blocks skip this). */
-function assistantListBulletMarker(marker: string): string {
-	if (marker.startsWith("- ")) return `◉ ${marker.slice(2)}`;
-	return marker;
+const ASSISTANT_LIST_BULLET_STYLES = ["default", "dash"] as const;
+type AssistantListBulletStyle = (typeof ASSISTANT_LIST_BULLET_STYLES)[number];
+
+function assistantListBulletStyle(): AssistantListBulletStyle {
+	return readSettings().assistantListBulletStyle === "dash" ? "dash" : "default";
+}
+
+function refreshAssistantListBulletStyle(ctx: any): void {
+	_settingsCache = null;
+	bumpToolBranchVisualEpoch();
+	if (!ctx?.hasUI) return;
+	try {
+		const ui = ctx.ui as any;
+		const roots = [ui, ui?.tui, ui?.root, ui?.chatContainer, ui?.messages];
+		for (const root of roots) {
+			if (root) visitMarkdownDescendants(root, (md) => md.invalidate?.());
+		}
+		ui.setToolsExpanded?.(ui.getToolsExpanded?.());
+		ui.invalidate?.();
+		ui.requestRender?.();
+	} catch {
+		/* noop */
+	}
+}
+
+export function renderAssistantListBullet(
+	marker: string,
+	listBullet?: (marker: string) => string,
+): string {
+	const rendered = listBullet ? listBullet(marker) : marker;
+	if (assistantListBulletStyle() === "default") return rendered;
+	// Preserve Pi's theme color and spacing, replacing only its first visible
+	// marker glyph. Without a theme renderer, normalize Markdown's -, *, or +.
+	if (listBullet) {
+		return rendered.replace(/^((?:(?:\x1b\[[0-9;]*m)|\s)*)\S/u, "$1-");
+	}
+	return rendered.replace(/^((?:(?:\x1b\[[0-9;]*m)|\s)*)[-*+]/u, "$1-");
 }
 
 function copySafeMarkdownTheme(theme: MarkdownThemeLike): MarkdownThemeLike {
@@ -1467,9 +1536,7 @@ function copySafeMarkdownTheme(theme: MarkdownThemeLike): MarkdownThemeLike {
 		...theme,
 		link: (text: string) => stripAnsi(text),
 		linkUrl: (text: string) => stripAnsi(text),
-		listBullet: listBullet
-			? (marker: string) => listBullet(assistantListBulletMarker(marker))
-			: (marker: string) => assistantListBulletMarker(marker),
+		listBullet: (marker: string) => renderAssistantListBullet(marker, listBullet),
 	};
 }
 
@@ -2330,8 +2397,12 @@ function isBlinkOn(): boolean {
 function toolHeader(tool: string, summary: string, theme: Theme, prefix = "", trailing = ""): string {
 	applyThemePaletteIfNeeded(theme);
 	const label = theme.fg("toolTitle", theme.bold(tool));
-	const body = summary
-		? `${label} ${WRAP_MARK}${theme.fg("accent", summary)}`
+	// Drop summary when it only repeats the tool title (ansi-stripped).
+	const summaryText = typeof summary === "string" ? stripAnsi(summary).trim() : "";
+	const toolText = stripAnsi(tool).trim();
+	const usefulSummary = summaryText && summaryText.toLowerCase() !== toolText.toLowerCase() ? summary : "";
+	const body = usefulSummary
+		? `${label} ${WRAP_MARK}${theme.fg("accent", usefulSummary)}`
 		: label;
 	return trailing ? `${prefix}${body}${trailing}` : `${prefix}${body}`;
 }
@@ -2397,7 +2468,7 @@ function stableCallSummary(ctx: any, key: string, build: () => string, reveal = 
 }
 
 function hasOwnArg(args: any, key: string): boolean {
-	return !!args && Object.prototype.hasOwnProperty.call(args, key);
+	return !!args && Object.hasOwn(args, key);
 }
 
 function fileExistsForTool(cwd: string, filePath: string): boolean {
@@ -2878,7 +2949,7 @@ function padToWidth(line: string, width: number): string {
 function markedContinuationPrefix(prefix: string): string {
 	const plain = stripAnsi(prefix);
 	// Match bare leads (`├ `/`└ `/`│ `) and legacy armed forms (`├─ `/`└─ `/`│  `).
-	const branchMatch = /^(\s*)(│  |│ |├─ |└─ |├ |└ )/.exec(plain);
+	const branchMatch = /^(\s*)(│ {2}|│ |├─ |└─ |├ |└ )/.exec(plain);
 	if (branchMatch) {
 		const indent = branchMatch[1];
 		// Keep the same structure width as the lead glyph so wraps stay aligned.
@@ -5645,10 +5716,19 @@ function summarizeOpenAiToolCall(name: string, args: any, theme: Theme, sp: (pat
 			return summarizeText(getStringArg(args, "query") || "search code", 72);
 		case "question":
 			return summarizeText(getStringArg(args, "question") || "ask user", 72);
+		case "ask_user_question":
 		case "questionnaire": {
 			const questions = Array.isArray(args?.questions) ? args.questions.length : 0;
-			return questions > 0 ? `${questions} questions` : theme.fg("muted", "questionnaire");
+			return questions > 0
+				? `${questions} question${questions === 1 ? "" : "s"}`
+				: theme.fg("muted", "questionnaire");
 		}
+		case "advisor": {
+			const summary = getConfiguredAdvisorSummary();
+			return summary ? theme.fg("muted", summary) : "";
+		}
+		case "AskClaude":
+			return summarizeText(getStringArg(args, "prompt") || "delegate", 72);
 		case "context_tag":
 			return getStringArg(args, "name") || theme.fg("muted", "save point");
 		case "context_log":
@@ -5692,11 +5772,32 @@ function summarizeOpenAiToolCall(name: string, args: any, theme: Theme, sp: (pat
 			if (taskIds.length === 0) return theme.fg("muted", "start tasks");
 			return taskIds.length === 1 ? taskIds[0] : `${taskIds[0]} ${theme.fg("muted", `(+${taskIds.length - 1} tasks)`)}`;
 		}
-		default:
-			return summarizeText(
-				getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt") || humanizeToolName(name),
-				72,
+		default: {
+			// Prefer a real arg summary. Never fall back to humanizeToolName(name) —
+			// that becomes "Ask User Question Ask User Question" / "Advisor Advisor".
+			if (Array.isArray(args?.questions)) {
+				const questions = args.questions.length;
+				return questions > 0
+					? `${questions} question${questions === 1 ? "" : "s"}`
+					: theme.fg("muted", "questionnaire");
+			}
+			const arg = getStringArg(
+				args,
+				"path",
+				"file_path",
+				"url",
+				"query",
+				"name",
+				"subject",
+				"tool",
+				"description",
+				"prompt",
 			);
+			if (!arg) return "";
+			const humanized = humanizeToolName(name);
+			if (arg === name || arg === humanized) return "";
+			return summarizeText(arg, 72);
+		}
 	}
 }
 
@@ -5907,10 +6008,121 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// /cc-tools command — control tool chrome, grouping, and detail level.
+	// /cc-tools command — control tool chrome, grouping, detail, bullets, and settings UI.
+	const getBranchPreset = (): BranchPreset => {
+		if (!toolBranchColorModeFixed()) return "theme";
+		const gray = getConfiguredToolBranchGray();
+		if (gray === 110) return "fixed-110";
+		if (gray === 40) return "fixed-40";
+		return "fixed-72";
+	};
+	const getCcToolsUiSnapshot = (): CcToolsUiSnapshot => {
+		const settings = readSettings();
+		const styleRaw = settings.toolBackground === "border" ? "outlines" : settings.toolBackground;
+		const toolBackground = (styleRaw === "transparent" || styleRaw === "default" || styleRaw === "outlines"
+			? styleRaw
+			: toolBackgroundMode) as ToolStyle;
+		const readOutputMode = (["hidden", "summary", "preview"].includes(String(settings.readOutputMode))
+			? settings.readOutputMode
+			: "preview") as OutputMode;
+		const bashOutputMode = (["opencode", "summary", "preview"].includes(String(settings.bashOutputMode))
+			? settings.bashOutputMode
+			: "opencode") as CcToolsUiSnapshot["bashOutputMode"];
+		return {
+			toolBackground,
+			groupToolCalls: toolGroupingEnabled(),
+			extraToolOutputExpanded,
+			themeAdaptive: themeAdaptiveEnabled(),
+			liveToolPreview: settings.liveToolPreview !== false,
+			assistantListBulletStyle: assistantListBulletStyle() as BulletStyle,
+			branchPreset: getBranchPreset(),
+			readOutputMode,
+			bashOutputMode,
+		};
+	};
+	const applyCcToolsUiSetting = (id: string, value: string, ctx: any): void => {
+		switch (id) {
+			case "toolBackground": {
+				if (value !== "outlines" && value !== "transparent" && value !== "default") return;
+				toolBackgroundOverride = value;
+				toolBackgroundMode = value;
+				writeSettingsKey("toolBackground", value);
+				if (ctx.hasUI) applyToolBackgroundMode(ctx.ui.theme);
+				break;
+			}
+			case "groupToolCalls": {
+				const enabled = value === "on";
+				setToolGroupingEnabled(enabled);
+				if (!enabled) ungroupActiveToolGroups();
+				if (ctx.hasUI) ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+				break;
+			}
+			case "extraToolOutputExpanded": {
+				setExtraToolDetailMode(value === "on");
+				if (ctx.hasUI) ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+				break;
+			}
+			case "branchPreset": {
+				if (value === "theme") {
+					writeSettingsKey("toolBranchColorMode", "theme");
+				} else if (value.startsWith("fixed-")) {
+					const gray = Number.parseInt(value.slice("fixed-".length), 10);
+					if (!Number.isFinite(gray)) return;
+					writeSettingsKey("toolBranchColorMode", "fixed");
+					writeSettingsKey("toolBranchRgbGray", gray);
+				} else return;
+				if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
+				break;
+			}
+			case "assistantListBulletStyle": {
+				if (value !== "default" && value !== "dash") return;
+				writeSettingsKey("assistantListBulletStyle", value);
+				refreshAssistantListBulletStyle(ctx);
+				break;
+			}
+			case "themeAdaptive": {
+				writeSettingsKey("themeAdaptive", value === "on");
+				bustSpinnerSettingsCache();
+				invalidateThemePaletteCache();
+				autoDerivePending = true;
+				if (value === "on") {
+					if (ctx.hasUI) applyThemePaletteIfNeeded(ctx.ui.theme);
+				} else {
+					resetThemePalette();
+				}
+				if (ctx.hasUI) {
+					bumpToolBranchVisualEpoch();
+					ctx.ui.requestRender?.();
+				}
+				break;
+			}
+			case "liveToolPreview": {
+				writeSettingsKey("liveToolPreview", value === "on");
+				break;
+			}
+			case "readOutputMode": {
+				if (!["hidden", "summary", "preview"].includes(value)) return;
+				writeSettingsKey("readOutputMode", value);
+				break;
+			}
+			case "bashOutputMode": {
+				if (!["opencode", "summary", "preview"].includes(value)) return;
+				writeSettingsKey("bashOutputMode", value);
+				break;
+			}
+			default:
+				return;
+		}
+		if (ctx.hasUI) ctx.ui.requestRender?.();
+	};
+	const ccToolsSettingsController: CcToolsSettingsController = {
+		getSnapshot: getCcToolsUiSnapshot,
+		apply: applyCcToolsUiSetting,
+	};
+
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
 	const TOOL_BOOL_MODES = ["on", "off", "toggle", "status"] as const;
-	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "branch", "status"] as const;
+	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "branch", "bullets", "ui", "settings", "status"] as const;
 	const booleanMode = (raw: string | undefined, current: boolean): boolean | "status" | undefined => {
 		const mode = raw || "toggle";
 		if (mode === "on") return true;
@@ -5936,10 +6148,12 @@ export default function (pi: ExtensionAPI) {
 			`Extra detail: ${extraToolOutputExpanded ? "on" : "off"} (${rawKeyHint("ctrl+shift+o", "toggle")})`,
 			branchLine,
 			`  /cc-tools branch <0-255> | theme | fixed | reset`,
+			`List bullets: ${assistantListBulletStyle()} (assistant Markdown only)`,
+			`  /cc-tools bullets default | dash | status`,
 		].join("\n"), "info");
 	};
 	pi.registerCommand("cc-tools", {
-		description: "Control tool UI: style, grouped rows, and Ctrl+Shift+O extra-detail mode",
+		description: "Open cc-tools settings UI (or style/group/bullets/branch subcommands)",
 		getArgumentCompletions(prefix) {
 			const parts = prefix.trimStart().split(/\s+/);
 			const first = parts[0] ?? "";
@@ -5953,7 +6167,9 @@ export default function (pi: ExtensionAPI) {
 							m === "group" ? "Toggle grouped adjacent/concurrent tool rows"
 							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
 							: m === "branch" ? "├ └ │ gray (0-255), theme, fixed, or reset"
-							: m === "status" ? "Show tool UI settings"
+							: m === "bullets" ? "Assistant list markers: Pi default or dash (-)"
+							: m === "ui" || m === "settings" ? "Open interactive settings panel with live preview"
+							: m === "status" ? "Show tool UI settings as text"
 							: m === "outlines" ? "Horizontal rules around each tool (default)"
 							: m === "transparent" ? "No borders or backgrounds"
 							: "Pi built-in tool backgrounds",
@@ -5966,6 +6182,21 @@ export default function (pi: ExtensionAPI) {
 					.filter((o) => o.startsWith(second))
 					.map((o) => ({ value: `branch ${o}`, label: o, description: "Branch connector color" }));
 			}
+			if (first === "bullets" || first === "bullet" || first === "list") {
+				const second = parts[1] ?? "";
+				const opts = ["default", "dash", "status", "toggle"];
+				return opts
+					.filter((o) => o.startsWith(second))
+					.map((o) => ({
+						value: `bullets ${o}`,
+						label: o,
+						description:
+							o === "default" ? "Use Pi theme's native bullet"
+								: o === "dash" ? "Force plain markdown - bullets"
+									: o === "toggle" ? "Flip default ↔ dash"
+									: "Show current list bullet style",
+					}));
+			}
 			if (first === "group" || first === "detail" || first === "extra") {
 				const second = parts[1] ?? "";
 				return TOOL_BOOL_MODES
@@ -5977,7 +6208,12 @@ export default function (pi: ExtensionAPI) {
 		async handler(args, ctx) {
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const sub = parts[0] ?? "";
-			if (!sub || sub === "status") {
+			// Bare /cc-tools (or ui/settings) opens the interactive panel with live previews.
+			if (!sub || sub === "ui" || sub === "settings") {
+				await openCcToolsSettingsPanel(ctx, ccToolsSettingsController);
+				return;
+			}
+			if (sub === "status") {
 				notifyToolStatus(ctx);
 				return;
 			}
@@ -6056,8 +6292,46 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			if (sub === "bullets" || sub === "bullet" || sub === "list") {
+				const arg = parts[1] ?? "status";
+				const current = assistantListBulletStyle();
+				if (arg === "status") {
+					if (ctx.hasUI) {
+						ctx.ui.notify(
+							`List bullets: ${current} (assistant Markdown unordered lists only)`,
+							"info",
+						);
+					}
+					return;
+				}
+				let next: AssistantListBulletStyle | undefined;
+				if (arg === "toggle") next = current === "dash" ? "default" : "dash";
+				else if (arg === "fisheye") next = "default"; // legacy alias
+				else if ((ASSISTANT_LIST_BULLET_STYLES as readonly string[]).includes(arg)) {
+					next = arg as AssistantListBulletStyle;
+				}
+				if (!next) {
+					if (ctx.hasUI) {
+						ctx.ui.notify("Usage: /cc-tools bullets default | dash | toggle | status", "error");
+					}
+					return;
+				}
+				writeSettingsKey("assistantListBulletStyle", next);
+				refreshAssistantListBulletStyle(ctx);
+				if (ctx.hasUI) {
+					const sample = next === "dash" ? "- item" : "Pi theme default";
+					ctx.ui.notify(`List bullets → ${next}  (${sample})`, "info");
+				}
+				return;
+			}
+
 			if (!(TOOL_MODES as readonly string[]).includes(sub)) {
-				if (ctx.hasUI) ctx.ui.notify(`Unknown option "${sub}". Try /cc-tools status, /cc-tools branch 72, or /cc-tools group toggle.`, "error");
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						`Unknown option "${sub}". Try /cc-tools status, /cc-tools bullets dash, or /cc-tools group toggle.`,
+						"error",
+					);
+				}
 				return;
 			}
 			toolBackgroundOverride = sub as typeof toolBackgroundMode;
@@ -6413,7 +6687,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
-				let value = `\"${summarizeText(args.pattern, 40)}\"`;
+				let value = `"${summarizeText(args.pattern, 40)}"`;
 				if (args.path) value += ` in ${args.path}`;
 				return value;
 			});
@@ -6453,7 +6727,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
-				let value = `\"${summarizeText(args.pattern, 40)}\"`;
+				let value = `"${summarizeText(args.pattern, 40)}"`;
 				if (args.path) value += ` in ${args.path}`;
 				return value;
 			});

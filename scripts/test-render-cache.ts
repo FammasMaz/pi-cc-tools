@@ -1,4 +1,4 @@
-import { AssistantMessageComponent, CustomMessageComponent, UserMessageComponent } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, CustomMessageComponent, ToolExecutionComponent, UserMessageComponent } from "@earendil-works/pi-coding-agent";
 import { Container } from "@earendil-works/pi-tui";
 import { initTheme, theme } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 
@@ -232,6 +232,115 @@ const neq = (a: string[], b: string[], label: string) => {
 		throw new Error("Hermes auto-review notice did not adopt thinking-text color without extra dimming");
 	}
 	console.log("OK  Hermes notice: thinking-text color without extra dimming");
+}
+
+// ---------------------------------------------------------------------------
+// 8. Advisor call rows show configured model, never a duplicate title.
+// ---------------------------------------------------------------------------
+{
+	const realHome = process.env.HOME;
+	const tmpHome = `${realHome}/.pi-advisor-render-test-${Date.now()}`;
+	const fs = await import("node:fs");
+	fs.mkdirSync(`${tmpHome}/.config/rpiv-advisor`, { recursive: true });
+	const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+	const definition = {
+		name: "advisor",
+		label: "Advisor",
+		description: "test advisor",
+		parameters: {},
+		execute: async () => ({ content: [] }),
+	};
+	const ui = { theme, getToolsExpanded() { return false; }, notify() {}, setToolsExpanded() {} };
+	const renderAdvisor = () => {
+		const component = new ToolExecutionComponent(
+			"advisor",
+			"advisor-test",
+			{},
+			{ showImages: false },
+			definition as any,
+			ui as any,
+			process.cwd(),
+		);
+		const renderCall = (component as any).getCallRenderer();
+		const rendered = renderCall({}, theme, {
+			state: {},
+			lastComponent: undefined,
+			cwd: process.cwd(),
+			isPartial: false,
+			argsComplete: true,
+		});
+		return rendered.render(W).map(stripAnsi).join("\n");
+	};
+	process.env.HOME = tmpHome;
+	try {
+		fs.writeFileSync(
+			`${tmpHome}/.config/rpiv-advisor/advisor.json`,
+			JSON.stringify({ modelKey: "openai-codex/gpt-5.6-sol", effort: "high" }),
+		);
+		const configured = renderAdvisor();
+		if (!configured.includes("Advisor openai-codex/gpt-5.6-sol (high)")) {
+			throw new Error("advisor call did not show configured model and effort");
+		}
+		if (configured.includes("Advisor Advisor")) throw new Error("advisor title duplicated");
+
+		fs.writeFileSync(
+			`${tmpHome}/.config/rpiv-advisor/advisor.json`,
+			JSON.stringify({ modelKey: "openai-codex/gpt-5.6-sol" }),
+		);
+		const modelOnly = renderAdvisor();
+		if (!modelOnly.includes("Advisor openai-codex/gpt-5.6-sol") || modelOnly.includes("(high)")) {
+			throw new Error("advisor call did not support model-only config");
+		}
+
+		fs.rmSync(`${tmpHome}/.config/rpiv-advisor/advisor.json`);
+		const unconfigured = renderAdvisor();
+		if ((unconfigured.match(/Advisor/g) ?? []).length !== 1) {
+			throw new Error("advisor fallback did not render title only");
+		}
+		console.log("OK  advisor call: model + effort + title-only fallback");
+	} finally {
+		process.env.HOME = realHome;
+		fs.rmSync(tmpHome, { recursive: true, force: true });
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 9. Assistant list-bullet setting controls final rendered glyph.
+// ---------------------------------------------------------------------------
+{
+	const realHome = process.env.HOME;
+	const tmpHome = `${realHome}/.pi-bullet-render-test-${Date.now()}`;
+	const fs = await import("node:fs");
+	fs.mkdirSync(`${tmpHome}/.pi`, { recursive: true });
+	const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+	const ccTools = (fakePi as any).commands.get("cc-tools");
+	if (!ccTools) throw new Error("cc-tools command not registered");
+	const ctx = { hasUI: false } as any;
+	const piCircleStyle = (_marker: string) => "\x1b[90m○\x1b[0m ";
+	process.env.HOME = tmpHome;
+	try {
+		await ccTools.handler("bullets dash", ctx);
+		const dash = stripAnsi(ext.renderAssistantListBullet("- ", piCircleStyle));
+		if (dash !== "- ") {
+			throw new Error(`dash setting did not replace Pi theme circle: ${JSON.stringify(dash)}`);
+		}
+
+		await ccTools.handler("bullets default", ctx);
+		const defaultBullet = stripAnsi(ext.renderAssistantListBullet("- ", piCircleStyle));
+		if (defaultBullet !== "○ ") {
+			throw new Error(`default setting did not preserve Pi theme bullet: ${JSON.stringify(defaultBullet)}`);
+		}
+
+		await ccTools.handler("bullets fisheye", ctx); // legacy alias
+		const legacy = stripAnsi(ext.renderAssistantListBullet("- ", piCircleStyle));
+		if (legacy !== "○ ") {
+			throw new Error(`legacy fisheye setting did not migrate to Pi default: ${JSON.stringify(legacy)}`);
+		}
+		console.log("OK  assistant lists: Pi default + forced dash + legacy migration");
+	} finally {
+		process.env.HOME = realHome;
+		fs.rmSync(tmpHome, { recursive: true, force: true });
+	}
 }
 
 console.log("\nAll correctness checks passed.");
