@@ -59,7 +59,7 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
   "diffCollapsedLines": 24,
   "themeAdaptive": true,
   "diffTheme": "github-dark",
-  "assistantListBulletStyle": "fisheye"
+  "assistantListBulletStyle": "default"
 }
 ```
 
@@ -127,9 +127,9 @@ Use `/cc-tools` to control tool UI at runtime:
 /cc-tools group toggle    # toggle grouped adjacent/concurrent tool calls
 /cc-tools group off       # disable grouping (also ungroups current grouped rows)
 /cc-tools detail toggle   # same mode as Ctrl+Shift+O
-/cc-tools bullets dash    # plain markdown "-" list markers in assistant text
-/cc-tools bullets fisheye # monochrome ◉ list markers (default)
-/cc-tools bullets toggle  # flip dash ↔ fisheye
+/cc-tools bullets default # use Pi theme's native list marker
+/cc-tools bullets dash    # force plain markdown "-" markers
+/cc-tools bullets toggle  # flip default ↔ dash
 ```
 
 The settings panel lists style, grouping, extra detail, branch color, list bullets, theme-adaptive, live preview, and read/bash output modes. Each change applies immediately; the preview block under the list shows a mock tool tree for the current combination.
@@ -158,7 +158,7 @@ The settings panel lists style, grouping, extra detail, branch color, list bulle
 | `liveToolPreview` | `true` | Show a small live output preview while tools are still running |
 | `liveToolPreviewLines` | `5` | Lines shown in the collapsed live preview |
 | `diffCollapsedLines` | `24` | Diff lines before collapsing |
-| `assistantListBulletStyle` | `fisheye` | Assistant unordered list markers: `fisheye` (◉) or `dash` (`-`) |
+| `assistantListBulletStyle` | `default` | Assistant unordered list markers: Pi theme `default` or forced `dash` (`-`) |
 
 ## Notes
 

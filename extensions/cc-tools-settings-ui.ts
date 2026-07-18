@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 export type ToolStyle = "outlines" | "transparent" | "default";
-export type BulletStyle = "fisheye" | "dash";
+export type BulletStyle = "default" | "dash";
 export type BranchPreset = "theme" | "fixed-72" | "fixed-110" | "fixed-40";
 export type OutputMode = "hidden" | "summary" | "preview";
 export type BashOutputMode = "opencode" | "summary" | "preview";
@@ -84,12 +84,12 @@ const SETTING_ORDER: Array<{
 	{
 		id: "assistantListBulletStyle",
 		label: "List bullets",
-		values: ["fisheye", "dash"],
+		values: ["default", "dash"],
 		current: (s) => s.assistantListBulletStyle,
 		describe: (s) =>
 			s.assistantListBulletStyle === "dash"
-				? 'Assistant lists keep plain "-"'
-				: "Assistant lists use monochrome ◉",
+				? 'Assistant lists force plain "-"'
+				: "Assistant lists use Pi theme default",
 	},
 	{
 		id: "themeAdaptive",
@@ -347,7 +347,7 @@ export function buildCcToolsPreview(snap: CcToolsUiSnapshot, theme: Theme, focus
 
 	lines.push("");
 	lines.push(p.title("Assistant list"));
-	const bullet = snap.assistantListBulletStyle === "dash" ? "-" : "◉";
+	const bullet = snap.assistantListBulletStyle === "dash" ? "-" : "○";
 	lines.push(`  ${bullet} first item`);
 	lines.push(`  ${bullet} second item`);
 

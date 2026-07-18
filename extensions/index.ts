@@ -128,9 +128,10 @@ interface SettingsFile {
 	toolBranchColorMode?: "theme" | "fixed";
 	/**
 	 * Unordered list markers in assistant Markdown (not thinking blocks).
-	 * `fisheye` (default) → ◉ ; `dash` → keep plain `-`.
+	 * `default` delegates to Pi's theme; `dash` forces plain `-`.
+	 * Legacy `fisheye` values are treated as `default`.
 	 */
-	assistantListBulletStyle?: "fisheye" | "dash";
+	assistantListBulletStyle?: "default" | "dash" | "fisheye";
 }
 
 let _settingsCache: { value: SettingsFile; timestamp: number } | null = null;
@@ -1490,22 +1491,11 @@ const MATH_COMMANDS: Record<string, string> = {
 
 const COPY_SAFE_MARKDOWN_LINKS_FLAG = Symbol.for("pi-claude-style-tools:copy-safe-markdown-links");
 
-const ASSISTANT_LIST_BULLET_STYLES = ["fisheye", "dash"] as const;
+const ASSISTANT_LIST_BULLET_STYLES = ["default", "dash"] as const;
 type AssistantListBulletStyle = (typeof ASSISTANT_LIST_BULLET_STYLES)[number];
 
 function assistantListBulletStyle(): AssistantListBulletStyle {
-	const raw = readSettings().assistantListBulletStyle;
-	return raw === "dash" ? "dash" : "fisheye";
-}
-
-/** Unordered list marker for assistant Markdown (thinking blocks skip this path). */
-function assistantListBulletMarker(marker: string): string {
-	// Pi TUI currently passes the source marker as `-` (without its rendered
-	// spacing), while older versions passed `- `. Accept all Markdown unordered
-	// markers and preserve surrounding ANSI/spacing.
-	if (!/^((?:(?:\x1b\[[0-9;]*m)|\s)*)[-*+]/u.test(marker)) return marker;
-	const glyph = assistantListBulletStyle() === "dash" ? "-" : "◉";
-	return marker.replace(/^((?:(?:\x1b\[[0-9;]*m)|\s)*)[-*+]/u, `$1${glyph}`);
+	return readSettings().assistantListBulletStyle === "dash" ? "dash" : "default";
 }
 
 function refreshAssistantListBulletStyle(ctx: any): void {
@@ -1530,15 +1520,14 @@ export function renderAssistantListBullet(
 	marker: string,
 	listBullet?: (marker: string) => string,
 ): string {
-	const desired = assistantListBulletMarker(marker);
-	if (!listBullet) return desired;
-	const rendered = listBullet(marker);
-	const glyph = Array.from(stripAnsi(desired).trimStart())[0];
-	if (!glyph) return rendered;
-	// Pi's theme renderer chooses its own bullet glyph. Replace only that first
-	// visible glyph after styling so configured dash/fisheye survives while ANSI
-	// color and spacing remain intact.
-	return rendered.replace(/^((?:(?:\x1b\[[0-9;]*m)|\s)*)\S/u, `$1${glyph}`);
+	const rendered = listBullet ? listBullet(marker) : marker;
+	if (assistantListBulletStyle() === "default") return rendered;
+	// Preserve Pi's theme color and spacing, replacing only its first visible
+	// marker glyph. Without a theme renderer, normalize Markdown's -, *, or +.
+	if (listBullet) {
+		return rendered.replace(/^((?:(?:\x1b\[[0-9;]*m)|\s)*)\S/u, "$1-");
+	}
+	return rendered.replace(/^((?:(?:\x1b\[[0-9;]*m)|\s)*)[-*+]/u, "$1-");
 }
 
 function copySafeMarkdownTheme(theme: MarkdownThemeLike): MarkdownThemeLike {
@@ -6086,7 +6075,7 @@ export default function (pi: ExtensionAPI) {
 				break;
 			}
 			case "assistantListBulletStyle": {
-				if (value !== "fisheye" && value !== "dash") return;
+				if (value !== "default" && value !== "dash") return;
 				writeSettingsKey("assistantListBulletStyle", value);
 				refreshAssistantListBulletStyle(ctx);
 				break;
@@ -6160,7 +6149,7 @@ export default function (pi: ExtensionAPI) {
 			branchLine,
 			`  /cc-tools branch <0-255> | theme | fixed | reset`,
 			`List bullets: ${assistantListBulletStyle()} (assistant Markdown only)`,
-			`  /cc-tools bullets fisheye | dash | status`,
+			`  /cc-tools bullets default | dash | status`,
 		].join("\n"), "info");
 	};
 	pi.registerCommand("cc-tools", {
@@ -6178,7 +6167,7 @@ export default function (pi: ExtensionAPI) {
 							m === "group" ? "Toggle grouped adjacent/concurrent tool rows"
 							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
 							: m === "branch" ? "├ └ │ gray (0-255), theme, fixed, or reset"
-							: m === "bullets" ? "Assistant list markers: fisheye (◉) or dash (-)"
+							: m === "bullets" ? "Assistant list markers: Pi default or dash (-)"
 							: m === "ui" || m === "settings" ? "Open interactive settings panel with live preview"
 							: m === "status" ? "Show tool UI settings as text"
 							: m === "outlines" ? "Horizontal rules around each tool (default)"
@@ -6195,16 +6184,16 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (first === "bullets" || first === "bullet" || first === "list") {
 				const second = parts[1] ?? "";
-				const opts = ["fisheye", "dash", "status", "toggle"];
+				const opts = ["default", "dash", "status", "toggle"];
 				return opts
 					.filter((o) => o.startsWith(second))
 					.map((o) => ({
 						value: `bullets ${o}`,
 						label: o,
 						description:
-							o === "fisheye" ? "◉ monochrome bullets (default)"
-								: o === "dash" ? "Plain markdown - bullets"
-									: o === "toggle" ? "Flip fisheye ↔ dash"
+							o === "default" ? "Use Pi theme's native bullet"
+								: o === "dash" ? "Force plain markdown - bullets"
+									: o === "toggle" ? "Flip default ↔ dash"
 									: "Show current list bullet style",
 					}));
 			}
@@ -6316,21 +6305,22 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				let next: AssistantListBulletStyle | undefined;
-				if (arg === "toggle") next = current === "dash" ? "fisheye" : "dash";
+				if (arg === "toggle") next = current === "dash" ? "default" : "dash";
+				else if (arg === "fisheye") next = "default"; // legacy alias
 				else if ((ASSISTANT_LIST_BULLET_STYLES as readonly string[]).includes(arg)) {
 					next = arg as AssistantListBulletStyle;
 				}
 				if (!next) {
 					if (ctx.hasUI) {
-						ctx.ui.notify("Usage: /cc-tools bullets fisheye | dash | toggle | status", "error");
+						ctx.ui.notify("Usage: /cc-tools bullets default | dash | toggle | status", "error");
 					}
 					return;
 				}
 				writeSettingsKey("assistantListBulletStyle", next);
 				refreshAssistantListBulletStyle(ctx);
 				if (ctx.hasUI) {
-					const sample = next === "dash" ? "- item" : "◉ item";
-					ctx.ui.notify(`List bullets → ${next}  (e.g. ${sample})`, "info");
+					const sample = next === "dash" ? "- item" : "Pi theme default";
+					ctx.ui.notify(`List bullets → ${next}  (${sample})`, "info");
 				}
 				return;
 			}

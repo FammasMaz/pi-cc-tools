@@ -325,12 +325,18 @@ const neq = (a: string[], b: string[], label: string) => {
 			throw new Error(`dash setting did not replace Pi theme circle: ${JSON.stringify(dash)}`);
 		}
 
-		await ccTools.handler("bullets fisheye", ctx);
-		const fisheye = stripAnsi(ext.renderAssistantListBullet("- ", piCircleStyle));
-		if (fisheye !== "◉ ") {
-			throw new Error(`fisheye setting did not replace Pi theme circle: ${JSON.stringify(fisheye)}`);
+		await ccTools.handler("bullets default", ctx);
+		const defaultBullet = stripAnsi(ext.renderAssistantListBullet("- ", piCircleStyle));
+		if (defaultBullet !== "○ ") {
+			throw new Error(`default setting did not preserve Pi theme bullet: ${JSON.stringify(defaultBullet)}`);
 		}
-		console.log("OK  assistant lists: dash/fisheye replace final themed glyph");
+
+		await ccTools.handler("bullets fisheye", ctx); // legacy alias
+		const legacy = stripAnsi(ext.renderAssistantListBullet("- ", piCircleStyle));
+		if (legacy !== "○ ") {
+			throw new Error(`legacy fisheye setting did not migrate to Pi default: ${JSON.stringify(legacy)}`);
+		}
+		console.log("OK  assistant lists: Pi default + forced dash + legacy migration");
 	} finally {
 		process.env.HOME = realHome;
 		fs.rmSync(tmpHome, { recursive: true, force: true });
