@@ -16,5 +16,6 @@
   "showTruncationHints": false,
   "themeAdaptive": true,
   "diffTheme": "github-dark",
-  "diffColors": {}
+  "diffColors": {},
+  "assistantListBulletStyle": "fisheye"
 }

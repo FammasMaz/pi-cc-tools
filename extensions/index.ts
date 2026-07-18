@@ -116,6 +116,11 @@ interface SettingsFile {
 	toolBranchRgbGray?: number;
 	/** `fixed` (default): rgb gray 72, theme-independent. `theme`: dim → muted → borderMuted. */
 	toolBranchColorMode?: "theme" | "fixed";
+	/**
+	 * Unordered list markers in assistant Markdown (not thinking blocks).
+	 * `fisheye` (default) → ◉ ; `dash` → keep plain `-`.
+	 */
+	assistantListBulletStyle?: "fisheye" | "dash";
 }
 
 let _settingsCache: { value: SettingsFile; timestamp: number } | null = null;
@@ -1455,10 +1460,38 @@ const MATH_COMMANDS: Record<string, string> = {
 
 const COPY_SAFE_MARKDOWN_LINKS_FLAG = Symbol.for("pi-claude-style-tools:copy-safe-markdown-links");
 
-/** Unordered list marker: monochrome ◉ (fisheye) instead of "- " (thinking blocks skip this). */
+const ASSISTANT_LIST_BULLET_STYLES = ["fisheye", "dash"] as const;
+type AssistantListBulletStyle = (typeof ASSISTANT_LIST_BULLET_STYLES)[number];
+
+function assistantListBulletStyle(): AssistantListBulletStyle {
+	const raw = readSettings().assistantListBulletStyle;
+	return raw === "dash" ? "dash" : "fisheye";
+}
+
+/** Unordered list marker for assistant Markdown (thinking blocks skip this path). */
 function assistantListBulletMarker(marker: string): string {
-	if (marker.startsWith("- ")) return `◉ ${marker.slice(2)}`;
-	return marker;
+	if (!marker.startsWith("- ")) return marker;
+	// `dash` keeps stock markdown `- `; `fisheye` (default) uses monochrome ◉.
+	if (assistantListBulletStyle() === "dash") return marker;
+	return `◉ ${marker.slice(2)}`;
+}
+
+function refreshAssistantListBulletStyle(ctx: any): void {
+	_settingsCache = null;
+	bumpToolBranchVisualEpoch();
+	if (!ctx?.hasUI) return;
+	try {
+		const ui = ctx.ui as any;
+		const roots = [ui, ui?.tui, ui?.root, ui?.chatContainer, ui?.messages];
+		for (const root of roots) {
+			if (root) visitMarkdownDescendants(root, (md) => md.invalidate?.());
+		}
+		ui.setToolsExpanded?.(ui.getToolsExpanded?.());
+		ui.invalidate?.();
+		ui.requestRender?.();
+	} catch {
+		/* noop */
+	}
 }
 
 function copySafeMarkdownTheme(theme: MarkdownThemeLike): MarkdownThemeLike {
@@ -2397,7 +2430,7 @@ function stableCallSummary(ctx: any, key: string, build: () => string, reveal = 
 }
 
 function hasOwnArg(args: any, key: string): boolean {
-	return !!args && Object.prototype.hasOwnProperty.call(args, key);
+	return !!args && Object.hasOwn(args, key);
 }
 
 function fileExistsForTool(cwd: string, filePath: string): boolean {
@@ -2878,7 +2911,7 @@ function padToWidth(line: string, width: number): string {
 function markedContinuationPrefix(prefix: string): string {
 	const plain = stripAnsi(prefix);
 	// Match bare leads (`├ `/`└ `/`│ `) and legacy armed forms (`├─ `/`└─ `/`│  `).
-	const branchMatch = /^(\s*)(│  |│ |├─ |└─ |├ |└ )/.exec(plain);
+	const branchMatch = /^(\s*)(│ {2}|│ |├─ |└─ |├ |└ )/.exec(plain);
 	if (branchMatch) {
 		const indent = branchMatch[1];
 		// Keep the same structure width as the lead glyph so wraps stay aligned.
@@ -5910,7 +5943,7 @@ export default function (pi: ExtensionAPI) {
 	// /cc-tools command — control tool chrome, grouping, and detail level.
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
 	const TOOL_BOOL_MODES = ["on", "off", "toggle", "status"] as const;
-	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "branch", "status"] as const;
+	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "branch", "bullets", "status"] as const;
 	const booleanMode = (raw: string | undefined, current: boolean): boolean | "status" | undefined => {
 		const mode = raw || "toggle";
 		if (mode === "on") return true;
@@ -5936,10 +5969,12 @@ export default function (pi: ExtensionAPI) {
 			`Extra detail: ${extraToolOutputExpanded ? "on" : "off"} (${rawKeyHint("ctrl+shift+o", "toggle")})`,
 			branchLine,
 			`  /cc-tools branch <0-255> | theme | fixed | reset`,
+			`List bullets: ${assistantListBulletStyle()} (assistant Markdown only)`,
+			`  /cc-tools bullets fisheye | dash | status`,
 		].join("\n"), "info");
 	};
 	pi.registerCommand("cc-tools", {
-		description: "Control tool UI: style, grouped rows, and Ctrl+Shift+O extra-detail mode",
+		description: "Control tool UI: style, grouped rows, list bullets, and Ctrl+Shift+O extra-detail mode",
 		getArgumentCompletions(prefix) {
 			const parts = prefix.trimStart().split(/\s+/);
 			const first = parts[0] ?? "";
@@ -5953,6 +5988,7 @@ export default function (pi: ExtensionAPI) {
 							m === "group" ? "Toggle grouped adjacent/concurrent tool rows"
 							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
 							: m === "branch" ? "├ └ │ gray (0-255), theme, fixed, or reset"
+							: m === "bullets" ? "Assistant list markers: fisheye (◉) or dash (-)"
 							: m === "status" ? "Show tool UI settings"
 							: m === "outlines" ? "Horizontal rules around each tool (default)"
 							: m === "transparent" ? "No borders or backgrounds"
@@ -5965,6 +6001,21 @@ export default function (pi: ExtensionAPI) {
 				return opts
 					.filter((o) => o.startsWith(second))
 					.map((o) => ({ value: `branch ${o}`, label: o, description: "Branch connector color" }));
+			}
+			if (first === "bullets" || first === "bullet" || first === "list") {
+				const second = parts[1] ?? "";
+				const opts = ["fisheye", "dash", "status", "toggle"];
+				return opts
+					.filter((o) => o.startsWith(second))
+					.map((o) => ({
+						value: `bullets ${o}`,
+						label: o,
+						description:
+							o === "fisheye" ? "◉ monochrome bullets (default)"
+								: o === "dash" ? "Plain markdown - bullets"
+									: o === "toggle" ? "Flip fisheye ↔ dash"
+									: "Show current list bullet style",
+					}));
 			}
 			if (first === "group" || first === "detail" || first === "extra") {
 				const second = parts[1] ?? "";
@@ -6056,8 +6107,45 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			if (sub === "bullets" || sub === "bullet" || sub === "list") {
+				const arg = parts[1] ?? "status";
+				const current = assistantListBulletStyle();
+				if (arg === "status") {
+					if (ctx.hasUI) {
+						ctx.ui.notify(
+							`List bullets: ${current} (assistant Markdown unordered lists only)`,
+							"info",
+						);
+					}
+					return;
+				}
+				let next: AssistantListBulletStyle | undefined;
+				if (arg === "toggle") next = current === "dash" ? "fisheye" : "dash";
+				else if ((ASSISTANT_LIST_BULLET_STYLES as readonly string[]).includes(arg)) {
+					next = arg as AssistantListBulletStyle;
+				}
+				if (!next) {
+					if (ctx.hasUI) {
+						ctx.ui.notify("Usage: /cc-tools bullets fisheye | dash | toggle | status", "error");
+					}
+					return;
+				}
+				writeSettingsKey("assistantListBulletStyle", next);
+				refreshAssistantListBulletStyle(ctx);
+				if (ctx.hasUI) {
+					const sample = next === "dash" ? "- item" : "◉ item";
+					ctx.ui.notify(`List bullets → ${next}  (e.g. ${sample})`, "info");
+				}
+				return;
+			}
+
 			if (!(TOOL_MODES as readonly string[]).includes(sub)) {
-				if (ctx.hasUI) ctx.ui.notify(`Unknown option "${sub}". Try /cc-tools status, /cc-tools branch 72, or /cc-tools group toggle.`, "error");
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						`Unknown option "${sub}". Try /cc-tools status, /cc-tools bullets dash, or /cc-tools group toggle.`,
+						"error",
+					);
+				}
 				return;
 			}
 			toolBackgroundOverride = sub as typeof toolBackgroundMode;
@@ -6413,7 +6501,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
-				let value = `\"${summarizeText(args.pattern, 40)}\"`;
+				let value = `"${summarizeText(args.pattern, 40)}"`;
 				if (args.path) value += ` in ${args.path}`;
 				return value;
 			});
@@ -6453,7 +6541,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			const summary = stableCallSummary(ctx, "_callSummary", () => {
-				let value = `\"${summarizeText(args.pattern, 40)}\"`;
+				let value = `"${summarizeText(args.pattern, 40)}"`;
 				if (args.path) value += ` in ${args.path}`;
 				return value;
 			});
