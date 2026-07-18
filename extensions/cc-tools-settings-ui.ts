@@ -4,6 +4,7 @@
 import { getSettingsListTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import {
 	SettingsList,
+	getKeybindings,
 	type SettingItem,
 } from "@earendil-works/pi-tui";
 
@@ -409,34 +410,68 @@ export async function openCcToolsSettingsPanel(
 		(_tui: unknown, theme: Theme, _kb: unknown, done: (value?: undefined) => void) => {
 			let snap = controller.getSnapshot();
 			let lastChangedId: string | undefined;
-			let list: SettingsList = createList();
+			// Stable item objects so SettingsList keeps selection across value changes.
+			const items = toSettingItems(snap);
 			let cacheWidth: number | undefined;
 			let cacheLines: string[] | undefined;
 
-			function createList(): SettingsList {
-				return new SettingsList(
-					toSettingItems(snap),
-					Math.min(SETTING_ORDER.length + 2, 12),
-					getSettingsListTheme(),
-					(id, newValue) => {
-						controller.apply(id, newValue, ctx);
-						snap = controller.getSnapshot();
-						lastChangedId = id;
-						// Recreate list so descriptions refresh with the new values.
-						list = createList();
-						// Keep selection near the changed row.
-						const idx = SETTING_ORDER.findIndex((s) => s.id === id);
-						if (idx >= 0 && typeof (list as any).setSelectedIndex === "function") {
-							(list as any).setSelectedIndex(idx);
-						}
-						cacheWidth = undefined;
-						cacheLines = undefined;
-						ctx.ui.requestRender?.();
-					},
-					() => done(undefined),
-					{ enableSearch: true },
-				);
-			}
+			const refreshItemMeta = () => {
+				for (const def of SETTING_ORDER) {
+					const item = items.find((i) => i.id === def.id);
+					if (!item) continue;
+					item.currentValue = def.current(snap);
+					item.description = def.describe(snap);
+					item.values = [...def.values];
+				}
+			};
+
+			const applyValue = (id: string, newValue: string) => {
+				controller.apply(id, newValue, ctx);
+				snap = controller.getSnapshot();
+				lastChangedId = id;
+				refreshItemMeta();
+				// Keep SettingsList's internal currentValue in sync (same object refs,
+				// but updateValue is the public API and is cheap).
+				list.updateValue(id, newValue);
+				cacheWidth = undefined;
+				cacheLines = undefined;
+				ctx.ui.requestRender?.();
+			};
+
+			const cycleSelected = (direction: 1 | -1): boolean => {
+				const listAny = list as any;
+				const displayItems: SettingItem[] = listAny.searchEnabled
+					? (listAny.filteredItems as SettingItem[])
+					: items;
+				if (!displayItems.length) return false;
+				const idx = Math.max(0, Math.min(Number(listAny.selectedIndex) || 0, displayItems.length - 1));
+				const item = displayItems[idx];
+				if (!item?.values?.length) return false;
+				const cur = item.values.indexOf(item.currentValue);
+				const base = cur >= 0 ? cur : 0;
+				const next = (base + direction + item.values.length) % item.values.length;
+				const newValue = item.values[next]!;
+				item.currentValue = newValue;
+				applyValue(item.id, newValue);
+				// Restore selection in case anything touched it.
+				listAny.selectedIndex = idx;
+				return true;
+			};
+
+			const list = new SettingsList(
+				items,
+				Math.min(SETTING_ORDER.length + 2, 12),
+				getSettingsListTheme(),
+				(id, newValue) => {
+					// Enter/Space path from SettingsList — do not recreate the list.
+					applyValue(id, newValue);
+					// Selection stays put because we never replace SettingsList.
+				},
+				() => done(undefined),
+				{ enableSearch: true },
+			);
+
+			const kb = getKeybindings();
 
 			const panel: PanelComponent = {
 				invalidate() {
@@ -445,8 +480,14 @@ export async function openCcToolsSettingsPanel(
 					list.invalidate();
 				},
 				handleInput(data: string) {
+					// Left/right cycle the focused setting without moving selection.
+					if (kb.matches(data, "tui.editor.cursorLeft") || data === "h") {
+						if (cycleSelected(-1)) return;
+					}
+					if (kb.matches(data, "tui.editor.cursorRight") || data === "l") {
+						if (cycleSelected(1)) return;
+					}
 					list.handleInput(data);
-					// Any input may change selection description rendering inside list.
 					cacheWidth = undefined;
 					cacheLines = undefined;
 				},
@@ -455,7 +496,11 @@ export async function openCcToolsSettingsPanel(
 
 					const header = [
 						safeFg(theme, "accent", theme.bold?.("cc-tools settings") ?? "cc-tools settings") +
-							safeFg(theme, "muted", "  enter/space cycle · esc close · type to search"),
+							safeFg(
+								theme,
+								"muted",
+								"  ←/→ or enter/space cycle · esc close · type to search",
+							),
 						"",
 					];
 					const listLines = list.render(width);
