@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.75 — 2026-07-29
+
+### Fixed
+
+- **Herdr progress with spinner verbs** — themed working messages (`Cooking…`, `Syncing…`, …) no longer break [herdr](https://herdr.dev) agent progress. Stock herdr pi screen detection only matches literal `Working...`; when `HERDR_ENV=1` the spinner now reports `working` / `idle` over herdr’s socket (same `herdr:pi` lifecycle authority as the official pi integration). Spinner UI and verbs are unchanged. Outside herdr the extension is a no-op for this path.
+
 ## 1.0.74 — 2026-07-18
 
 ### Fixed

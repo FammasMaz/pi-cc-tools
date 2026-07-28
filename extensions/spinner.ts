@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import net from "node:net";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Loader } from "@earendil-works/pi-tui";
@@ -510,6 +511,162 @@ function statusText(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Herdr lifecycle reporting
+//
+// Stock herdr pi screen detection only matches the literal "Working...".
+// This extension replaces that text with themed spinner verbs (Cooking…,
+// Syncing…, …), so herdr sidebars go idle/stale while pi is actually busy.
+// When running inside herdr (HERDR_ENV=1), report working/idle over the
+// socket the same way herdr's official pi integration does. UI is unchanged.
+// ---------------------------------------------------------------------------
+
+type HerdrAgentState = "working" | "idle";
+
+const HERDR_ENV = process.env.HERDR_ENV;
+const HERDR_SOCKET_PATH = process.env.HERDR_SOCKET_PATH;
+const HERDR_SOCKET_ENDPOINT =
+	process.platform === "win32" && HERDR_SOCKET_PATH
+		? `\\\\.\\pipe\\${HERDR_SOCKET_PATH}`
+		: HERDR_SOCKET_PATH;
+const HERDR_PANE_ID = process.env.HERDR_PANE_ID;
+// Must be exactly "herdr:pi" — herdr only grants full lifecycle authority
+// (skip screen-manifest fallback) to that official source pair with agent "pi".
+const HERDR_SOURCE = "herdr:pi";
+
+function herdrEnabled(): boolean {
+	return HERDR_ENV === "1" && !!HERDR_SOCKET_PATH && !!HERDR_PANE_ID;
+}
+
+function herdrSendAttempt(request: unknown, timeoutMs: number): Promise<boolean> {
+	if (!herdrEnabled()) return Promise.resolve(true);
+
+	return new Promise((resolve) => {
+		let done = false;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const finish = (delivered: boolean) => {
+			if (done) return;
+			done = true;
+			if (timeout) clearTimeout(timeout);
+			socket.destroy();
+			resolve(delivered);
+		};
+
+		const socket = net.createConnection(HERDR_SOCKET_ENDPOINT!);
+		socket.on("error", () => finish(false));
+		socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+		socket.on("data", () => finish(true));
+		socket.on("end", () => finish(false));
+		timeout = setTimeout(() => finish(false), timeoutMs);
+		unrefTimer(timeout);
+	});
+}
+
+async function herdrSend(request: unknown): Promise<void> {
+	if (await herdrSendAttempt(request, 500)) return;
+	await herdrSendAttempt(request, 1500);
+}
+
+let herdrReportSeq = Date.now() * 1000;
+let herdrSessionId: string | undefined;
+let herdrSessionPath: string | undefined;
+let herdrSendInFlight = false;
+let herdrQueued: { state: HerdrAgentState; seq: number } | undefined;
+let herdrLastState: HerdrAgentState | undefined;
+
+function herdrNextSeq(): number {
+	herdrReportSeq += 1;
+	return herdrReportSeq;
+}
+
+function herdrUpdateSessionRef(ctx: any): void {
+	try {
+		const file = ctx?.sessionManager?.getSessionFile?.();
+		herdrSessionPath =
+			typeof file === "string" && file.startsWith("/") ? file : undefined;
+	} catch {
+		herdrSessionPath = undefined;
+	}
+
+	try {
+		const id = ctx?.sessionManager?.getSessionId?.();
+		herdrSessionId = typeof id === "string" && id.length > 0 ? id : undefined;
+	} catch {
+		herdrSessionId = undefined;
+	}
+}
+
+function herdrWithSessionRef(params: Record<string, unknown>): Record<string, unknown> {
+	if (herdrSessionPath) return { ...params, agent_session_path: herdrSessionPath };
+	if (herdrSessionId) return { ...params, agent_session_id: herdrSessionId };
+	return params;
+}
+
+function herdrCurrentSessionRef(): Record<string, unknown> | undefined {
+	if (herdrSessionPath) return { agent_session_path: herdrSessionPath };
+	if (herdrSessionId) return { agent_session_id: herdrSessionId };
+	return undefined;
+}
+
+function herdrReportSession(sessionStartSource?: string): Promise<void> {
+	const sessionRef = herdrCurrentSessionRef();
+	if (!sessionRef) return Promise.resolve();
+
+	return herdrSend({
+		id: `${HERDR_SOURCE}:session:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+		method: "pane.report_agent_session",
+		params: {
+			pane_id: HERDR_PANE_ID,
+			source: HERDR_SOURCE,
+			agent: "pi",
+			seq: herdrNextSeq(),
+			session_start_source: sessionStartSource,
+			...sessionRef,
+		},
+	});
+}
+
+function herdrSendState(state: HerdrAgentState, seq = herdrNextSeq()): Promise<void> {
+	return herdrSend({
+		id: `${HERDR_SOURCE}:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+		method: "pane.report_agent",
+		params: herdrWithSessionRef({
+			pane_id: HERDR_PANE_ID,
+			source: HERDR_SOURCE,
+			agent: "pi",
+			state,
+			seq,
+		}),
+	});
+}
+
+function herdrQueueState(state: HerdrAgentState): void {
+	herdrQueued = { state, seq: herdrNextSeq() };
+	if (!herdrSendInFlight) void herdrDrainQueue();
+}
+
+async function herdrDrainQueue(): Promise<void> {
+	if (herdrSendInFlight) return;
+	herdrSendInFlight = true;
+	try {
+		while (herdrQueued) {
+			const next = herdrQueued;
+			herdrQueued = undefined;
+			await herdrSendState(next.state, next.seq);
+		}
+	} finally {
+		herdrSendInFlight = false;
+		if (herdrQueued) void herdrDrainQueue();
+	}
+}
+
+function herdrPublishState(state: HerdrAgentState, force = false): void {
+	if (!herdrEnabled()) return;
+	if (!force && state === herdrLastState) return;
+	herdrLastState = state;
+	herdrQueueState(state);
+}
+
+// ---------------------------------------------------------------------------
 // Extension
 // ---------------------------------------------------------------------------
 
@@ -545,6 +702,9 @@ export default function (pi: ExtensionAPI) {
 	let turnActive = false;
 	let lastWorkingMessage: string | null = null;
 	let activeCtx: { ui: any; hasUI: boolean } | null = null;
+	// Root interactive session only — nested/non-UI contexts must not fight
+	// herdr state authority for this pane.
+	let herdrRootSession = false;
 
 	function getEffortSuffix(): string {
 		try {
@@ -709,6 +869,31 @@ export default function (pi: ExtensionAPI) {
 		restoreDefaultWorkingMessage();
 	}
 
+	function herdrMarkWorking(ctx?: any): void {
+		if (!herdrRootSession) return;
+		if (ctx) herdrUpdateSessionRef(ctx);
+		void herdrReportSession();
+		herdrPublishState("working");
+	}
+
+	function herdrMarkIdle(ctx?: any, force = false): void {
+		if (!herdrRootSession) return;
+		if (ctx) herdrUpdateSessionRef(ctx);
+		herdrPublishState("idle", force);
+	}
+
+	// session_start: claim root UI session + announce native session identity.
+	pi.on("session_start", async (event, ctx) => {
+		if (!herdrEnabled()) return;
+		if (ctx?.hasUI !== true) return;
+		herdrRootSession = true;
+		herdrUpdateSessionRef(ctx);
+		await herdrReportSession((event as any)?.reason);
+		// Reload mid-run: isIdle() false means work is still in flight.
+		const working = ctx?.isIdle?.() === false;
+		herdrPublishState(working ? "working" : "idle", true);
+	});
+
 	function onThinkingEnd(): void {
 		if (thinkingStatus !== "thinking") return;
 		const duration = Date.now() - thinkingStartTime;
@@ -728,8 +913,9 @@ export default function (pi: ExtensionAPI) {
 		if (!agentStartTime) agentStartTime = Date.now();
 	});
 
-	pi.on("agent_start", async () => {
+	pi.on("agent_start", async (_event, ctx) => {
 		if (!agentStartTime) agentStartTime = Date.now();
+		herdrMarkWorking(ctx);
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
@@ -749,6 +935,9 @@ export default function (pi: ExtensionAPI) {
 			scheduleThoughtStatusClear();
 		}
 		startRefreshLoop();
+		// turn_start is the earliest UI-visible busy signal; cover cases where
+		// agent_start already fired or is ordering-sensitive across reloads.
+		herdrMarkWorking(ctx);
 	});
 
 	pi.on("message_update", async (event, ctx) => {
@@ -843,9 +1032,23 @@ export default function (pi: ExtensionAPI) {
 		clearDisplay();
 	});
 
+	// Prefer agent_settled over agent_end: pi may still auto-retry, compact, or
+	// drain a follow-up queue after agent_end. Settled means truly idle.
+	// Cast: agent_settled landed after some older @earendil-works/pi-coding-agent
+	// type packages still used for local typecheck; runtime pi has the event.
+	(pi as ExtensionAPI & {
+		on(event: "agent_settled", handler: (event: unknown, ctx: any) => void | Promise<void>): void;
+	}).on("agent_settled", async (_event, ctx) => {
+		if (!herdrRootSession) return;
+		if (ctx?.isIdle?.() !== true) return;
+		herdrMarkIdle(ctx);
+	});
+
 	pi.on("session_shutdown", async () => {
 		turnActive = false;
 		clearDisplay();
+		herdrMarkIdle(undefined, true);
+		herdrRootSession = false;
 		activeCtx = null;
 	});
 }
