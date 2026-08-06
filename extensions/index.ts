@@ -1494,6 +1494,15 @@ function hasInlineMathMarkers(text: string): boolean {
 	return text.includes("\\(") || text.includes("$");
 }
 
+// Magic Context prefixes live assistant text with §N§ while the response is
+// streaming and removes that metadata on message_end. Keep the transient tag
+// out of the display without mutating the message used by context management.
+const MAGIC_CONTEXT_TAG_LINE_PREFIX = /(^|\r?\n)[ \t]*(?:§\d+§[ \t]*)+/g;
+
+function stripTransientMagicContextTags(text: string): string {
+	return text.replace(MAGIC_CONTEXT_TAG_LINE_PREFIX, "$1");
+}
+
 function replaceInlineMath(text: string): string {
 	if (!hasInlineMathMarkers(text)) return text;
 	const withParens = text.replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => {
@@ -1702,7 +1711,7 @@ class DottedParagraph {
 
 	constructor(text: string, markdownTheme: MarkdownThemeLike) {
 		this.markdownTheme = copySafeMarkdownTheme(markdownTheme);
-		this.segments = buildParagraphSegments(text, this.markdownTheme);
+		this.segments = buildParagraphSegments(stripTransientMagicContextTags(text), this.markdownTheme);
 	}
 
 	invalidate(): void {
