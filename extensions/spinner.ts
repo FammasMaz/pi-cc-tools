@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import net from "node:net";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Loader } from "@earendil-works/pi-tui";
@@ -517,7 +519,9 @@ function statusText(text: string): string {
 // This extension replaces that text with themed spinner verbs (Cooking…,
 // Syncing…, …), so herdr sidebars go idle/stale while pi is actually busy.
 // When running inside herdr (HERDR_ENV=1), report working/idle over the
-// socket the same way herdr's official pi integration does. UI is unchanged.
+// socket only when herdr's official pi integration is not installed. The
+// official integration owns the same lifecycle authority and must remain the
+// sole reporter when present. UI is unchanged.
 // ---------------------------------------------------------------------------
 
 type HerdrAgentState = "working" | "idle";
@@ -532,9 +536,33 @@ const HERDR_PANE_ID = process.env.HERDR_PANE_ID;
 // Must be exactly "herdr:pi" — herdr only grants full lifecycle authority
 // (skip screen-manifest fallback) to that official source pair with agent "pi".
 const HERDR_SOURCE = "herdr:pi";
+const HERDR_INTEGRATION_MARKER = "HERDR_INTEGRATION_ID=pi";
+let officialHerdrIntegrationInstalled: boolean | undefined;
+
+function hasOfficialHerdrIntegration(): boolean {
+	if (officialHerdrIntegrationInstalled !== undefined) {
+		return officialHerdrIntegrationInstalled;
+	}
+
+	const agentDir = process.env.PI_CODING_AGENT_DIR
+		|| join(homedir(), ".pi", "agent");
+
+	try {
+		const integrationPath = join(agentDir, "extensions", "herdr-agent-state.ts");
+		officialHerdrIntegrationInstalled =
+			existsSync(integrationPath)
+			&& readFileSync(integrationPath, "utf8").includes(HERDR_INTEGRATION_MARKER);
+	} catch {
+		officialHerdrIntegrationInstalled = false;
+	}
+	return officialHerdrIntegrationInstalled;
+}
 
 function herdrEnabled(): boolean {
-	return HERDR_ENV === "1" && !!HERDR_SOCKET_PATH && !!HERDR_PANE_ID;
+	return HERDR_ENV === "1"
+		&& !!HERDR_SOCKET_PATH
+		&& !!HERDR_PANE_ID
+		&& !hasOfficialHerdrIntegration();
 }
 
 function herdrSendAttempt(request: unknown, timeoutMs: number): Promise<boolean> {
