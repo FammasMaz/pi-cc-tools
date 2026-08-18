@@ -2086,7 +2086,7 @@ function patchUserMessageRender(): void {
 		if (!Array.isArray(lines) || lines.length === 0) return lines;
 		const rendered = [
 			roundedUserBorder(borderWidth, true),
-			...lines.map((line: string) => borderedUserMessageLine(line, borderWidth)),
+			...lines.slice(1, -1).map((line: string) => borderedUserMessageLine(line, borderWidth)),
 			roundedUserBorder(borderWidth, false),
 		];
 		const clamped = rendered.map((line) => clampLineWidth(line, borderWidth));
