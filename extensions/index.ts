@@ -44,6 +44,12 @@ import {
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 
+import {
+	buildBashCommandPresentation,
+	limitBashOutline,
+	omitBashHeadlineFromOutline,
+} from "./bash-command";
+
 const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
 const TRANSPARENT_RESET = `${RESET}${TRANSPARENT_BG}`;
@@ -67,6 +73,7 @@ const CUSTOM_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-cust
 const USER_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-user-message-render");
 const UI_NOTIFY_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-ui-notifications-v2");
 const WRAP_MARK = "\uE000";
+const CLIP_MARK = "\uE001";
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_IMAGE_PREFIX = "\x1b]1337;File=";
 
@@ -84,6 +91,8 @@ interface SettingsFile {
 	groupToolCalls?: boolean;
 	bashOutputMode?: "opencode" | "summary" | "preview";
 	bashCollapsedLines?: number;
+	/** Command outline rows shown while bash is running or after failure. Defaults to 4. */
+	bashCommandPreviewLines?: number;
 	/** Show a small live output preview while tools are still running. Defaults to true. */
 	liveToolPreview?: boolean;
 	/** Number of live output lines to show while collapsed. Defaults to 5. */
@@ -660,7 +669,7 @@ function getToolArgSummary(tool: any): string {
 		if (parts.length > 0) value += ` (${parts.join(", ")})`;
 		return value;
 	}
-	if (name === "bash") return summarizeText(args.command ?? "", 72);
+	if (name === "bash") return buildBashCommandPresentation(args.command ?? "").headline;
 	if (name === "grep") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "find") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "ls") return shortPath(process.cwd(), args.path ?? ".");
@@ -671,7 +680,7 @@ function getToolCallLine(tool: any): string {
 	const value = (tool as any)?.callRendererComponent?.value;
 	if (typeof value === "string" && value.trim()) {
 		const line = value.split("\n").find((line) => stripAnsi(line).trim()) ?? value;
-		return line.replaceAll(WRAP_MARK, "");
+		return line.replaceAll(WRAP_MARK, "").replaceAll(CLIP_MARK, "");
 	}
 	const summary = getToolArgSummary(tool);
 	const label = humanizeToolName(getToolName(tool));
@@ -2628,6 +2637,10 @@ function withBranch(content: string, theme: Theme, _isError = false, continued =
 	return `${branchLead(first, continued, theme)}\n${rest.join("\n")}`;
 }
 
+function withClippedBranch(content: string, theme: Theme, continued = false): string {
+	return withBranch(content, theme, false, continued).replaceAll(WRAP_MARK, CLIP_MARK);
+}
+
 function withFinalBranchBlock(content: string, theme: Theme, isError = false): string {
 	if (!content || !content.trim()) return "";
 	const lines = content.split("\n");
@@ -2898,6 +2911,15 @@ function markedContinuationPrefix(prefix: string): string {
 }
 
 function wrapMarkedLine(line: string, width: number): string[] {
+	const clipIndex = line.indexOf(CLIP_MARK);
+	if (clipIndex !== -1) {
+		const prefix = line.slice(0, clipIndex);
+		const body = line.slice(clipIndex + CLIP_MARK.length);
+		const bodyWidth = Math.max(1, width - visibleWidth(prefix));
+		if (visibleWidth(body) <= bodyWidth) return [`${prefix}${body}`];
+		const hint = "…";
+		return [`${prefix}${truncateToWidth(body, Math.max(0, bodyWidth - visibleWidth(hint)), "", false)}${hint}`];
+	}
 	const markerIndex = line.indexOf(WRAP_MARK);
 	if (markerIndex === -1) return wrapTextWithAnsi(line, width);
 	const prefix = line.slice(0, markerIndex);
@@ -2949,7 +2971,9 @@ class ToolText extends Text {
 		}
 		const contentWidth = Math.max(1, width);
 		const lines = this.value.replace(/\t/g, "   ").split("\n");
-		const rendered = lines.flatMap((line) => wrapMarkedLine(line, contentWidth)).map((line) => padToWidth(line, width));
+		const rendered = lines
+			.flatMap((line) => wrapMarkedLine(line, contentWidth))
+			.map((line) => padToWidth(line, width));
 		this.toolCachedValue = this.value;
 		this.toolCachedWidth = width;
 		this.toolCachedLines = rendered;
@@ -2981,6 +3005,33 @@ function expandedPreviewLimit(): number {
 function bashCollapsedLimit(): number {
 	const value = readSettings().bashCollapsedLines;
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 10;
+}
+
+function bashCommandPreviewLimit(): number {
+	const value = readSettings().bashCommandPreviewLines;
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 4;
+}
+
+function renderBashCommandBlock(
+	command: string,
+	expanded: boolean,
+	theme: Theme,
+): string {
+	const presentation = buildBashCommandPresentation(command);
+	const limit = bashCommandPreviewLimit();
+	if (!expanded && (limit === 0 || presentation.sourceLineCount < 2)) return "";
+	const sourceLimit = expandedPreviewLimit();
+	const lines = expanded
+		? presentation.sourceLines.slice(0, sourceLimit)
+		: limitBashOutline(omitBashHeadlineFromOutline(presentation), limit);
+	if (lines.length === 0) return "";
+	if (expanded && presentation.sourceLines.length > sourceLimit) {
+		lines.push(`... ${presentation.sourceLines.length - sourceLimit} more command lines`);
+	}
+	const label = theme.fg("muted", "command");
+	const body = lines.map((line) => theme.fg("accent", line || " ")).join("\n");
+	const content = `${label}\n${body}`;
+	return expanded ? withBranch(content, theme, false, true) : withClippedBranch(content, theme, true);
 }
 
 function liveToolPreviewEnabled(): boolean {
@@ -6361,12 +6412,20 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			const rewrite = ensureRtkRewriteForContext(ctx, args);
-			const summary = stableCallSummary(ctx, "_callSummary", () => summarizeText(args.command, 72));
+			const command = typeof args.command === "string" ? args.command : "";
+			const summary = stableCallSummary(ctx, "_bashHeadline", () => buildBashCommandPresentation(command).headline);
 			const rtkBadge = rewrite ? theme.fg("muted", " (RTK)") : "";
-			return makeText(
-				ctx.lastComponent,
-				toolHeader("Bash", `${summary}${rtkBadge}`, theme, toolStatusDot(ctx, theme), liveLineCountTrailing(ctx, theme)),
-			);
+			const header = toolHeader(
+				"Bash",
+				`${summary}${rtkBadge}`,
+				theme,
+				toolStatusDot(ctx, theme),
+				liveLineCountTrailing(ctx, theme),
+			).replace(WRAP_MARK, CLIP_MARK);
+			const status = ctx?.state?._toolStatus;
+			const showCommand = ctx.argsComplete === true && (status === "pending" || status === "error" || ctx.expanded === true);
+			const commandBlock = showCommand ? renderBashCommandBlock(command, ctx.expanded === true, theme) : "";
+			return makeText(ctx.lastComponent, commandBlock ? `${header}\n${commandBlock}` : header);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			const details = result.details as BashToolDetails | undefined;
