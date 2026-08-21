@@ -1392,10 +1392,6 @@ function workedDurationText(ms: number, sessionTotalMs?: number, turns?: number)
 	return `${text}${RESET}`;
 }
 
-function inlineWorkedDurationText(ms: number, sessionTotalMs?: number, turns?: number): string {
-	return workedDurationText(ms, sessionTotalMs, turns);
-}
-
 function isWorkedDurationLine(line: string): boolean {
 	return line.includes(WORKED_DURATION_MARKER) && /^✻ Turn took [^\r\n]+$/.test(stripAnsi(line).trim());
 }
@@ -1415,15 +1411,6 @@ function hasWorkedDurationLine(message: any): boolean {
 		if (block?.type !== "text" || typeof block.text !== "string" || !block.text.includes(WORKED_DURATION_MARKER)) return false;
 		return block.text.split(/\r?\n/).some(isWorkedDurationLine);
 	});
-}
-
-function appendWorkedDurationLine(message: any, durationMs: number, sessionTotalMs?: number, turns?: number): void {
-	if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return;
-	const textBlocks = message.content.filter((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim());
-	const lastText = textBlocks[textBlocks.length - 1];
-	if (!lastText) return;
-	const text = lastText.text.includes(WORKED_DURATION_MARKER) ? stripWorkedDurationLine(lastText.text) : lastText.text;
-	lastText.text = `${text.trimEnd()}\n\n${inlineWorkedDurationText(durationMs, sessionTotalMs, turns)}`;
 }
 
 type MarkdownThemeLike = ConstructorParameters<typeof Markdown>[3];
@@ -2156,16 +2143,11 @@ function patchAssistantMessages(): void {
 		const explicitSessionTotal = (message as any)[WORKED_SESSION_TOTAL_KEY];
 		const explicitTurns = (message as any)[WORKED_TURNS_KEY];
 		// The "Turn took" line must only appear once the stream has truly closed.
-		// `message.stopReason === "stop"` is NOT a safe "finished" signal here: the
-		// Anthropic provider initializes the live message's stopReason to "stop" at
-		// creation and only updates it to the real value when `message_delta` arrives
-		// near the end of the stream — so it is already "stop" while text is still
-		// streaming, which made the line appear mid-stream. `explicitDuration` is
-		// stamped onto the message by the `message_end` handler (which fires after
-		// `message_delta`, when stopReason is the real final value), so gating on it
-		// guarantees the line shows only after the run is actually done. The line is
-		// baked into the message text at message_end; this child is just a fallback
-		// for re-renders where that baked text isn't present.
+		// `message.stopReason === "stop"` is not a safe "finished" signal here because
+		// providers may initialize a live message with that value. The `message_end`
+		// handler stamps `explicitDuration` after the final stream event. Render the
+		// styled line as a TUI child so ANSI presentation never enters message content
+		// or persisted session transcripts.
 		const isFinalAssistantMessage = message.stopReason === "stop";
 		const workedDuration = typeof explicitDuration === "number" ? explicitDuration : undefined;
 		const workedSessionTotal = typeof explicitSessionTotal === "number"
@@ -4901,11 +4883,8 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 				(message as any)[WORKED_DURATION_KEY] = durationMs;
 				if (typeof sessionTotalMs === "number") (message as any)[WORKED_SESSION_TOTAL_KEY] = sessionTotalMs;
 				if (typeof turns === "number") (message as any)[WORKED_TURNS_KEY] = turns;
-				// Mutate the message itself before pi renders/persists it. This is more
-				// reliable than the spinner because pi removes the loader on agent_end,
-				// and more reliable than component monkey-patching when extensions are
-				// loaded from a different package instance than the running TUI.
-				appendWorkedDurationLine(message, durationMs, sessionTotalMs, turns);
+				// Duration metadata drives the assistant component's TUI-only status line.
+				// Message content stays presentation-neutral for persistence and consumers.
 			}
 			currentAssistantMessageStartMs = undefined;
 		}

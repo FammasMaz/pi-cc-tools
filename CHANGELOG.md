@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Fixed
+
+- **Final timing status stays presentation-only** - the `Turn took` line renders as a styled TUI component without adding ANSI escapes or display text to persisted assistant messages.
+
 ## 1.0.75 — 2026-07-29
 
 ### Fixed
