@@ -3846,7 +3846,7 @@ function termW(): number {
 }
 
 function branchDiffWidth(): number {
-	return Math.max(40, termW() - 8);
+	return Math.max(40, termW() - 2);
 }
 
 function adaptiveWrapRows(tw?: number): number {
