@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.78 — 2026-08-22
+
+### Fixed
+
+- **Hide transient Magic Context tags** — dynamically filter Magic Context tags (like `§N§`) from all Markdown view components in the Terminal UI. This covers thinking blocks, user messages, assistant prose, and subagent frames, without mutating the underlying message text content or breaking LLM prompt tracking.
+
 ## 1.0.77 — 2026-08-21
 
 ### Fixed
