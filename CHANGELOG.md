@@ -3,6 +3,18 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.77 — 2026-08-21
+
+### Fixed
+
+- **Dynamic Turn Took lines** — the end line `✻ Turn took xs` is now rendered dynamically in the Terminal UI instead of being baked into the message text content. This avoids polluting saved session databases and other UIs (like VSCode or web interfaces), and prevents interference with tools like TPS counters that read the message text.
+
+## 1.0.76 — 2026-08-07
+
+### Fixed
+
+- **Hide transient context tags** — hide transient context tags in streaming prose.
+
 ## 1.0.75 — 2026-07-29
 
 ### Fixed
