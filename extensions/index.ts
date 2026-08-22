@@ -1783,7 +1783,7 @@ class ThinkingParagraph {
 		_markdownTheme: ConstructorParameters<typeof Markdown>[3],
 		_defaultTextStyle?: ConstructorParameters<typeof Markdown>[4],
 	) {
-		this.text = text;
+		this.text = stripTransientMagicContextTags(text);
 	}
 
 	private thinkingMarkdown(): InstanceType<typeof Markdown> {
@@ -1961,6 +1961,16 @@ function patchCustomMessageRender(): void {
 		syncToolBackgroundMode();
 		const cached = messageRenderCacheHit(this, width);
 		if (cached) return cached;
+		visitMarkdownDescendants(this, (child) => {
+			const markdownAny = child as any;
+			if (typeof markdownAny.text === "string") {
+				const stripped = stripTransientMagicContextTags(markdownAny.text);
+				if (stripped !== markdownAny.text) {
+					markdownAny.text = stripped;
+					child.invalidate?.();
+				}
+			}
+		});
 		const lines = originalRender.call(this, width);
 		if (!Array.isArray(lines)) return lines;
 		const result = isSubagentNotificationMessage(this?.message)
@@ -2058,6 +2068,13 @@ function patchUserMessageRender(): void {
 		if (cached) return cached;
 		visitMarkdownDescendants(this, (child) => {
 			const markdownAny = child as any;
+			if (typeof markdownAny.text === "string") {
+				const stripped = stripTransientMagicContextTags(markdownAny.text);
+				if (stripped !== markdownAny.text) {
+					markdownAny.text = stripped;
+					child.invalidate?.();
+				}
+			}
 			makeMarkdownLinksCopySafe(child);
 			if (markdownAny.defaultTextStyle?.bgColor) {
 				markdownAny.defaultTextStyle.bgColor = undefined;
@@ -2087,6 +2104,16 @@ function patchAssistantMessages(): void {
 		proto.render = function patchedAssistantMessageRender(width: number) {
 			const cached = messageRenderCacheHit(this, width);
 			if (cached) return cached;
+			visitMarkdownDescendants(this, (child) => {
+				const markdownAny = child as any;
+				if (typeof markdownAny.text === "string") {
+					const stripped = stripTransientMagicContextTags(markdownAny.text);
+					if (stripped !== markdownAny.text) {
+						markdownAny.text = stripped;
+						child.invalidate?.();
+					}
+				}
+			});
 			const lines = originalRender.call(this, width);
 			if (!Array.isArray(lines) || lines.length === 0) return lines;
 			if ((this as any).hasToolCalls) {
