@@ -1408,14 +1408,7 @@ function hasWorkedDurationLine(message: any): boolean {
 	});
 }
 
-function appendWorkedDurationLine(message: any, durationMs: number, sessionTotalMs?: number, turns?: number): void {
-	if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return;
-	const textBlocks = message.content.filter((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim());
-	const lastText = textBlocks[textBlocks.length - 1];
-	if (!lastText) return;
-	const text = lastText.text.includes(WORKED_DURATION_MARKER) ? stripWorkedDurationLine(lastText.text) : lastText.text;
-	lastText.text = `${text.trimEnd()}\n\n${inlineWorkedDurationText(durationMs, sessionTotalMs, turns)}`;
-}
+
 
 type MarkdownThemeLike = ConstructorParameters<typeof Markdown>[3];
 
@@ -4850,15 +4843,14 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 				(message as any)[WORKED_DURATION_KEY] = durationMs;
 				if (typeof sessionTotalMs === "number") (message as any)[WORKED_SESSION_TOTAL_KEY] = sessionTotalMs;
 				if (typeof turns === "number") (message as any)[WORKED_TURNS_KEY] = turns;
-				// Mutate the message itself before pi renders/persists it. This is more
-				// reliable than the spinner because pi removes the loader on agent_end,
-				// and more reliable than component monkey-patching when extensions are
-				// loaded from a different package instance than the running TUI.
-				appendWorkedDurationLine(message, durationMs, sessionTotalMs, turns);
 			}
 			currentAssistantMessageStartMs = undefined;
 		}
 		patchMessage(event, ctx.ui?.theme);
+		try {
+			(ctx as any)?.ui?.invalidate?.();
+			(ctx as any)?.ui?.requestRender?.();
+		} catch { /* noop */ }
 	});
 	pi.on("agent_end", async () => {
 		currentAgentWorkStartMs = undefined;
