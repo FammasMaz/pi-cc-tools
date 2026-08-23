@@ -1218,6 +1218,7 @@ const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 const WORKED_DURATION_KEY = "_piClaudeStyleWorkedDurationMs";
+const LIVE_THINKING_KEY = Symbol.for("pi-claude-style-tools:live-thinking");
 const WORKED_START_KEY = "_piClaudeStyleWorkedStartMs";
 const WORKED_SESSION_TOTAL_KEY = "_piClaudeStyleWorkedSessionTotalMs";
 const WORKED_TURNS_KEY = "_piClaudeStyleWorkedTurns";
@@ -2028,16 +2029,24 @@ function patchAssistantMessages(): void {
 		if (!message || !Array.isArray(message.content)) {
 			return originalUpdateContent.call(this, message);
 		}
-		if ((this as any).hideThinkingBlock && messageHasThinkingContent(message)) {
+		const thinkingCollapsed = !!(this as any).hideThinkingBlock;
+		const showLiveThinking = thinkingCollapsed && (message as any)[LIVE_THINKING_KEY] === true;
+		if (thinkingCollapsed && messageHasThinkingContent(message)) {
 			// Pi wraps this in theme.italic/fg again — keep plain label for the placeholder pass.
 			(this as any).hiddenThinkingLabel = "Thinking…";
 		}
-		// Call original to build all children (text, thinking, spacers, errors)
-		originalUpdateContent.call(this, message);
+		// Live thinking uses Pi's expanded content builder without changing the
+		// user's persistent expansion state.
+		if (showLiveThinking) (this as any).hideThinkingBlock = false;
+		try {
+			originalUpdateContent.call(this, message);
+		} finally {
+			if (showLiveThinking) (this as any).hideThinkingBlock = true;
+		}
 		// Replace text-block Markdown children with DottedParagraph wrappers
 		const container = (this as any).contentContainer;
 		if (!container?.children) return;
-		if ((this as any).hideThinkingBlock && messageHasThinkingContent(message)) {
+		if (thinkingCollapsed && !showLiveThinking && messageHasThinkingContent(message)) {
 			removeHiddenThinkingPlaceholders(container);
 		}
 		const mdTheme = (this as any).markdownTheme;
@@ -4687,6 +4696,29 @@ function prefixThinkingLine(text: string, _theme: Theme | undefined): string {
 }
 
 function registerThinkingLabels(pi: ExtensionAPI): void {
+	function refreshThinkingDisplay(ctx: any): void {
+		const refresh = () => {
+			try {
+				ctx?.ui?.invalidate?.();
+				ctx?.ui?.requestRender?.();
+			} catch { /* noop */ }
+		};
+		refresh();
+		const timer = setTimeout(refresh, 0);
+		if (typeof timer === "object" && "unref" in timer) timer.unref();
+	}
+	function trackLiveThinking(event: any, ctx: any): void {
+		const streamEvent = event?.assistantMessageEvent;
+		const message = event?.message;
+		if (message?.role !== "assistant" || !streamEvent) return;
+		if (streamEvent.type === "thinking_start") {
+			(message as any)[LIVE_THINKING_KEY] = true;
+			refreshThinkingDisplay(ctx);
+		} else if (streamEvent.type === "thinking_end") {
+			delete (message as any)[LIVE_THINKING_KEY];
+			refreshThinkingDisplay(ctx);
+		}
+	}
 	const patchMessage = (event: any, theme?: Theme) => {
 		// Keep theme-derived border / dim text colors in sync with the
 		// active pi theme. Cheap when the theme hasn't changed (identity check).
@@ -4727,11 +4759,14 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		}
 	});
 	pi.on("message_update", async (event, ctx) => {
+		trackLiveThinking(event, ctx);
 		patchMessage(event, ctx.ui?.theme);
 	});
 	pi.on("message_end", async (event, ctx) => {
 		const message = (event as any)?.message;
 		if (message?.role === "assistant") {
+			delete (message as any)[LIVE_THINKING_KEY];
+			refreshThinkingDisplay(ctx);
 			const started = typeof currentAgentWorkStartMs === "number"
 				? currentAgentWorkStartMs
 				: typeof (message as any)[WORKED_START_KEY] === "number"
