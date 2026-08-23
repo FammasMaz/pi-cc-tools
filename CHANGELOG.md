@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.79 — 2026-08-23
+
+### Fixed
+
+- **Hide Magic Context tags in tool output** — tool result renderers now receive sanitized text, so transient `§N§` tags (including live-prefixed streaming chunks and queued ctx_reduce output replayed from history) no longer appear in tool rows. Storage is never mutated — result blocks are cloned only when a tag is present, so context management keeps its data. Also covers the `formatToolExecution` fallback path for renderer-less tools.
+
 ## 1.0.78 — 2026-08-22
 
 ### Fixed
