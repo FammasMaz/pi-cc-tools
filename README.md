@@ -21,7 +21,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Adaptive edit/write diffs** with split or unified layouts, syntax highlighting, and inline word-level emphasis
 - **Diff stat bar** with colored add/remove summary and hunk metadata
 - **Progressive collapsed diff hints** that shorten on narrow terminals
-- **Live thinking traces** that stream in place and collapse to zero height when complete
+- **Visible thinking traces** with context sanitization and zero-height collapsed traces
 - **MCP-aware rendering** with hidden, summary, and preview modes
 - **Configurable output modes** for read, search, bash, and MCP results
 - **Live running previews** that show a few output lines for active tool calls (latest lines for bash), persisting until the next tool/text activity
@@ -148,13 +148,6 @@ Use `/cc-tools` to control tool UI at runtime:
 | `liveToolPreview` | `true` | Show a small live output preview while tools are still running |
 | `liveToolPreviewLines` | `5` | Lines shown in the collapsed live preview |
 | `diffCollapsedLines` | `24` | Diff lines before collapsing |
-
-### Thinking display
-
-Collapsed thinking streams remain visible while the model is reasoning and disappear
-when the thinking phase completes. Ctrl+O keeps expanded thinking visible in the
-transcript. Thinking content remains available to the model and in the session data;
-this behavior only changes TUI presentation.
 
 ## Notes
 
