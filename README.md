@@ -21,7 +21,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Adaptive edit/write diffs** with split or unified layouts, syntax highlighting, and inline word-level emphasis
 - **Diff stat bar** with colored add/remove summary and hunk metadata
 - **Progressive collapsed diff hints** that shorten on narrow terminals
-- **Thinking labels** during streaming and final messages, with context sanitization
+- **Visible thinking traces** with context sanitization and zero-height collapsed traces
 - **MCP-aware rendering** with hidden, summary, and preview modes
 - **Configurable output modes** for read, search, bash, and MCP results
 - **Live running previews** that show a few output lines for active tool calls (latest lines for bash), persisting until the next tool/text activity
@@ -70,7 +70,7 @@ When `themeAdaptive` is `true` (default), the following colors are derived from 
 | User box, tool rules, code fences | `dim` → `muted` → `borderMuted` → `thinkingText` |
 | Branch connectors (`├`, `└`, `│`) | **fixed rgb(72)** by default (theme-independent); `/cc-tools branch theme` to follow pi theme |
 | "✻ Turn took Ns" line (final message only, with session total + turn count) | `muted` |
-| Thinking-block text and `∴` marker (marker hidden when thinking is collapsed) | `muted` |
+| Expanded thinking-block text and `∴` marker | `muted` |
 | Diff add/remove accents | `toolDiffAdded` / `toolDiffRemoved` |
 | Diff background tints | mixed against `toolSuccessBg` base |
 | Spinner verb text (`Working…`) | `borderAccent` (fallback: `accent`) |

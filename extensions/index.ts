@@ -1218,18 +1218,10 @@ const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 const WORKED_DURATION_KEY = "_piClaudeStyleWorkedDurationMs";
-const THINKING_DURATION_KEY = "_piClaudeStyleThinkingDurationMs";
-const THINKING_ACTIVE_KEY = "_piClaudeStyleThinkingActive";
 const WORKED_START_KEY = "_piClaudeStyleWorkedStartMs";
 const WORKED_SESSION_TOTAL_KEY = "_piClaudeStyleWorkedSessionTotalMs";
 const WORKED_TURNS_KEY = "_piClaudeStyleWorkedTurns";
 const WORKED_DURATION_MARKER = "Turn took";
-const MIN_THINKING_SUMMARY_MS = 100;
-
-let lastThinkingBlockDurationMs: number | undefined;
-let thinkingBlockStartMs = 0;
-/** True from thinking_start until thinking_end on the current assistant stream. */
-let thinkingBlockInFlight = false;
 // WORKED_LINE_FG is theme-derived (from "muted") when themeAdaptive is on.
 let WORKED_LINE_FG = "\x1b[38;2;140;140;140m";
 let currentAgentWorkStartMs: number | undefined;
@@ -1267,12 +1259,6 @@ function formatWorkedDuration(ms: number): string {
 	return `${minutes}m ${seconds}s`;
 }
 
-function formatThoughtDuration(ms: number): string {
-	const safeMs = Math.max(0, Number.isFinite(ms) ? ms : 0);
-	if (safeMs < 60_000) return `${Math.max(1, Math.round(safeMs / 1000))}s`;
-	return formatWorkedDuration(safeMs);
-}
-
 /** Session-total duration: seconds are always shown; minutes and hours are
  *  added only once the session has actually lasted that long.
  *  e.g. 45s, 12m 30s, 1h 12m 30s. */
@@ -1290,78 +1276,6 @@ function formatSessionTotal(ms: number): string {
 
 function pluralizeTurns(n: number): string {
 	return `${n} turn${n === 1 ? "" : "s"}`;
-}
-
-function thinkingSummaryStyledText(body: string): string {
-	// Preserve the visible thinking text column while omitting ∴ when collapsed.
-	return `   ${WORKED_LINE_FG}${body}${RESET}`;
-}
-
-function thinkingActiveSummaryText(): string {
-	return thinkingSummaryStyledText("Thinking…");
-}
-
-function thoughtDurationSummaryText(ms: number): string {
-	return thinkingSummaryStyledText(`Thought for ${formatThoughtDuration(ms)}`);
-}
-
-/** Single-line hidden thinking row — no Text paddingX or thinking symbol. */
-class HiddenThinkingSummary {
-	private summaryText: string;
-	private cachedWidth?: number;
-	private cachedLines?: string[];
-
-	constructor(summaryText: string) {
-		this.summaryText = summaryText;
-	}
-
-	setSummary(summaryText: string): void {
-		this.summaryText = summaryText;
-		this.invalidate();
-	}
-
-	invalidate(): void {
-		this.cachedWidth = undefined;
-		this.cachedLines = undefined;
-	}
-
-	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
-		const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
-		if (safeWidth <= 0) {
-			this.cachedWidth = width;
-			this.cachedLines = [""];
-			return this.cachedLines;
-		}
-		const line = padRenderedLineToWidth(this.summaryText, safeWidth);
-		this.cachedWidth = width;
-		this.cachedLines = [line];
-		return this.cachedLines;
-	}
-}
-
-function assistantMessageThinkingComplete(message: any): boolean {
-	// toolUse is an intermediate assistant chunk — thinking may still be in progress on the next chunk.
-	const reason = message?.stopReason;
-	if (reason === "toolUse") return false;
-	return typeof reason === "string" && reason.length > 0;
-}
-
-function hiddenThinkingSummaryForMessage(message: any): string {
-	// Per-message flags win over globals so a late render pass cannot keep
-	// "Thinking…" after thinking_end already stored duration on this message.
-	if ((message as any)?.[THINKING_ACTIVE_KEY]) return thinkingActiveSummaryText();
-	const stored = (message as any)?.[THINKING_DURATION_KEY];
-	const durationMs = typeof stored === "number"
-		? stored
-		: assistantMessageThinkingComplete(message) && typeof lastThinkingBlockDurationMs === "number"
-			? lastThinkingBlockDurationMs
-			: undefined;
-	if (typeof durationMs === "number" && durationMs >= MIN_THINKING_SUMMARY_MS) {
-		return thoughtDurationSummaryText(durationMs);
-	}
-	if (thinkingBlockInFlight) return thinkingActiveSummaryText();
-	return thinkingActiveSummaryText();
 }
 
 function isHiddenThinkingPlaceholderText(child: unknown): child is InstanceType<typeof Text> {
@@ -1756,19 +1670,25 @@ class DottedParagraph {
 	}
 }
 
-function replaceHiddenThinkingPlaceholders(container: { children?: any[] }, message: any): void {
+function removeHiddenThinkingPlaceholders(container: { children?: any[] }): void {
 	if (!container?.children) return;
-	const summary = hiddenThinkingSummaryForMessage(message);
-	for (let i = 0; i < container.children.length; i++) {
-		const child = container.children[i];
-		if (child instanceof HiddenThinkingSummary) {
-			child.setSummary(summary);
+	const children: any[] = [];
+	let skipFollowingSpacer = false;
+	for (const child of container.children) {
+		if (isHiddenThinkingPlaceholderText(child)) {
+			skipFollowingSpacer = true;
 			continue;
 		}
-		if (isHiddenThinkingPlaceholderText(child)) {
-			container.children[i] = new HiddenThinkingSummary(summary);
+		if (skipFollowingSpacer && child instanceof Spacer) {
+			skipFollowingSpacer = false;
+			continue;
 		}
+		skipFollowingSpacer = false;
+		children.push(child);
 	}
+	container.children = children.some((child) => !(child instanceof Spacer))
+		? children
+		: [];
 }
 
 class ThinkingParagraph {
@@ -2118,7 +2038,7 @@ function patchAssistantMessages(): void {
 		const container = (this as any).contentContainer;
 		if (!container?.children) return;
 		if ((this as any).hideThinkingBlock && messageHasThinkingContent(message)) {
-			replaceHiddenThinkingPlaceholders(container, message);
+			removeHiddenThinkingPlaceholders(container);
 		}
 		const mdTheme = (this as any).markdownTheme;
 		for (let i = container.children.length - 1; i >= 0; i--) {
@@ -4766,51 +4686,6 @@ function prefixThinkingLine(text: string, _theme: Theme | undefined): string {
 	return `Thinking: ${normalized}`;
 }
 
-function trackThinkingBlockEvents(event: any, ctx?: any): void {
-	const evt = event?.assistantMessageEvent;
-	const message = event?.message;
-	if (!evt || typeof evt.type !== "string") return;
-	function refreshThinkingChrome(): void {
-		try {
-			ctx?.ui?.invalidate?.();
-			ctx?.ui?.requestRender?.();
-		} catch { /* noop */ }
-		// Pi may call AssistantMessageComponent.updateContent before extension
-		// handlers run on the same thinking_end event — nudge one more frame.
-		setTimeout(() => {
-			try {
-				ctx?.ui?.invalidate?.();
-				ctx?.ui?.requestRender?.();
-			} catch { /* noop */ }
-		}, 0);
-	}
-
-	if (evt.type === "thinking_start") {
-		thinkingBlockInFlight = true;
-		thinkingBlockStartMs = Date.now();
-		lastThinkingBlockDurationMs = undefined;
-		if (message?.role === "assistant") {
-			(message as any)[THINKING_ACTIVE_KEY] = true;
-			delete (message as any)[THINKING_DURATION_KEY];
-		}
-		refreshThinkingChrome();
-		return;
-	}
-	if (evt.type === "thinking_end") {
-		thinkingBlockInFlight = false;
-		const duration = Date.now() - thinkingBlockStartMs;
-		if (message?.role === "assistant") delete (message as any)[THINKING_ACTIVE_KEY];
-		if (duration >= MIN_THINKING_SUMMARY_MS) {
-			lastThinkingBlockDurationMs = duration;
-			if (message?.role === "assistant") (message as any)[THINKING_DURATION_KEY] = duration;
-		} else {
-			lastThinkingBlockDurationMs = undefined;
-			if (message?.role === "assistant") delete (message as any)[THINKING_DURATION_KEY];
-		}
-		refreshThinkingChrome();
-	}
-}
-
 function registerThinkingLabels(pi: ExtensionAPI): void {
 	const patchMessage = (event: any, theme?: Theme) => {
 		// Keep theme-derived border / dim text colors in sync with the
@@ -4833,7 +4708,6 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		}
 		if (sessionStartMs === undefined) sessionStartMs = Date.now();
 		currentAssistantMessageStartMs = undefined;
-		thinkingBlockInFlight = false;
 	});
 	pi.on("agent_start", async () => {
 		if (currentAgentWorkStartMs === undefined) {
@@ -4850,20 +4724,14 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		if (message?.role === "assistant") {
 			currentAssistantMessageStartMs = Date.now();
 			(message as any)[WORKED_START_KEY] = currentAssistantMessageStartMs;
-			thinkingBlockInFlight = false;
-			delete (message as any)[THINKING_ACTIVE_KEY];
 		}
 	});
 	pi.on("message_update", async (event, ctx) => {
-		trackThinkingBlockEvents(event, ctx);
 		patchMessage(event, ctx.ui?.theme);
 	});
 	pi.on("message_end", async (event, ctx) => {
 		const message = (event as any)?.message;
 		if (message?.role === "assistant") {
-			if (typeof lastThinkingBlockDurationMs === "number") {
-				(message as any)[THINKING_DURATION_KEY] = lastThinkingBlockDurationMs;
-			}
 			const started = typeof currentAgentWorkStartMs === "number"
 				? currentAgentWorkStartMs
 				: typeof (message as any)[WORKED_START_KEY] === "number"
