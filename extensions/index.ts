@@ -3002,7 +3002,7 @@ function renderBashCommandBlock(
 	}
 	const body = lines.map((line) => theme.fg("accent", line || " ")).join("\n");
 	if (!expanded) return withClippedBranch(body, theme, true);
-	const label = theme.fg("muted", "command");
+	const label = theme.fg("muted", presentation.sourceLineCount > 1 ? "script" : "command");
 	return withBranch(`${label}\n${body}`, theme, false, true);
 }
 

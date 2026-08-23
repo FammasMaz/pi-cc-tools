@@ -90,11 +90,27 @@ test("uses two body rows when a long heredoc is the only preview item", () => {
 	]);
 });
 
-test("reserves the final outline row for an omission count", () => {
+test("ignores standalone shell structure in the headline and outline", () => {
+	const presentation = buildBashCommandPresentation(`context_file=/tmp/context
+{
+echo '# Current source tree'
+find src -type f | sort
+}`);
+
+	assert.equal(presentation.headline, "echo '# Current source tree' · 5 lines");
+	assert.deepEqual(presentation.outlineLines, [
+		"setup: context_file",
+		"echo '# Current source tree'",
+		"find src -type f | sort",
+	]);
+	assert.deepEqual(buildBashOutlinePreview(presentation, 4), ["setup: context_file", "find src -type f | sort"]);
+});
+
+test("describes omitted outline rows as lines", () => {
 	assert.deepEqual(limitBashOutline(["one", "two", "three", "four"], 3), [
 		"one",
 		"two",
-		"... 2 more actions",
+		"... 2 more lines",
 	]);
 	assert.deepEqual(limitBashOutline(["one", "two"], 0), []);
 });

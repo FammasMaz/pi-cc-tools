@@ -39,6 +39,10 @@ function summarize(text: string, max = 180): string {
 	return `${text.slice(0, head)}...${text.slice(-tail)}`;
 }
 
+function isStructuralLine(line: string): boolean {
+	return /^(?:\{|\}|do|done|then|fi|esac)$/.test(normalizeLine(line));
+}
+
 function setupDescription(line: string): string | undefined {
 	const normalized = normalizeLine(line);
 	if (/^set\s+/.test(normalized)) return "strict mode";
@@ -93,7 +97,7 @@ function buildOutline(sourceLines: string[]): BashOutlineItem[] {
 	for (let index = 0; index < sourceLines.length; index++) {
 		const line = sourceLines[index];
 		const trimmed = line.trim();
-		if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
+		if (trimmed.length === 0 || trimmed.startsWith("#") || isStructuralLine(line)) continue;
 
 		const description = setupDescription(line);
 		if (description && items.length === 0) {
@@ -121,7 +125,7 @@ function buildOutline(sourceLines: string[]): BashOutlineItem[] {
 function headlineFor(sourceLines: string[], outlineItems: BashOutlineItem[]): { text: string; sourceLine: string } {
 	const meaningful = sourceLines.filter((line) => {
 		const trimmed = line.trim();
-		return trimmed.length > 0 && !trimmed.startsWith("#");
+		return trimmed.length > 0 && !trimmed.startsWith("#") && !isStructuralLine(line);
 	});
 	const operative = meaningful.find((line) => setupDescription(line) === undefined) ?? meaningful[0] ?? "command";
 	const sourceLine = normalizeLine(operative);
@@ -181,9 +185,9 @@ function omitBashHeadlineFromItems(presentation: BashCommandPresentation): BashO
 export function limitBashOutline(lines: string[], limit: number): string[] {
 	if (limit <= 0) return [];
 	if (lines.length <= limit) return lines;
-	if (limit === 1) return [`... ${lines.length} actions`];
+	if (limit === 1) return [`... ${lines.length} lines`];
 	const shown = lines.slice(0, limit - 1);
-	shown.push(`... ${lines.length - shown.length} more actions`);
+	shown.push(`... ${lines.length - shown.length} more lines`);
 	return shown;
 }
 
@@ -217,6 +221,6 @@ export function buildBashOutlinePreview(presentation: BashCommandPresentation, l
 		lines.push(...renderHeredoc(item, rows));
 		extraRows -= rows - 1;
 	}
-	if (hiddenItemCount > 0) lines.push(`... ${hiddenItemCount} more actions`);
+	if (hiddenItemCount > 0) lines.push(`... ${hiddenItemCount} more lines`);
 	return lines;
 }
