@@ -603,8 +603,22 @@ function formatToolNameList(tools: any[]): string {
 	}
 	return [...counts.entries()]
 		.slice(0, 4)
-		.map(([name, count]) => `${name}${count > 1 ? `×${count}` : ""}`)
+		.map(([name, count]) => `${humanizeToolName(name)}${count > 1 ? `×${count}` : ""}`)
 		.join(", ") + (counts.size > 4 ? ", …" : "");
+}
+
+function getRepeatedToolSubject(tools: any[], groupedName: string | undefined): string {
+	if (!groupedName || tools.length === 0) return "";
+	if (groupedName === "read") {
+		const paths = tools.map((tool) => String(tool?.args?.path ?? ""));
+		if (paths[0] && paths.every((path) => path === paths[0])) {
+			return shortPath(process.cwd(), paths[0]);
+		}
+	}
+	const summaries = tools.map(getToolArgSummary);
+	return summaries[0] && summaries.every((summary) => summary === summaries[0])
+		? summaries[0]
+		: "";
 }
 
 function escapeRegex(text: string): string {
@@ -686,6 +700,46 @@ function getToolCallLine(tool: any): string {
 function getCompactToolLine(tool: any, width: number, groupedLabel?: string): string {
 	const content = removeGroupedToolPrefix(getToolCallLine(tool), groupedLabel);
 	return clampLineWidth(content || getToolName(tool), width);
+}
+
+interface CollapsedToolEntry {
+	tools: any[];
+	name: string;
+	subject: string;
+}
+
+function collapseRepeatedToolEntries(tools: any[]): CollapsedToolEntry[] {
+	const entries: CollapsedToolEntry[] = [];
+	for (const tool of tools) {
+		const name = getToolName(tool);
+		const subject = getRepeatedToolSubject([tool], name);
+		const previous = entries[entries.length - 1];
+		if (subject && previous?.name === name && previous.subject === subject) {
+			previous.tools.push(tool);
+		} else {
+			entries.push({ tools: [tool], name, subject });
+		}
+	}
+	return entries;
+}
+
+function stripReadRangeFromToolLine(line: string): string {
+	return line.replace(
+		/\s+(?:\x1b\[[0-9;]*m)*\((?:offset|limit)=\d+(?:,\s*(?:offset|limit)=\d+)*\)(?=(?:\x1b\[[0-9;]*m)*$)/,
+		"",
+	);
+}
+
+function getCollapsedToolEntryLine(entry: CollapsedToolEntry, width: number, groupedLabel?: string): string {
+	if (entry.tools.length === 1) return getCompactToolLine(entry.tools[0], width, groupedLabel);
+	const counts = countToolStatuses(entry.tools);
+	const attentionCounts = counts.pending > 0 || counts.error > 0
+		? ` • ${formatToolGroupCounts(entry.tools)}`
+		: "";
+	const suffix = ` ${FG_DIM}×${entry.tools.length}${TRANSPARENT_RESET}${attentionCounts}`;
+	const firstLine = getCompactToolLine(entry.tools[0], Math.max(1, width - visibleWidth(suffix)), groupedLabel);
+	const sharedLine = entry.name === "read" ? stripReadRangeFromToolLine(firstLine) : firstLine;
+	return clampLineWidth(`${sharedLine}${suffix}`, width);
 }
 
 function getExpandedToolGroupLines(tool: any, width: number, groupedLabel?: string): string[] {
@@ -864,26 +918,48 @@ class ToolGroupComponent extends Container {
 		if (status.success) countParts.push(statusText("success", status.success));
 		if (status.error) countParts.push(statusText("error", status.error));
 		const countsText = countParts.join(`${TRANSPARENT_RESET} • `);
-		const summary = ` ${light} ${summaryLabel} ${countsText}${names ? ` ${TRANSPARENT_RESET}• ${names}` : ""}${toolOutputDetailHint(undefined as any, this.expanded, true)}`;
-		const lines = [" ".repeat(safeWidth), clampLineWidth(summary, safeWidth)];
-		const childWidth = Math.max(1, safeWidth - 6);
 		const total = this.tools.length;
-
-		for (let index = 0; index < total; index++) {
-			const tool = this.tools[index];
-			const rawLines = this.expanded
-				? getExpandedToolGroupLines(tool, childWidth, groupedName ? label : undefined)
-				: [getCompactToolLine(tool, childWidth, groupedName ? label : undefined)];
-			const branched = formatBranchedToolLines(
-				rawLines,
-				index,
-				total,
+		const lines: string[] = [];
+		const subject = this.expanded ? "" : getRepeatedToolSubject(this.tools, groupedName);
+		const collapseToSingleRow = !this.expanded && !!groupedName && !!subject;
+		if (collapseToSingleRow) {
+			const entry = { tools: this.tools, name: groupedName, subject };
+			const entryLine = getCollapsedToolEntryLine(entry, Math.max(1, safeWidth - 3));
+			lines.push(clampLineWidth(
+				` ${light} ${entryLine}${toolOutputDetailHint(undefined as any, false, true)}`,
 				safeWidth,
-				getToolStatusForGroup(tool),
-				{ agentBreathe: isAgentFamilyToolName(getToolName(tool)) },
-			);
-			for (let i = 0; i < branched.length; i++) {
-				lines.push(clampLineWidth(branched[i], safeWidth));
+			));
+		} else {
+			const summary = ` ${light} ${summaryLabel} ${countsText}${names ? ` ${TRANSPARENT_RESET}• ${names}` : ""}${toolOutputDetailHint(undefined as any, this.expanded, true)}`;
+			lines.push(" ".repeat(safeWidth), clampLineWidth(summary, safeWidth));
+			const childWidth = Math.max(1, safeWidth - 6);
+			if (this.expanded) {
+				for (let index = 0; index < total; index++) {
+					const tool = this.tools[index];
+					const branched = formatBranchedToolLines(
+						getExpandedToolGroupLines(tool, childWidth, groupedName ? label : undefined),
+						index,
+						total,
+						safeWidth,
+						getToolStatusForGroup(tool),
+						{ agentBreathe: isAgentFamilyToolName(getToolName(tool)) },
+					);
+					for (const line of branched) lines.push(clampLineWidth(line, safeWidth));
+				}
+			} else {
+				const entries = collapseRepeatedToolEntries(this.tools);
+				for (let index = 0; index < entries.length; index++) {
+					const entry = entries[index];
+					const branched = formatBranchedToolLines(
+						[getCollapsedToolEntryLine(entry, childWidth, groupedName ? label : undefined)],
+						index,
+						entries.length,
+						safeWidth,
+						getToolGroupOverallStatus(entry.tools),
+						{ agentBreathe: entry.tools.every((tool) => isAgentFamilyToolName(getToolName(tool))) },
+					);
+					for (const line of branched) lines.push(clampLineWidth(line, safeWidth));
+				}
 			}
 		}
 
