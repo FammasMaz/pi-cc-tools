@@ -1496,6 +1496,26 @@ function stripTransientMagicContextTags(text: string): string {
 	return text.replace(MAGIC_CONTEXT_TAG_LINE_PREFIX, "$1");
 }
 
+// Tool results can carry transient Magic Context tags too (live-prefixed output
+// chunks). Renderers must see sanitized text WITHOUT mutating this.result — the
+// result object is the stored message used by context management. Clone blocks
+// only when a tag is actually present so the common path stays zero-cost.
+function sanitizeToolResultForDisplay(result: any): any {
+	if (!result || !Array.isArray(result.content)) return result;
+	let changed = false;
+	const content = result.content.map((block: any) => {
+		if (block && typeof block.text === "string") {
+			const stripped = stripTransientMagicContextTags(block.text);
+			if (stripped !== block.text) {
+				changed = true;
+				return { ...block, text: stripped };
+			}
+		}
+		return block;
+	});
+	return changed ? { ...result, content } : result;
+}
+
 function replaceInlineMath(text: string): string {
 	if (!hasInlineMathMarkers(text)) return text;
 	const withParens = text.replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => {
@@ -2326,16 +2346,30 @@ function patchToolExecutionRenderers(): void {
 
 	proto.getResultRenderer = function patchedGetResultRenderer() {
 		const toolName = typeof this?.toolName === "string" ? this.toolName : "";
+		let renderer: any;
 		if (toolName === "apply_patch") {
-			return (result: any, options: any, theme: Theme, ctx: any) =>
+			renderer = (result: any, options: any, theme: Theme, ctx: any) =>
 				renderApplyPatchResult({ content: result.content, details: result.details }, options.isPartial, theme, ctx);
-		}
-		if (shouldUseGenericToolRenderer(toolName)) {
-			return (result: any, options: any, theme: Theme, ctx: any) =>
+		} else if (shouldUseGenericToolRenderer(toolName)) {
+			renderer = (result: any, options: any, theme: Theme, ctx: any) =>
 				renderGenericToolResult(toolName, result, options, theme, ctx);
+		} else {
+			renderer = typeof originalGetResultRenderer === "function" ? originalGetResultRenderer.call(this) : undefined;
 		}
-		return typeof originalGetResultRenderer === "function" ? originalGetResultRenderer.call(this) : undefined;
+		if (typeof renderer !== "function") return renderer;
+		// Strip transient Magic Context tags from the text the renderer sees,
+		// without touching the stored result message.
+		return (result: any, options: any, theme: Theme, ctx: any) => renderer(sanitizeToolResultForDisplay(result), options, theme, ctx);
 	};
+
+	// Fallback path for tools without a renderer definition formats raw text.
+	const originalFormatToolExecution = proto.formatToolExecution;
+	if (typeof originalFormatToolExecution === "function") {
+		proto.formatToolExecution = function patchedFormatToolExecution(this: any, ...args: any[]) {
+			const formatted = originalFormatToolExecution.apply(this, args);
+			return typeof formatted === "string" ? stripTransientMagicContextTags(formatted) : formatted;
+		};
+	}
 
 	proto[TOOL_EXECUTION_PATCH_FLAG] = true;
 }
