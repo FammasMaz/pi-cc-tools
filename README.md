@@ -52,7 +52,7 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
   "groupToolCalls": true,
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
-  "bashCommandPreviewLines": 4,
+  "bashCommandPreviewLines": 8,
   "liveToolPreview": true,
   "liveToolPreviewLines": 5,
   "diffCollapsedLines": 24,
@@ -144,7 +144,7 @@ Use `/cc-tools` to control tool UI at runtime:
 | `extraToolOutputExpanded` | `false` | Start with Ctrl+Shift+O extra-detail mode enabled |
 | `groupToolCalls` | `true` | Group adjacent/concurrent calls, collapsing repeated targets into one row |
 | `bashCollapsedLines` | `10` | Lines for collapsed bash output |
-| `bashCommandPreviewLines` | `4` | Structural script rows shown while bash runs or after failure; `0` disables them |
+| `bashCommandPreviewLines` | `8` | Verbatim script lines shown while bash runs or after failure; `0` disables them |
 | `liveToolPreview` | `true` | Show a small live output preview while tools are still running |
 | `liveToolPreviewLines` | `5` | Lines shown in the collapsed live preview |
 | `diffCollapsedLines` | `24` | Diff lines before collapsing |

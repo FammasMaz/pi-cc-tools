@@ -44,7 +44,7 @@ import {
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 
-import { buildBashCommandPresentation, buildBashOutlinePreview } from "./bash-command";
+import { buildBashCommandPresentation, buildBashPreview } from "./bash-command";
 
 const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
@@ -87,7 +87,7 @@ interface SettingsFile {
 	groupToolCalls?: boolean;
 	bashOutputMode?: "opencode" | "summary" | "preview";
 	bashCollapsedLines?: number;
-	/** Command outline rows shown while bash is running or after failure. Defaults to 4. */
+	/** Verbatim script lines shown while bash is running or after failure. Defaults to 8. */
 	bashCommandPreviewLines?: number;
 	/** Show a small live output preview while tools are still running. Defaults to true. */
 	liveToolPreview?: boolean;
@@ -2983,7 +2983,7 @@ function bashCollapsedLimit(): number {
 
 function bashCommandPreviewLimit(): number {
 	const value = readSettings().bashCommandPreviewLines;
-	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 4;
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 8;
 }
 
 function renderBashCommandBlock(
@@ -2995,7 +2995,7 @@ function renderBashCommandBlock(
 	const limit = bashCommandPreviewLimit();
 	if (!expanded && (limit === 0 || presentation.sourceLineCount < 2)) return "";
 	const sourceLimit = expandedPreviewLimit();
-	const lines = expanded ? presentation.sourceLines.slice(0, sourceLimit) : buildBashOutlinePreview(presentation, limit);
+	const lines = expanded ? presentation.sourceLines.slice(0, sourceLimit) : buildBashPreview(presentation.sourceLines, limit);
 	if (lines.length === 0) return "";
 	if (expanded && presentation.sourceLines.length > sourceLimit) {
 		lines.push(`... ${presentation.sourceLines.length - sourceLimit} more command lines`);
