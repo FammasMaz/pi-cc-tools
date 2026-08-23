@@ -1,6 +1,20 @@
+export interface BashOutlineAction {
+	kind: "action";
+	line: string;
+}
+
+export interface BashOutlineHeredoc {
+	kind: "heredoc";
+	label: string;
+	bodyLines: string[];
+}
+
+export type BashOutlineItem = BashOutlineAction | BashOutlineHeredoc;
+
 export interface BashCommandPresentation {
 	headline: string;
 	headlineSourceLine: string;
+	outlineItems: BashOutlineItem[];
 	outlineLines: string[];
 	sourceLines: string[];
 	sourceLineCount: number;
@@ -12,6 +26,10 @@ const HEREDOC_RE = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/;
 
 function normalizeLine(line: string): string {
 	return line.replace(/\t/g, "   ").replace(CONTROL_CHAR_RE, "").replace(/\s+/g, " ").trim();
+}
+
+function preserveLine(line: string): string {
+	return line.replace(/\t/g, "   ").replace(CONTROL_CHAR_RE, "").trimEnd();
 }
 
 function summarize(text: string, max = 180): string {
@@ -32,59 +50,101 @@ function setupDescription(line: string): string | undefined {
 	return undefined;
 }
 
-function collapseHeredocs(lines: string[]): string[] {
-	const result: string[] = [];
-	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index];
-		result.push(line);
-		const match = HEREDOC_RE.exec(line);
-		if (!match) continue;
-		const delimiter = match[2];
-		let end = index + 1;
-		while (end < lines.length && lines[end].trim() !== delimiter) end++;
-		if (end >= lines.length) continue;
-		const bodyLines = Math.max(0, end - index - 1);
-		if (bodyLines > 0) result.push(`  ... heredoc (${bodyLines} ${bodyLines === 1 ? "line" : "lines"})`);
-		result.push(lines[end]);
-		index = end;
+function findHeredocEnd(lines: string[], start: number, delimiter: string): number | undefined {
+	for (let index = start + 1; index < lines.length; index++) {
+		if (lines[index].trim() === delimiter) return index;
 	}
-	return result;
+	return undefined;
 }
 
-function buildOutline(sourceLines: string[]): string[] {
-	const meaningful = collapseHeredocs(sourceLines).filter((line) => {
-		const trimmed = line.trim();
-		return trimmed.length > 0 && !trimmed.startsWith("#");
+function heredocLabel(line: string, delimiter: string): string {
+	if (/\.(?:ba)?sh\b/.test(line) || /^(?:SH|BASH|SCRIPT)$/.test(delimiter)) return "script";
+	return "stdin";
+}
+
+function heredocConsumer(line: string, match: RegExpExecArray): string | undefined {
+	const prefix = line.slice(0, match.index).trim();
+	if (prefix !== "cat") return undefined;
+	const suffix = line.slice(match.index + match[0].length);
+	const consumer = /^\s*\|\s*(.+)$/.exec(suffix)?.[1];
+	return consumer ? normalizeLine(consumer) : undefined;
+}
+
+function flattenOutline(items: BashOutlineItem[]): string[] {
+	return items.flatMap((item) => {
+		if (item.kind === "action") return [item.line];
+		const count = item.bodyLines.length;
+		return [
+			`${item.label} · ${count} ${count === 1 ? "line" : "lines"}`,
+			...item.bodyLines.map((line) => `  ${line}`),
+		];
 	});
-	const outline: string[] = [];
+}
+
+function buildOutline(sourceLines: string[]): BashOutlineItem[] {
+	const items: BashOutlineItem[] = [];
 	const setup: string[] = [];
-	for (const line of meaningful) {
+	const flushSetup = () => {
+		if (setup.length === 0) return;
+		items.push({ kind: "action", line: `setup: ${setup.join(", ")}` });
+		setup.length = 0;
+	};
+
+	for (let index = 0; index < sourceLines.length; index++) {
+		const line = sourceLines[index];
+		const trimmed = line.trim();
+		if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
+
 		const description = setupDescription(line);
-		if (description && outline.length === 0) {
+		if (description && items.length === 0) {
 			if (!setup.includes(description)) setup.push(description);
 			continue;
 		}
-		if (setup.length > 0) {
-			outline.push(`setup: ${setup.join(", ")}`);
-			setup.length = 0;
-		}
-		outline.push(normalizeLine(line));
+		flushSetup();
+		items.push({ kind: "action", line: normalizeLine(line) });
+
+		const match = HEREDOC_RE.exec(line);
+		if (!match) continue;
+		const end = findHeredocEnd(sourceLines, index, match[2]);
+		if (end === undefined) continue;
+		items.push({
+			kind: "heredoc",
+			label: heredocLabel(line, match[2]),
+			bodyLines: sourceLines.slice(index + 1, end).map(preserveLine),
+		});
+		index = end;
 	}
-	if (setup.length > 0) outline.push(`setup: ${setup.join(", ")}`);
-	return outline;
+	flushSetup();
+	return items;
 }
 
-function headlineFor(sourceLines: string[], outlineLines: string[]): { text: string; sourceLine: string } {
+function headlineFor(sourceLines: string[], outlineItems: BashOutlineItem[]): { text: string; sourceLine: string } {
 	const meaningful = sourceLines.filter((line) => {
 		const trimmed = line.trim();
 		return trimmed.length > 0 && !trimmed.startsWith("#");
 	});
 	const operative = meaningful.find((line) => setupDescription(line) === undefined) ?? meaningful[0] ?? "command";
 	const sourceLine = normalizeLine(operative);
+	const heredoc = HEREDOC_RE.exec(operative);
+	if (heredoc) {
+		const sourceIndex = sourceLines.indexOf(operative);
+		const end = findHeredocEnd(sourceLines, sourceIndex, heredoc[2]);
+		if (end !== undefined) {
+			const bodyLineCount = end - sourceIndex - 1;
+			const label = heredocLabel(operative, heredoc[2]);
+			const command = heredocConsumer(operative, heredoc) ?? sourceLine;
+			return {
+				text: `${summarize(command)} · ${label}: ${bodyLineCount} ${bodyLineCount === 1 ? "line" : "lines"}`,
+				sourceLine,
+			};
+		}
+	}
 	let text = summarize(sourceLine);
 	if (sourceLines.length > 1) text += ` · ${sourceLines.length} lines`;
-	if (text === `command · ${sourceLines.length} lines` && outlineLines.length > 0) {
-		text = `${summarize(outlineLines[0])} · ${sourceLines.length} lines`;
+	if (text === `command · ${sourceLines.length} lines` && outlineItems.length > 0) {
+		const first = outlineItems[0];
+		const firstLine = first.kind === "action" ? first.line : first.label;
+		text = `${summarize(firstLine)} · ${sourceLines.length} lines`;
 	}
 	return { text, sourceLine };
 }
@@ -94,21 +154,28 @@ export function buildBashCommandPresentation(command: string): BashCommandPresen
 	const sourceLines = sanitized.replace(/\t/g, "   ").split("\n");
 	while (sourceLines.length > 1 && sourceLines[0].trim() === "") sourceLines.shift();
 	while (sourceLines.length > 1 && sourceLines[sourceLines.length - 1].trim() === "") sourceLines.pop();
-	const outlineLines = buildOutline(sourceLines);
-	const headline = headlineFor(sourceLines, outlineLines);
+	const outlineItems = buildOutline(sourceLines);
+	const headline = headlineFor(sourceLines, outlineItems);
 	return {
 		headline: headline.text,
 		headlineSourceLine: headline.sourceLine,
-		outlineLines,
+		outlineItems,
+		outlineLines: flattenOutline(outlineItems),
 		sourceLines,
 		sourceLineCount: sourceLines.length,
 	};
 }
 
 export function omitBashHeadlineFromOutline(presentation: BashCommandPresentation): string[] {
-	const index = presentation.outlineLines.indexOf(presentation.headlineSourceLine);
-	if (index === -1) return presentation.outlineLines;
-	return presentation.outlineLines.filter((_, lineIndex) => lineIndex !== index);
+	return flattenOutline(omitBashHeadlineFromItems(presentation));
+}
+
+function omitBashHeadlineFromItems(presentation: BashCommandPresentation): BashOutlineItem[] {
+	const index = presentation.outlineItems.findIndex(
+		(item) => item.kind === "action" && item.line === presentation.headlineSourceLine,
+	);
+	if (index === -1) return presentation.outlineItems;
+	return presentation.outlineItems.filter((_, itemIndex) => itemIndex !== index);
 }
 
 export function limitBashOutline(lines: string[], limit: number): string[] {
@@ -118,4 +185,38 @@ export function limitBashOutline(lines: string[], limit: number): string[] {
 	const shown = lines.slice(0, limit - 1);
 	shown.push(`... ${lines.length - shown.length} more actions`);
 	return shown;
+}
+
+function renderHeredoc(item: BashOutlineHeredoc, budget: number): string[] {
+	const count = item.bodyLines.length;
+	const lines = [`${item.label} · ${count} ${count === 1 ? "line" : "lines"}`];
+	const bodyBudget = budget - 1;
+	if (bodyBudget <= 0 || count === 0) return lines;
+	if (count <= bodyBudget) return [...lines, ...item.bodyLines.map((line) => `  ${line}`)];
+	if (bodyBudget === 1) return [...lines, `  ${item.bodyLines[0]}`];
+	const shown = item.bodyLines.slice(0, bodyBudget - 1);
+	return [...lines, ...shown.map((line) => `  ${line}`), `  ... ${count - shown.length} more lines`];
+}
+
+export function buildBashOutlinePreview(presentation: BashCommandPresentation, limit: number): string[] {
+	if (limit <= 0) return [];
+	const items = omitBashHeadlineFromItems(presentation);
+	if (items.length === 0) return [];
+
+	const visibleItems = items.length <= limit ? items : items.slice(0, limit - 1);
+	const hiddenItemCount = items.length - visibleItems.length;
+	let extraRows = limit - visibleItems.length - (hiddenItemCount > 0 ? 1 : 0);
+	const lines: string[] = [];
+	for (const item of visibleItems) {
+		if (item.kind === "action") {
+			lines.push(item.line);
+			continue;
+		}
+		const desiredRows = Math.min(4, item.bodyLines.length + 1);
+		const rows = 1 + Math.min(extraRows, desiredRows - 1);
+		lines.push(...renderHeredoc(item, rows));
+		extraRows -= rows - 1;
+	}
+	if (hiddenItemCount > 0) lines.push(`... ${hiddenItemCount} more actions`);
+	return lines;
 }

@@ -44,11 +44,7 @@ import {
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 
-import {
-	buildBashCommandPresentation,
-	limitBashOutline,
-	omitBashHeadlineFromOutline,
-} from "./bash-command";
+import { buildBashCommandPresentation, buildBashOutlinePreview } from "./bash-command";
 
 const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
@@ -3003,17 +2999,15 @@ function renderBashCommandBlock(
 	const limit = bashCommandPreviewLimit();
 	if (!expanded && (limit === 0 || presentation.sourceLineCount < 2)) return "";
 	const sourceLimit = expandedPreviewLimit();
-	const lines = expanded
-		? presentation.sourceLines.slice(0, sourceLimit)
-		: limitBashOutline(omitBashHeadlineFromOutline(presentation), limit);
+	const lines = expanded ? presentation.sourceLines.slice(0, sourceLimit) : buildBashOutlinePreview(presentation, limit);
 	if (lines.length === 0) return "";
 	if (expanded && presentation.sourceLines.length > sourceLimit) {
 		lines.push(`... ${presentation.sourceLines.length - sourceLimit} more command lines`);
 	}
-	const label = theme.fg("muted", "command");
 	const body = lines.map((line) => theme.fg("accent", line || " ")).join("\n");
-	const content = `${label}\n${body}`;
-	return expanded ? withBranch(content, theme, false, true) : withClippedBranch(content, theme, true);
+	if (!expanded) return withClippedBranch(body, theme, true);
+	const label = theme.fg("muted", "command");
+	return withBranch(`${label}\n${body}`, theme, false, true);
 }
 
 function liveToolPreviewEnabled(): boolean {

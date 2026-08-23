@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
 	buildBashCommandPresentation,
+	buildBashOutlinePreview,
 	limitBashOutline,
 	omitBashHeadlineFromOutline,
 } from "../extensions/bash-command.ts";
@@ -28,24 +29,64 @@ done`);
 	]);
 });
 
-test("folds heredoc bodies in the outline", () => {
+test("shows a short heredoc body without its delimiter", () => {
 	const presentation = buildBashCommandPresentation(`cat > /tmp/check.sh <<'SH'
 echo one
 echo two
 SH
 chmod +x /tmp/check.sh`);
 
-	assert.deepEqual(presentation.outlineLines, [
-		"cat > /tmp/check.sh <<'SH'",
-		"... heredoc (2 lines)",
-		"SH",
+	assert.equal(presentation.headline, "cat > /tmp/check.sh <<'SH' · script: 2 lines");
+	assert.deepEqual(omitBashHeadlineFromOutline(presentation), [
+		"script · 2 lines",
+		"  echo one",
+		"  echo two",
 		"chmod +x /tmp/check.sh",
 	]);
-	assert.deepEqual(presentation.sourceLines.slice(1, 3), ["echo one", "echo two"]);
-	assert.deepEqual(omitBashHeadlineFromOutline(presentation), [
-		"... heredoc (2 lines)",
-		"SH",
+	assert.deepEqual(buildBashOutlinePreview(presentation, 4), [
+		"script · 2 lines",
+		"  echo one",
+		"  echo two",
 		"chmod +x /tmp/check.sh",
+	]);
+});
+
+test("headlines a piped heredoc by its consumer and shows one line of stdin", () => {
+	const presentation = buildBashCommandPresentation(
+		`cat <<'_CONSULT_LLM_END_' | consult-llm -f README.md\nReview the rendering for clarity.\n_CONSULT_LLM_END_`,
+	);
+
+	assert.equal(presentation.headline, "consult-llm -f README.md · stdin: 1 line");
+	assert.deepEqual(buildBashOutlinePreview(presentation, 4), [
+		"stdin · 1 line",
+		"  Review the rendering for clarity.",
+	]);
+});
+
+test("bounds long heredocs and reserves a row for a following action", () => {
+	const body = Array.from({ length: 12 }, (_, index) => `prompt line ${index + 1}`).join("\n");
+	const presentation = buildBashCommandPresentation(`cat <<'EOF' | consult-llm
+${body}
+EOF
+jq '.result' result.json`);
+
+	assert.deepEqual(buildBashOutlinePreview(presentation, 4), [
+		"stdin · 12 lines",
+		"  prompt line 1",
+		"  ... 11 more lines",
+		"jq '.result' result.json",
+	]);
+});
+
+test("uses two body rows when a long heredoc is the only preview item", () => {
+	const body = Array.from({ length: 6 }, (_, index) => `line ${index + 1}`).join("\n");
+	const presentation = buildBashCommandPresentation(`cat <<'EOF'\n${body}\nEOF`);
+
+	assert.deepEqual(buildBashOutlinePreview(presentation, 4), [
+		"stdin · 6 lines",
+		"  line 1",
+		"  line 2",
+		"  ... 4 more lines",
 	]);
 });
 
