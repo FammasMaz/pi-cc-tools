@@ -42,6 +42,10 @@ export function buildBashCommandPresentation(command: string): BashCommandPresen
 	};
 }
 
+export function describeBashSource(presentation: BashCommandPresentation): string {
+	return presentation.sourceLineCount === 1 ? "command" : `script · ${presentation.sourceLineCount} lines`;
+}
+
 export function buildBashPreview(sourceLines: string[], limit: number): string[] {
 	if (limit <= 0 || sourceLines.length === 0) return [];
 	if (sourceLines.length <= limit) return [...sourceLines];

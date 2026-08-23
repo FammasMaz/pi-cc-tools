@@ -44,7 +44,7 @@ import {
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 
-import { buildBashCommandPresentation, buildBashPreview } from "./bash-command";
+import { buildBashCommandPresentation, buildBashPreview, describeBashSource } from "./bash-command";
 
 const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
@@ -3001,9 +3001,7 @@ function renderBashCommandBlock(
 		lines.push(`... ${presentation.sourceLines.length - sourceLimit} more command lines`);
 	}
 	const body = lines.map((line) => theme.fg("accent", line || " ")).join("\n");
-	if (!expanded) return withClippedBranch(body, theme, true);
-	const label = theme.fg("muted", presentation.sourceLineCount > 1 ? "script" : "command");
-	return withBranch(`${label}\n${body}`, theme, false, true);
+	return expanded ? withBranch(body, theme, false, true) : withClippedBranch(body, theme, true);
 }
 
 function liveToolPreviewEnabled(): boolean {
@@ -6330,18 +6328,20 @@ export default function (pi: ExtensionAPI) {
 			syncToolCallStatus(ctx);
 			const rewrite = ensureRtkRewriteForContext(ctx, args);
 			const command = typeof args.command === "string" ? args.command : "";
-			const summary = stableCallSummary(ctx, "_bashHeadline", () => buildBashCommandPresentation(command).headline);
+			const presentation = buildBashCommandPresentation(command);
+			const summary = stableCallSummary(ctx, "_bashHeadline", () => presentation.headline);
 			const rtkBadge = rewrite ? theme.fg("muted", " (RTK)") : "";
+			const status = ctx?.state?._toolStatus;
+			const showCommand = ctx.argsComplete === true && (status === "pending" || status === "error" || ctx.expanded === true);
+			const commandBlock = showCommand ? renderBashCommandBlock(command, ctx.expanded === true, theme) : "";
+			const headerSummary = commandBlock ? describeBashSource(presentation) : summary;
 			const header = toolHeader(
 				"Bash",
-				`${summary}${rtkBadge}`,
+				`${headerSummary}${rtkBadge}`,
 				theme,
 				toolStatusDot(ctx, theme),
 				liveLineCountTrailing(ctx, theme),
 			).replace(WRAP_MARK, CLIP_MARK);
-			const status = ctx?.state?._toolStatus;
-			const showCommand = ctx.argsComplete === true && (status === "pending" || status === "error" || ctx.expanded === true);
-			const commandBlock = showCommand ? renderBashCommandBlock(command, ctx.expanded === true, theme) : "";
 			return makeText(ctx.lastComponent, commandBlock ? `${header}\n${commandBlock}` : header);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
