@@ -34,6 +34,7 @@ import {
 	getImageDimensions,
 	imageFallback,
 	Markdown,
+	ProcessTerminal,
 	Spacer,
 	Text,
 	truncateToWidth,
@@ -1514,6 +1515,30 @@ function sanitizeToolResultForDisplay(result: any): any {
 		return block;
 	});
 	return changed ? { ...result, content } : result;
+}
+
+// Last-resort display scrubber at the terminal writer choke point. Every
+// rendered frame — every component, overlay, preview, and search hit — exits
+// through ProcessTerminal.write, so stripping complete §N§ tokens there covers
+// any surface the targeted strips above can't reach, including mid-sentence
+// tag references replayed from old tool output on resume. Display only:
+// storage, LLM context, copy/paste sources, and ANSI sequences are untouched
+// (tags are plain characters; escape sequences never contain them).
+const MAGIC_CONTEXT_TAG_TOKEN = /§\d+§/g;
+const TERMINAL_SCRUB_PATCH_FLAG = Symbol.for("pi-claude-style-tools:terminal-write-tag-scrub");
+
+function patchTerminalWriteTagScrubber(): void {
+	const proto = (ProcessTerminal as any)?.prototype;
+	if (!proto || proto[TERMINAL_SCRUB_PATCH_FLAG]) return;
+	const originalWrite = proto.write;
+	if (typeof originalWrite !== "function") return;
+	proto.write = function patchedTerminalWrite(this: any, data: any, ...rest: any[]) {
+		if (typeof data === "string" && data.includes("§")) {
+			data = data.replace(MAGIC_CONTEXT_TAG_TOKEN, "");
+		}
+		return originalWrite.call(this, data, ...rest);
+	};
+	proto[TERMINAL_SCRUB_PATCH_FLAG] = true;
 }
 
 function replaceInlineMath(text: string): string {
@@ -5945,6 +5970,7 @@ function renderOpenAiToolResult(name: string, result: any, expanded: boolean, is
 // ===========================================================================
 
 export default function (pi: ExtensionAPI) {
+	patchTerminalWriteTagScrubber();
 	patchToolExecutionBackgroundSync();
 	patchToolRenderCacheInvalidation();
 	patchReadImageExpansion();
