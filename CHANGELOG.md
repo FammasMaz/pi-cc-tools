@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.80 — 2026-08-24
+
+### Fixed
+
+- **Scrub Magic Context tags at the terminal writer** — last-resort display filter at the `ProcessTerminal.write` choke point removes every complete `§N§` token from painted output, covering any surface the targeted render strips can't reach: mid-sentence tag references in ctx_reduce/system-reminder tool output, replayed history on resume, overlays, and search hits. Display only — session storage, LLM context, copy sources, and ANSI sequences are untouched, so plugin functionality is unaffected.
+
 ## 1.0.79 — 2026-08-23
 
 ### Fixed
