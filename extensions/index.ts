@@ -70,7 +70,7 @@ const USER_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-user-m
 const UI_NOTIFY_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-ui-notifications-v2");
 const WRAP_MARK = "\uE000";
 const CLIP_MARK = "\uE001";
-const TRAILING_MARK = "\uE002";
+const TRAILING_MARK = "  · ";
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_IMAGE_PREFIX = "\x1b]1337;File=";
 
