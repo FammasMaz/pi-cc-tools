@@ -6334,7 +6334,7 @@ export default function (pi: ExtensionAPI) {
 			const status = ctx?.state?._toolStatus;
 			const showCommand = ctx.argsComplete === true && (status === "pending" || status === "error" || ctx.expanded === true);
 			const commandBlock = showCommand ? renderBashCommandBlock(command, ctx.expanded === true, theme) : "";
-			const headerSummary = commandBlock ? describeBashSource(presentation) : summary;
+			const headerSummary = ctx.expanded === true && commandBlock ? describeBashSource(presentation) : summary;
 			const header = toolHeader(
 				"Bash",
 				`${headerSummary}${rtkBadge}`,
