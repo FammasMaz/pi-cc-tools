@@ -2353,20 +2353,47 @@ function liveLineCountTrailing(ctx: any, theme: Theme): string {
 
 const BASH_STARTED_AT_KEY = "_bashStartedAtMs";
 const BASH_ENDED_AT_KEY = "_bashEndedAtMs";
-const BASH_DURATION_TIMER_KEY = "_bashDurationTimer";
-const ACTIVE_BASH_DURATION_TIMERS = new Set<ReturnType<typeof setInterval>>();
 
-function clearBashDurationTimer(ctx: any): void {
-	const timer = ctx?.state?.[BASH_DURATION_TIMER_KEY] as ReturnType<typeof setInterval> | undefined;
-	if (!timer) return;
-	clearInterval(timer);
-	ACTIVE_BASH_DURATION_TIMERS.delete(timer);
-	delete ctx.state[BASH_DURATION_TIMER_KEY];
+type BashDurationEntry = { invalidate: () => void };
+
+const BASH_DURATION_CONTEXTS = new Map<any, BashDurationEntry>();
+let bashDurationTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleBashDurationTick(): void {
+	if (bashDurationTimer || BASH_DURATION_CONTEXTS.size === 0) return;
+	bashDurationTimer = setTimeout(() => {
+		bashDurationTimer = null;
+		for (const entry of BASH_DURATION_CONTEXTS.values()) {
+			try { entry.invalidate(); } catch { /* noop */ }
+		}
+		scheduleBashDurationTick();
+	}, 1_000);
+	unrefTimer(bashDurationTimer);
 }
 
-function clearAllBashDurationTimers(): void {
-	for (const timer of ACTIVE_BASH_DURATION_TIMERS) clearInterval(timer);
-	ACTIVE_BASH_DURATION_TIMERS.clear();
+function registerBashDurationContext(ctx: any): void {
+	const key = ctx?.state ?? ctx;
+	if (!key) return;
+	const invalidate = typeof ctx?.invalidate === "function" ? () => safeInvalidate(ctx) : () => {};
+	BASH_DURATION_CONTEXTS.set(key, { invalidate });
+	scheduleBashDurationTick();
+}
+
+function clearBashDurationContext(ctx: any): void {
+	const key = ctx?.state ?? ctx;
+	if (key) BASH_DURATION_CONTEXTS.delete(key);
+	if (bashDurationTimer && BASH_DURATION_CONTEXTS.size === 0) {
+		clearTimeout(bashDurationTimer);
+		bashDurationTimer = null;
+	}
+}
+
+function clearAllBashDurationContexts(): void {
+	BASH_DURATION_CONTEXTS.clear();
+	if (bashDurationTimer) {
+		clearTimeout(bashDurationTimer);
+		bashDurationTimer = null;
+	}
 }
 
 function syncBashDuration(ctx: any, isPartial = true): void {
@@ -2380,14 +2407,10 @@ function syncBashDuration(ctx: any, isPartial = true): void {
 	if (typeof startedAt !== "number") return;
 	if (!isPartial || ctx?.isError) {
 		if (typeof state[BASH_ENDED_AT_KEY] !== "number") state[BASH_ENDED_AT_KEY] = Date.now();
-		clearBashDurationTimer(ctx);
+		clearBashDurationContext(ctx);
 		return;
 	}
-	if (state[BASH_DURATION_TIMER_KEY]) return;
-	const timer = setInterval(() => safeInvalidate(ctx), 1_000);
-	state[BASH_DURATION_TIMER_KEY] = timer;
-	ACTIVE_BASH_DURATION_TIMERS.add(timer);
-	unrefTimer(timer);
+	registerBashDurationContext(ctx);
 }
 
 function bashHeaderTrailing(ctx: any, theme: Theme): string {
@@ -6938,7 +6961,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", async () => {
 		_clearAllBlinkContexts();
-		clearAllBashDurationTimers();
+		clearAllBashDurationContexts();
 		clearRtkRewriteState();
 		WRITE_EXISTED_BEFORE.clear();
 		clearHighlightCache();
