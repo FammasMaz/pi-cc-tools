@@ -44,7 +44,7 @@ import {
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 
-import { buildBashCommandPresentation, buildBashPreview, describeBashSource } from "./bash-command";
+import { buildBashCommandPresentation, buildBashPreview, describeBashSource, formatBashDuration } from "./bash-command";
 
 const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
@@ -70,6 +70,7 @@ const USER_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-user-m
 const UI_NOTIFY_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-ui-notifications-v2");
 const WRAP_MARK = "\uE000";
 const CLIP_MARK = "\uE001";
+const TRAILING_MARK = "\uE002";
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_IMAGE_PREFIX = "\x1b]1337;File=";
 
@@ -697,9 +698,24 @@ function getToolCallLine(tool: any): string {
 	return `${label}${summary ? ` ${summary}` : ""}`;
 }
 
-function getCompactToolLine(tool: any, width: number, groupedLabel?: string): string {
-	const content = removeGroupedToolPrefix(getToolCallLine(tool), groupedLabel);
-	return clampLineWidth(content || getToolName(tool), width);
+function alignTrailingMarkedLine(line: string, width: number): string {
+	const markerIndex = line.indexOf(TRAILING_MARK);
+	if (markerIndex === -1) return clampLineWidth(line, width);
+	const safeWidth = Math.max(1, width);
+	const left = line.slice(0, markerIndex);
+	const right = line.slice(markerIndex + TRAILING_MARK.length);
+	const rightWidth = visibleWidth(right);
+	if (rightWidth >= safeWidth) return truncateToWidth(right, safeWidth, "", false);
+	const leftBudget = Math.max(0, safeWidth - rightWidth - 2);
+	const clippedLeft = leftBudget > 0 ? truncateToWidth(left, leftBudget, "…", false) : "";
+	const gap = Math.max(1, safeWidth - visibleWidth(clippedLeft) - rightWidth);
+	return `${clippedLeft}${" ".repeat(gap)}${right}`;
+}
+
+function getCompactToolLine(tool: any, width: number, groupedLabel?: string, showTrailing = true): string {
+	let content = removeGroupedToolPrefix(getToolCallLine(tool), groupedLabel);
+	if (!showTrailing) content = content.split(TRAILING_MARK, 1)[0] ?? content;
+	return alignTrailingMarkedLine(content || getToolName(tool), width);
 }
 
 interface CollapsedToolEntry {
@@ -737,7 +753,7 @@ function getCollapsedToolEntryLine(entry: CollapsedToolEntry, width: number, gro
 		? ` • ${formatToolGroupCounts(entry.tools)}`
 		: "";
 	const suffix = ` ${FG_DIM}×${entry.tools.length}${TRANSPARENT_RESET}${attentionCounts}`;
-	const firstLine = getCompactToolLine(entry.tools[0], Math.max(1, width - visibleWidth(suffix)), groupedLabel);
+	const firstLine = getCompactToolLine(entry.tools[0], Math.max(1, width - visibleWidth(suffix)), groupedLabel, false);
 	const sharedLine = entry.name === "read" ? stripReadRangeFromToolLine(firstLine) : firstLine;
 	return clampLineWidth(`${sharedLine}${suffix}`, width);
 }
@@ -2335,6 +2351,59 @@ function liveLineCountTrailing(ctx: any, theme: Theme): string {
 	return ` ${theme.fg("muted", `(${lineCountLabel(count)})`)}`;
 }
 
+const BASH_STARTED_AT_KEY = "_bashStartedAtMs";
+const BASH_ENDED_AT_KEY = "_bashEndedAtMs";
+const BASH_DURATION_TIMER_KEY = "_bashDurationTimer";
+const ACTIVE_BASH_DURATION_TIMERS = new Set<ReturnType<typeof setInterval>>();
+
+function clearBashDurationTimer(ctx: any): void {
+	const timer = ctx?.state?.[BASH_DURATION_TIMER_KEY] as ReturnType<typeof setInterval> | undefined;
+	if (!timer) return;
+	clearInterval(timer);
+	ACTIVE_BASH_DURATION_TIMERS.delete(timer);
+	delete ctx.state[BASH_DURATION_TIMER_KEY];
+}
+
+function clearAllBashDurationTimers(): void {
+	for (const timer of ACTIVE_BASH_DURATION_TIMERS) clearInterval(timer);
+	ACTIVE_BASH_DURATION_TIMERS.clear();
+}
+
+function syncBashDuration(ctx: any, isPartial = true): void {
+	const state = ctx?.state;
+	if (!state) return;
+	if (state._toolStatus === "pending" && typeof state[BASH_STARTED_AT_KEY] !== "number") {
+		state[BASH_STARTED_AT_KEY] = Date.now();
+		delete state[BASH_ENDED_AT_KEY];
+	}
+	const startedAt = state[BASH_STARTED_AT_KEY];
+	if (typeof startedAt !== "number") return;
+	if (!isPartial || ctx?.isError) {
+		if (typeof state[BASH_ENDED_AT_KEY] !== "number") state[BASH_ENDED_AT_KEY] = Date.now();
+		clearBashDurationTimer(ctx);
+		return;
+	}
+	if (state[BASH_DURATION_TIMER_KEY]) return;
+	const timer = setInterval(() => safeInvalidate(ctx), 1_000);
+	state[BASH_DURATION_TIMER_KEY] = timer;
+	ACTIVE_BASH_DURATION_TIMERS.add(timer);
+	unrefTimer(timer);
+}
+
+function bashHeaderTrailing(ctx: any, theme: Theme): string {
+	const parts: string[] = [];
+	if (ctx?.isPartial === true) {
+		const count = ctx?.state?._liveLineCount;
+		if (typeof count === "number" && Number.isFinite(count) && count > 0) parts.push(lineCountLabel(count));
+	}
+	const startedAt = ctx?.state?.[BASH_STARTED_AT_KEY];
+	if (typeof startedAt === "number") {
+		const endedAt = ctx?.state?.[BASH_ENDED_AT_KEY];
+		parts.push(formatBashDuration((typeof endedAt === "number" ? endedAt : Date.now()) - startedAt));
+	}
+	return parts.length > 0 ? `${TRAILING_MARK}${theme.fg("muted", parts.join(" · "))}` : "";
+}
+
 function setToolStatus(ctx: any, status: "pending" | "success" | "error" | "idle"): void {
 	if (ctx?.state) ctx.state._toolStatus = status;
 }
@@ -2889,6 +2958,7 @@ function wrapMarkedLine(line: string, width: number): string[] {
 	if (clipIndex !== -1) {
 		const prefix = line.slice(0, clipIndex);
 		const body = line.slice(clipIndex + CLIP_MARK.length);
+		if (body.includes(TRAILING_MARK)) return [alignTrailingMarkedLine(`${prefix}${body}`, width)];
 		const bodyWidth = Math.max(1, width - visibleWidth(prefix));
 		if (visibleWidth(body) <= bodyWidth) return [`${prefix}${body}`];
 		const hint = "…";
@@ -6326,6 +6396,7 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
+			syncBashDuration(ctx);
 			const rewrite = ensureRtkRewriteForContext(ctx, args);
 			const command = typeof args.command === "string" ? args.command : "";
 			const presentation = buildBashCommandPresentation(command);
@@ -6340,11 +6411,12 @@ export default function (pi: ExtensionAPI) {
 				`${headerSummary}${rtkBadge}`,
 				theme,
 				toolStatusDot(ctx, theme),
-				liveLineCountTrailing(ctx, theme),
+				bashHeaderTrailing(ctx, theme),
 			).replace(WRAP_MARK, CLIP_MARK);
 			return makeText(ctx.lastComponent, commandBlock ? `${header}\n${commandBlock}` : header);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
+			syncBashDuration(ctx, isPartial);
 			const details = result.details as BashToolDetails | undefined;
 			const rewrite = ensureRtkRewriteForContext(ctx, ctx.args);
 			const output = result.content[0]?.type === "text" ? result.content[0].text : "";
@@ -6866,6 +6938,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("session_shutdown", async () => {
 		_clearAllBlinkContexts();
+		clearAllBashDurationTimers();
 		clearRtkRewriteState();
 		WRITE_EXISTED_BEFORE.clear();
 		clearHighlightCache();

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildBashCommandPresentation, buildBashPreview, describeBashSource } from "../extensions/bash-command.ts";
+import {
+	buildBashCommandPresentation,
+	buildBashPreview,
+	describeBashSource,
+	formatBashDuration,
+} from "../extensions/bash-command.ts";
 
 test("headlines a script by its first operative line", () => {
 	const presentation = buildBashCommandPresentation(`set -euo pipefail
@@ -28,6 +33,13 @@ find src -type f | sort
 test("describes visible source without repeating its headline", () => {
 	assert.equal(describeBashSource(buildBashCommandPresentation("git status --short")), "command");
 	assert.equal(describeBashSource(buildBashCommandPresentation("echo one\necho two")), "script · 2 lines");
+});
+
+test("formats live and completed durations compactly", () => {
+	assert.equal(formatBashDuration(400), "<1s");
+	assert.equal(formatBashDuration(12_900), "12s");
+	assert.equal(formatBashDuration(64_000), "1m 04s");
+	assert.equal(formatBashDuration(3_780_000), "1h 03m");
 });
 
 test("shows multiline scripts verbatim", () => {
