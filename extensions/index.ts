@@ -3003,6 +3003,10 @@ class ToolText extends Text {
 	private toolCachedValue?: string;
 	private toolCachedWidth?: number;
 	private toolCachedLines?: string[];
+	private observedWidth?: number;
+	private pendingObservedWidth?: number;
+	private widthObserver?: (width: number) => void;
+	private widthObserverScheduled = false;
 
 	constructor(text = "") {
 		super("", 0, 0);
@@ -3015,6 +3019,26 @@ class ToolText extends Text {
 		this.invalidate();
 	}
 
+	setWidthObserver(observer?: (width: number) => void): void {
+		this.widthObserver = observer;
+		if (!observer) this.pendingObservedWidth = undefined;
+	}
+
+	private observeWidth(width: number): void {
+		if (this.observedWidth === width) return;
+		this.observedWidth = width;
+		if (!this.widthObserver) return;
+		this.pendingObservedWidth = width;
+		if (this.widthObserverScheduled) return;
+		this.widthObserverScheduled = true;
+		queueMicrotask(() => {
+			this.widthObserverScheduled = false;
+			const observed = this.pendingObservedWidth;
+			this.pendingObservedWidth = undefined;
+			if (observed !== undefined) this.widthObserver?.(observed);
+		});
+	}
+
 	invalidate(): void {
 		this.toolCachedValue = undefined;
 		this.toolCachedWidth = undefined;
@@ -3022,6 +3046,7 @@ class ToolText extends Text {
 	}
 
 	render(width: number): string[] {
+		this.observeWidth(width);
 		const branchKey = toolBranchRenderCacheKey();
 		if (
 			this.toolCachedLines
@@ -3052,7 +3077,18 @@ class ToolText extends Text {
 
 function makeText(last: unknown, text: string): Text {
 	const component = last instanceof ToolText ? last : new ToolText();
+	component.setWidthObserver();
 	component.setText(text);
+	return component;
+}
+
+function makeResponsiveDiffText(ctx: any, last: unknown, text: string): Text {
+	const component = makeText(last, text) as ToolText;
+	component.setWidthObserver((width) => {
+		if (ctx.state?._diffComponentWidth === width) return;
+		if (ctx.state) ctx.state._diffComponentWidth = width;
+		safeInvalidate(ctx);
+	});
 	return component;
 }
 
@@ -3926,8 +3962,15 @@ function termW(): number {
 	return Math.max(40, Math.min(raw - 4, MAX_TERM_WIDTH));
 }
 
-function branchDiffWidth(): number {
-	return Math.max(40, termW() - 2);
+function branchDiffWidth(componentWidth?: number, chromeWidth = 2): number {
+	const width = typeof componentWidth === "number" && Number.isFinite(componentWidth)
+		? Math.floor(componentWidth)
+		: termW();
+	return Math.max(20, Math.min(width - chromeWidth, MAX_TERM_WIDTH));
+}
+
+function contextDiffWidth(ctx: any, chromeWidth = 2): number {
+	return branchDiffWidth(ctx.state?._diffComponentWidth, chromeWidth);
 }
 
 function adaptiveWrapRows(tw?: number): number {
@@ -4787,7 +4830,7 @@ function renderEditPreviewBody(
 	summary: string,
 ): void {
 	const dc = resolveDiffColors(theme);
-	const branchWidth = branchDiffWidth();
+	const branchWidth = contextDiffWidth(ctx, 3);
 	if (operations.length === 1) {
 		const [diff] = diffs;
 		const line = lines[0] ?? getFirstChangedNewLine(diff);
@@ -5549,7 +5592,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 	}
 	ctx.state._openAiPatchFiles = preview.changes.map((change) => change.displayPath);
 
-	const diffWidth = branchDiffWidth();
+	const diffWidth = contextDiffWidth(ctx);
 	const key = `apply-preview:${ctx.state._applyPatchMetaKey ?? hashText(patchText)}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 	if (ctx.state._applyPatchPreviewKey !== key) {
 		ctx.state._applyPatchPreviewKey = key;
@@ -5602,7 +5645,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 	}
 
 	const body = ctx.state._applyPatchPreviewDisplay as string | undefined;
-	return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
+	return makeResponsiveDiffText(ctx, ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 }
 
 function renderApplyPatchResult(result: any, isPartial: boolean, theme: Theme, ctx: any): Text {
@@ -6684,7 +6727,7 @@ export default function (pi: ExtensionAPI) {
 			if (d?._type === "diff") {
 				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
 				const hunks = d.diff?.lines?.filter((l: any) => l.type === "sep").length + (d.diff?.lines?.length ? 1 : 0);
-				const diffWidth = branchDiffWidth();
+				const diffWidth = contextDiffWidth(ctx);
 				const mode = shouldUseSplit(d.diff, diffWidth, previewLines) ? "split" : "unified";
 				const richSummary = diffSummaryWithMeta(d.diff.added, d.diff.removed, hunks, mode);
 				const key = `wd:${diffWidth}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}:${ctx.expanded ? 1 : 0}`;
@@ -6704,7 +6747,7 @@ export default function (pi: ExtensionAPI) {
 							safeInvalidate(ctx);
 						});
 				}
-				return makeText(ctx.lastComponent, ctx.state._wdt ?? withBranch(richSummary, theme));
+				return makeResponsiveDiffText(ctx, ctx.lastComponent, ctx.state._wdt ?? withBranch(richSummary, theme));
 			}
 			if (d?._type === "noChange") return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "✓ no changes"), theme));
 			if (d?._type === "new") {
@@ -6714,7 +6757,7 @@ export default function (pi: ExtensionAPI) {
 				const syntheticDiff = getCachedParsedDiff(ctx, `nf-diff:${d.filePath}:${contentHash}`, "", content);
 				const richSummary = diffSummaryWithMeta(syntheticDiff.added, 0, 1, "new file");
 				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
-				const diffWidth = branchDiffWidth();
+				const diffWidth = contextDiffWidth(ctx);
 				const pk = `nf:${d.filePath}:${contentHash}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 				if (ctx.state._nfk !== pk) {
 					ctx.state._nfk = pk;
@@ -6732,7 +6775,7 @@ export default function (pi: ExtensionAPI) {
 							safeInvalidate(ctx);
 						});
 				}
-				return makeText(ctx.lastComponent, ctx.state._nft ?? withBranch(`${richSummary} ${theme.fg("muted", `(${lineTotal} lines)`)}`, theme));
+				return makeResponsiveDiffText(ctx, ctx.lastComponent, ctx.state._nft ?? withBranch(`${richSummary} ${theme.fg("muted", `(${lineTotal} lines)`)}`, theme));
 			}
 			return makeText(ctx.lastComponent, withBranch(theme.fg("success", "Written"), theme));
 		},
@@ -6787,7 +6830,7 @@ export default function (pi: ExtensionAPI) {
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader("Edit", summary, theme, ` ${toolStatusDot(ctx, theme)}`, liveLineCountTrailing(ctx, theme));
 			if (!(ctx.argsComplete && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
-			const diffWidth = branchDiffWidth();
+			const diffWidth = contextDiffWidth(ctx, 3);
 			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, key, operations);
 			if (ctx.state._pk !== key) {
@@ -6807,8 +6850,8 @@ export default function (pi: ExtensionAPI) {
 						renderEditPreviewBody(ctx, key, theme, lg, operations, fallbackDiffs, fallbackDiffs.map((diff) => getFirstChangedNewLine(diff)), editSummary);
 					});
 			}
-				const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state._ptDisplay as string | undefined);
-			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
+			const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state._ptDisplay as string | undefined);
+			return makeResponsiveDiffText(ctx, ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
