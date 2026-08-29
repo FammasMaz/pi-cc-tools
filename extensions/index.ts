@@ -3600,12 +3600,12 @@ function rebindUiChromeToTheme(ctx: any): void {
 	const theme = ctx.ui?.theme;
 	invalidateThemePaletteCache();
 	clearHighlightCache();
-	autoDerivePending = true;
+	applyDiffPalette();
 	bustSpinnerSettingsCache();
 	applyToolBackgroundMode(theme);
 	applyThemePaletteIfNeeded(theme);
 	syncDiffShikiTheme(theme);
-	if (themeAdaptiveEnabled() && theme?.getFgAnsi) {
+	if (themeAdaptiveEnabled() && theme?.getFgAnsi && !hasExplicitBgConfig) {
 		autoDeriveBgFromTheme(theme);
 		autoDerivePending = false;
 	}
@@ -3842,6 +3842,7 @@ function applyThemePaletteIfNeeded(theme: any): void {
 
 function applyDiffPalette(): void {
 	const config = loadDiffConfig();
+	hasExplicitBgConfig = false;
 	const preset = config.diffTheme ? DIFF_PRESETS[config.diffTheme] : null;
 	if (preset) hasExplicitBgConfig = true;
 	const overrides = config.diffColors ?? {};
