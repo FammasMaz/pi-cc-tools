@@ -3161,60 +3161,51 @@ function ptdCaptureFileSnapshot(fullPath: string): string | undefined {
 // light.json); dark falls back to the old engine's universal accents.
 const PTD_LIGHT_DIFF_ADD_FG: Rgb = { r: 88, g: 132, b: 88 };
 const PTD_LIGHT_DIFF_DEL_FG: Rgb = { r: 170, g: 85, b: 85 };
-const PTD_LIGHT_DIFF_CTX_FG: Rgb = { r: 108, g: 108, b: 108 };
-const PTD_DARK_DIFF_CTX_FG: Rgb = { r: 128, g: 128, b: 128 };
 
-const ptdDiffThemeCache = new WeakMap<object, unknown>();
+/** The bg slots the ptd renderer probes for its palette base / container fill. */
+const PTD_DIFF_BG_SLOTS = new Set(["toolSuccessBg", "toolPendingBg", "toolErrorBg", "userMessageBg"]);
+
+/** Stand-in for a diff slot whose real theme ANSI is not RGB-parseable. */
+function ptdStandInRgb(kind: "fg" | "bg", slot: string, theme: any): Rgb | undefined {
+	const onLight = isLightThemeBackground(theme);
+	if (kind === "bg") {
+		if (!PTD_DIFF_BG_SLOTS.has(slot)) return undefined;
+		return onLight ? FALLBACK_BASE_BG_LIGHT : FALLBACK_BASE_BG_DARK;
+	}
+	if (slot === "toolDiffAdded") return onLight ? PTD_LIGHT_DIFF_ADD_FG : UNIVERSAL_DIFF_ADD_FG;
+	if (slot === "toolDiffRemoved") return onLight ? PTD_LIGHT_DIFF_DEL_FG : UNIVERSAL_DIFF_DEL_FG;
+	return undefined;
+}
 
 /**
- * Wraps the live theme so getFgAnsi/getBgAnsi always yield RGB-parseable ANSI
- * for the diff slots the ptd renderer mixes tints from. Real theme values pass
- * through untouched when parseable; otherwise substitute stand-ins built on
- * the same light/dark detection and fallback bases the legacy theme-adaptive
- * engine uses (isLightThemeBackground / FALLBACK_BASE_BG_* / UNIVERSAL_*), so
- * edit/write diffs stay coherent with apply_patch. Everything else proxies to
- * the original theme.
+ * Theme facade for the ptd renderer (structurally its DiffTheme): getFgAnsi /
+ * getBgAnsi always yield RGB-parseable ANSI for the diff slots the renderer
+ * mixes tints from. Real theme values pass through untouched when parseable;
+ * otherwise stand-ins are substituted using the same light/dark detection and
+ * fallback bases as the legacy theme-adaptive engine, keeping edit/write
+ * diffs coherent with apply_patch.
+ *
+ * Deliberately stateless: pi hands hooks a stable proxy whose underlying
+ * Theme is swapped on /theme, so nothing derived from it may be cached.
  */
-export function ptdThemeForDiff<T extends object>(theme: T): T {
-	const cached = ptdDiffThemeCache.get(theme);
-	if (cached) return cached as T;
-	const onLight = isLightThemeBackground(theme);
-	const standIns: Record<string, Rgb | undefined> = {
-		"bg:toolSuccessBg": onLight ? FALLBACK_BASE_BG_LIGHT : FALLBACK_BASE_BG_DARK,
-		"bg:toolPendingBg": onLight ? FALLBACK_BASE_BG_LIGHT : FALLBACK_BASE_BG_DARK,
-		"bg:toolErrorBg": onLight ? FALLBACK_BASE_BG_LIGHT : FALLBACK_BASE_BG_DARK,
-		"bg:userMessageBg": onLight ? FALLBACK_BASE_BG_LIGHT : FALLBACK_BASE_BG_DARK,
-		"fg:toolDiffAdded": onLight ? PTD_LIGHT_DIFF_ADD_FG : UNIVERSAL_DIFF_ADD_FG,
-		"fg:toolDiffRemoved": onLight ? PTD_LIGHT_DIFF_DEL_FG : UNIVERSAL_DIFF_DEL_FG,
-		"fg:toolDiffContext": onLight ? PTD_LIGHT_DIFF_CTX_FG : PTD_DARK_DIFF_CTX_FG,
-	};
+export function ptdThemeForDiff(theme: any) {
 	const substitute = (kind: "fg" | "bg", slot: string): string => {
-		let ansi = "";
-		try {
-			const t = theme as any;
-			const real = kind === "fg" ? t.getFgAnsi : t.getBgAnsi;
-			if (typeof real === "function") ansi = real.call(t, slot) ?? "";
-		} catch {
-			ansi = "";
-		}
+		const ansi = kind === "fg" ? safeFgAnsi(theme, slot) : safeBgAnsi(theme, slot);
 		if (ansi && parseAnsiRgb(ansi)) return ansi;
-		const rgb = standIns[`${kind}:${slot}`];
-		if (rgb) {
-			const { r, g, b } = rgb;
-			return `\x1b[${kind === "bg" ? 48 : 38};2;${Math.round(r)};${Math.round(g)};${Math.round(b)}m`;
-		}
-		return ansi;
+		const rgb = ptdStandInRgb(kind, slot, theme);
+		if (rgb) return kind === "bg" ? rgbToBgAnsi(rgb) : rgbToFgAnsi(rgb);
+		// Non-diff slot (e.g. "dim") that the theme couldn't answer: empty
+		// string, which the renderer's falsy guards treat as absent.
+		return ansi ?? "";
 	};
-	const wrapped = new Proxy(theme as any, {
-		get(target, prop) {
-			if (prop === "getFgAnsi") return (slot: string) => substitute("fg", slot);
-			if (prop === "getBgAnsi") return (slot: string) => substitute("bg", slot);
-			const value = Reflect.get(target, prop, target);
-			return typeof value === "function" ? value.bind(target) : value;
-		},
-	}) as T;
-	ptdDiffThemeCache.set(theme, wrapped);
-	return wrapped;
+	return {
+		fg: (color: string, text: string): string => theme.fg(color, text),
+		bg: (color: string, text: string): string =>
+			typeof theme.bg === "function" ? theme.bg(color, text) : text,
+		bold: (text: string): string => (typeof theme.bold === "function" ? theme.bold(text) : text),
+		getFgAnsi: (color: string): string => substitute("fg", color),
+		getBgAnsi: (color: string): string => substitute("bg", color),
+	};
 }
 
 function diffCollapsedLimit(): number {
@@ -3731,27 +3722,6 @@ const DELETION_TINT_TARGET = { r: 232, g: 95, b: 122 };
 const FALLBACK_BASE_BG_DARK = { r: 32, g: 35, b: 42 };
 const FALLBACK_BASE_BG_LIGHT = { r: 232, g: 233, b: 236 };
 
-let _agentThemeNameCache: { value: string; timestamp: number } | null = null;
-
-/** `theme` (light/dark/…) lives in pi's agent settings, not ~/.pi/settings.json. */
-function agentSettingsThemeName(): string {
-	const now = Date.now();
-	if (_agentThemeNameCache && now - _agentThemeNameCache.timestamp < SETTINGS_CACHE_TTL_MS) {
-		return _agentThemeNameCache.value;
-	}
-	let value = "";
-	try {
-		const parsed = JSON.parse(
-			readFileSync(`${process.env.HOME ?? ""}/.pi/agent/settings.json`, "utf8"),
-		) as Record<string, unknown>;
-		value = String(parsed.theme ?? "").toLowerCase();
-	} catch {
-		value = "";
-	}
-	_agentThemeNameCache = { value, timestamp: now };
-	return value;
-}
-
 function isLightThemeBackground(theme: any): boolean {
 	const panel =
 		themeBgRgb(theme, "toolSuccessBg") ||
@@ -3767,11 +3737,9 @@ function isLightThemeBackground(theme: any): boolean {
 		return lum < 95;
 	}
 	// Nothing RGB-parseable (e.g. 16-color-only terminals). Fall back to the
-	// Theme instance's name, then the configured theme in pi's agent settings.
+	// Theme name, which pi's loadTheme sets for every configured theme.
 	const name = typeof theme?.name === "string" ? theme.name.toLowerCase() : "";
-	if (name.includes("light")) return true;
-	if (name.includes("dark")) return false;
-	return agentSettingsThemeName().includes("light");
+	return name.includes("light");
 }
 
 function syncDiffShikiTheme(theme: any): void {
@@ -3799,6 +3767,10 @@ function mixRgb(
 
 function rgbToBgAnsi(c: { r: number; g: number; b: number }): string {
 	return `\x1b[48;2;${Math.round(c.r)};${Math.round(c.g)};${Math.round(c.b)}m`;
+}
+
+function rgbToFgAnsi(c: { r: number; g: number; b: number }): string {
+	return `\x1b[38;2;${Math.round(c.r)};${Math.round(c.g)};${Math.round(c.b)}m`;
 }
 
 function autoDeriveBgFromTheme(theme: any): void {
@@ -6859,7 +6831,13 @@ export default function (pi: ExtensionAPI) {
 				const cfg = ptdDiffConfig();
 				const diffWidth = branchDiffWidth();
 				const previousContent = typeof d.previousContent === "string" ? d.previousContent : undefined;
-				const key = `ptdw:${hashText(content)}:${hashText(previousContent ?? "")}:${d.fileExistedBeforeWrite ? 1 : 0}:${diffWidth}:${isExpanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}`;
+				// Content is immutable once the tool completed; hash it once per
+				// result instead of on every frame (files can be large).
+				if (ctx.state._ptdwHashFor !== d) {
+					ctx.state._ptdwHashFor = d;
+					ctx.state._ptdwHash = `${hashText(content)}:${hashText(previousContent ?? "")}`;
+				}
+				const key = `ptdw:${ctx.state._ptdwHash}:${d.fileExistedBeforeWrite ? 1 : 0}:${diffWidth}:${isExpanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}`;
 				if (ctx.state._ptdwKey !== key) {
 					const component = renderWriteDiffResult(
 						content,
@@ -7004,7 +6982,13 @@ export default function (pi: ExtensionAPI) {
 				(ctx.args as any)?.file_path ??
 				(typeof details?.filePath === "string" ? (details.filePath as string) : "");
 			const diffStr = typeof details?.diff === "string" ? (details.diff as string) : "";
-			const key = `ptde:${hashText(diffStr)}:${fp}:${diffWidth}:${isExpanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}`;
+			// The diff payload is immutable once the tool completed; hash it once
+			// per result instead of on every frame.
+			if (ctx.state._ptdeHashFor !== result) {
+				ctx.state._ptdeHashFor = result;
+				ctx.state._ptdeHash = hashText(diffStr);
+			}
+			const key = `ptde:${ctx.state._ptdeHash}:${fp}:${diffWidth}:${isExpanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}`;
 			if (ctx.state._ptdeKey !== key) {
 				const component = renderEditDiffResult(
 					details,
