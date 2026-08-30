@@ -29,8 +29,8 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **RTK rewrite integration** that folds rewrite notices into the bash tool row with a muted `(RTK)` badge and expanded-only rewrite details
 - **Transparent tool backgrounds** in `transparent` or `border` mode
 - **Theme-adaptive palette** — borders, branch connectors, dim text, spinner accent, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
-- **Light Ghostty-sync themes** — edit/write diffs use `github-light` highlighting and light-tinted diff rows; tool pending dots use softer chrome colors
-- **Transparent edit/write diffs** with universal red/green diff colors
+- **pi-tool-display diff rendering for `edit`/`write`** — split or unified layouts with word-level change emphasis and theme-derived row tints, ported verbatim from [pi-tool-display](https://github.com/MasuRii/pi-tool-display); `apply_patch` keeps the classic engine
+- **Light Ghostty-sync themes** — `apply_patch` diffs use `github-light` highlighting and light-tinted diff rows; tool pending dots use softer chrome colors
 - **Grouped consecutive tool calls** with a compact status header and per-tool glance rows (set `groupToolCalls: false` to disable)
 - **Extra detail toggle** with `Ctrl+Shift+O`, increasing expanded preview caps without making the default view heavy
 - **Global border patch** for all tool rows, including unknown/custom tools
@@ -56,7 +56,11 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
   "liveToolPreviewLines": 5,
   "diffCollapsedLines": 24,
   "themeAdaptive": true,
-  "diffTheme": "github-dark"
+  "diffTheme": "github-dark",
+  "diffViewMode": "auto",
+  "diffIndicatorMode": "bars",
+  "diffSplitMinWidth": 120,
+  "diffWordWrap": true
 }
 ```
 
@@ -75,7 +79,7 @@ When `themeAdaptive` is `true` (default), the following colors are derived from 
 | Spinner verb text (`Working…`) | `borderAccent` (fallback: `accent`) |
 | Spinner status text | `muted` |
 
-User-supplied `diffTheme` presets and `diffColors` overrides always win over theme-derived defaults. File-type icons (e.g. `ts`, `py`, `rs`) keep their language-identity colors and are not theme-derived.
+User-supplied `diffTheme` presets and `diffColors` overrides always win over theme-derived defaults; they apply to `apply_patch` diffs (`edit`/`write` use the ported pi-tool-display renderer, see below). File-type icons (e.g. `ts`, `py`, `rs`) keep their language-identity colors and are not theme-derived.
 
 Set `themeAdaptive: false` to keep the original fixed Claude-style palette regardless of the active pi theme.
 
@@ -132,6 +136,19 @@ Use `/cc-tools` to control tool UI at runtime:
 | `searchOutputMode` | `hidden`, `count`, `preview` | `preview` |
 | `mcpOutputMode` | `hidden`, `summary`, `preview` | `preview` |
 | `bashOutputMode` | `opencode`, `summary`, `preview` | `opencode` |
+
+### Edit/write diff rendering
+
+`edit` and `write` results are rendered by a verbatim port of [pi-tool-display](https://github.com/MasuRii/pi-tool-display)'s diff renderer (`extensions/ptd-diff/`, MIT): unified or side-by-side layouts, word-level change emphasis, pending-edit previews while the tool streams, and row tints mixed from the active pi theme. `apply_patch` keeps the classic diff engine, so `diffTheme` / `diffColors` still apply there.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `diffViewMode` | `auto` | `auto` (split when wide enough), `split`, or `unified` |
+| `diffIndicatorMode` | `bars` | `bars` (colored gutter bars), `classic` (`+`/`-` markers), or `none` |
+| `diffSplitMinWidth` | `120` | Minimum terminal width for `auto` to choose the split layout |
+| `diffWordWrap` | `true` | Wrap long diff lines instead of truncating them |
+
+`npm run test:parity` proves the port renders byte-identically to an installed `pi-tool-display@0.5.0` (expects it under `~/.pi/agent/npm/node_modules/`).
 
 ### Display settings
 
