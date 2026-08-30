@@ -5,6 +5,7 @@ export interface BashCommandPresentation {
 }
 
 const CONTROL_CHAR_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+const ANSI_ESCAPE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g;
 const HEADLINE_SKIP_RE = /^(?:#|set(?:\s|$)|cd(?:\s|$)|(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=|(?:\{|\}|do|done|then|fi|esac)$)/;
 
 function normalizeHeadline(line: string): string {
@@ -57,6 +58,21 @@ export function formatBashDuration(ms: number): string {
 	const hours = Math.floor(totalMinutes / 60);
 	const minutes = totalMinutes % 60;
 	return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+}
+
+export function getLastBashOutputLine(output: string): string | undefined {
+	const lines = output
+		.replace(/\r\n/g, "\n")
+		.replace(/\r/g, "\n")
+		.split("\n");
+	for (let index = lines.length - 1; index >= 0; index--) {
+		const line = lines[index]
+			.replace(ANSI_ESCAPE_RE, "")
+			.replace(CONTROL_CHAR_RE, "")
+			.trim();
+		if (line) return line;
+	}
+	return undefined;
 }
 
 export function buildBashPreview(sourceLines: string[], limit: number): string[] {

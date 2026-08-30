@@ -44,7 +44,13 @@ import {
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 
-import { buildBashCommandPresentation, buildBashPreview, describeBashSource, formatBashDuration } from "./bash-command";
+import {
+	buildBashCommandPresentation,
+	buildBashPreview,
+	describeBashSource,
+	formatBashDuration,
+	getLastBashOutputLine,
+} from "./bash-command";
 
 const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
@@ -758,6 +764,15 @@ function getCollapsedToolEntryLine(entry: CollapsedToolEntry, width: number, gro
 	return clampLineWidth(`${sharedLine}${suffix}`, width);
 }
 
+function getCollapsedToolEntryLines(entry: CollapsedToolEntry, width: number, groupedLabel?: string): string[] {
+	const lines = [getCollapsedToolEntryLine(entry, width, groupedLabel)];
+	if (entry.name !== "bash") return lines;
+	const running = [...entry.tools].reverse().find((tool) => getToolStatusForGroup(tool) === "pending");
+	const latestOutput = running ? getLastBashOutputLine(getTextContent(running.result)) : undefined;
+	if (latestOutput) lines.push(`${FG_DIM}${latestOutput}${TRANSPARENT_RESET}`);
+	return lines;
+}
+
 function getExpandedToolGroupLines(tool: any, width: number, groupedLabel?: string): string[] {
 	const lines = stripToolChrome(tool.render(Math.max(1, width)))
 		.map((line) => removeGroupedToolPrefix(line, groupedLabel))
@@ -967,7 +982,7 @@ class ToolGroupComponent extends Container {
 				for (let index = 0; index < entries.length; index++) {
 					const entry = entries[index];
 					const branched = formatBranchedToolLines(
-						[getCollapsedToolEntryLine(entry, childWidth, groupedName ? label : undefined)],
+						getCollapsedToolEntryLines(entry, childWidth, groupedName ? label : undefined),
 						index,
 						entries.length,
 						safeWidth,

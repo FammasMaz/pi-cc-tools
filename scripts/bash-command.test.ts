@@ -6,6 +6,7 @@ import {
 	buildBashPreview,
 	describeBashSource,
 	formatBashDuration,
+	getLastBashOutputLine,
 } from "../extensions/bash-command.ts";
 
 test("headlines a script by its first operative line", () => {
@@ -40,6 +41,18 @@ test("formats live and completed durations compactly", () => {
 	assert.equal(formatBashDuration(12_900), "12s");
 	assert.equal(formatBashDuration(64_000), "1m 04s");
 	assert.equal(formatBashDuration(3_780_000), "1h 03m");
+});
+
+test("selects the latest non-empty bash output line", () => {
+	assert.equal(getLastBashOutputLine("building\n\n  testing target 3  \n"), "testing target 3");
+	assert.equal(getLastBashOutputLine("\n\t\n"), undefined);
+});
+
+test("treats carriage-return progress as live output and removes terminal escapes", () => {
+	assert.equal(
+		getLastBashOutputLine("\u001b[32mCompiling\u001b[0m\r\u001b]0;tests\u0007Running suite 4/9\r"),
+		"Running suite 4/9",
+	);
 });
 
 test("shows multiline scripts verbatim", () => {
