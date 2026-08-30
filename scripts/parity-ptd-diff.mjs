@@ -2,6 +2,7 @@
 // installed pi-tool-display@0.5.0. Both copies are loaded through jiti with the
 // SAME alias map (mimicking Pi's extension loader), so they share one
 // pi-tui / pi-coding-agent instance and any difference is a porting defect.
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +28,22 @@ const ORIGINAL_DIR = join(
 	homedir(),
 	".pi/agent/npm/node_modules/pi-tool-display/src",
 );
+
+// The port claims byte-parity with exactly 0.5.0; comparing against any other
+// installed version would report porting defects that aren't.
+const EXPECTED_ORIGINAL_VERSION = "0.5.0";
+let installedVersion;
+try {
+	const pkg = JSON.parse(readFileSync(join(ORIGINAL_DIR, "..", "package.json"), "utf8"));
+	installedVersion = pkg.version;
+} catch {
+	console.error(`parity: pi-tool-display not found under ${ORIGINAL_DIR} — install it with \`pi install npm:pi-tool-display\` first.`);
+	process.exit(1);
+}
+if (installedVersion !== EXPECTED_ORIGINAL_VERSION) {
+	console.error(`parity: expected pi-tool-display@${EXPECTED_ORIGINAL_VERSION}, found ${installedVersion}.`);
+	process.exit(1);
+}
 
 const ported = await jiti.import(join(PORTED_DIR, "diff-renderer.ts"));
 const original = await jiti.import(join(ORIGINAL_DIR, "diff-renderer.ts"));

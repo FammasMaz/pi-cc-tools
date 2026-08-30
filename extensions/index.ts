@@ -1,5 +1,4 @@
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { readFile as readFileAsync } from "node:fs/promises";
 import { basename, dirname, extname, relative, resolve } from "node:path";
 
 import type {
@@ -3069,6 +3068,8 @@ function previewLimit(): number {
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 8;
 }
 
+// Note: the ptd-diff bridge (ptdDiffConfig) reads `expandedPreviewMaxLines`
+// too, but with pi-tool-display's clamping (0–20000) for edit/write diffs.
 function expandedPreviewLimit(): number {
 	const settings = readSettings();
 	const key = extraToolOutputExpanded ? "extraExpandedPreviewMaxLines" : "expandedPreviewMaxLines";
@@ -3206,11 +3207,6 @@ export function ptdThemeForDiff(theme: any) {
 		getFgAnsi: (color: string): string => substitute("fg", color),
 		getBgAnsi: (color: string): string => substitute("bg", color),
 	};
-}
-
-function diffCollapsedLimit(): number {
-	const value = readSettings().diffCollapsedLines;
-	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 24;
 }
 
 function collapsedPreviewCount(expanded: boolean, fallback: number): number {
@@ -3599,48 +3595,6 @@ function applyToolBranchColor(theme?: any): void {
 	syncOutlineChromeFromBranch(theme);
 }
 
-/** Strip baked ├/└/│ prefixes (short or long arm) so branch color can be reapplied. */
-function stripBranchMarkupLine(line: string): string {
-	let plain = stripAnsi(line);
-	plain = plain.replace(/^\s*[├└]─?\s*/, "");
-	plain = plain.replace(/^\s*│\s{0,2}/, "");
-	return plain;
-}
-
-function stripBranchMarkupBlock(text: string): string {
-	return text
-		.split("\n")
-		.map((line) => (stripAnsi(line).trim() ? stripBranchMarkupLine(line) : line))
-		.join("\n");
-}
-
-function liveBranchDisplay(state: Record<string, unknown> | undefined, theme: Theme): string | undefined {
-	if (!state || typeof state !== "object") return undefined;
-	const body = state._ptBody;
-	if (typeof body === "string" && body.trim() && !body.includes("(rendering")) {
-		return indentBranchBlock(withBranch(body, theme, false, true));
-	}
-	const display = state._ptDisplay;
-	if (typeof display === "string" && display.trim()) {
-		return indentBranchBlock(withBranch(stripBranchMarkupBlock(display), theme, false, true));
-	}
-	return undefined;
-}
-
-function refreshToolBranchDisplaysInState(state: Record<string, unknown> | undefined, theme: Theme): void {
-	if (!state || typeof state !== "object") return;
-	const body = state._ptBody;
-	if (typeof body === "string" && body.trim() && !body.includes("(rendering")) {
-		state._ptDisplay = indentBranchBlock(withBranch(body, theme, false, true));
-		return;
-	}
-	const display = state._ptDisplay;
-	if (typeof display === "string" && display.trim()) {
-		const stripped = stripBranchMarkupBlock(display);
-		state._ptDisplay = indentBranchBlock(withBranch(stripped, theme, false, true));
-	}
-}
-
 function refreshAllToolBranchVisuals(ctx: any): void {
 	_settingsCache = null;
 	syncToolBackgroundMode();
@@ -3648,7 +3602,7 @@ function refreshAllToolBranchVisuals(ctx: any): void {
 	applyToolBackgroundMode(ctx?.ui?.theme);
 	applyToolBranchColor(ctx?.ui?.theme);
 	bumpToolBranchVisualEpoch(); // always bust ToolText + container caches after /cc-tools branch
-	// Tool rows recompute branch markup on next render (liveBranchDisplay + cache bust).
+	// Tool rows recompute branch markup on next render (cache bust above).
 	if (ctx?.hasUI) {
 		try {
 			ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
@@ -4403,18 +4357,6 @@ function parseDiff(oldContent: string, newContent: string, ctxLines = 3): Parsed
 	return { lines, added, removed, chars: oldContent.length + newContent.length };
 }
 
-function getCachedParsedDiff(ctx: any, key: string, oldContent: string, newContent: string): ParsedDiff {
-	if (ctx.state?._parsedDiffKey === key && ctx.state._parsedDiff) {
-		return ctx.state._parsedDiff as ParsedDiff;
-	}
-	const diff = parseDiff(oldContent, newContent);
-	if (ctx.state) {
-		ctx.state._parsedDiffKey = key;
-		ctx.state._parsedDiff = diff;
-	}
-	return diff;
-}
-
 function wordDiffAnalysis(
 	oldText: string,
 	newText: string,
@@ -4739,208 +4681,8 @@ function getEditOperations(input: any): Array<{ oldText: string; newText: string
 	return oldText && oldText !== newText ? [{ oldText, newText }] : [];
 }
 
-function summarizeEditOperations(operations: Array<{ oldText: string; newText: string }>) {
-	const diffs = operations.map((edit) => parseDiff(edit.oldText, edit.newText));
-	const totalAdded = diffs.reduce((sum, diff) => sum + diff.added, 0);
-	const totalRemoved = diffs.reduce((sum, diff) => sum + diff.removed, 0);
-	const totalLines = diffs.reduce((sum, diff) => sum + diff.lines.length, 0);
-	const totalHunks = diffs.reduce((sum, diff) => sum + diff.lines.filter((l) => l.type === "sep").length + (diff.lines.length ? 1 : 0), 0);
-	return { diffs, totalAdded, totalRemoved, totalLines, totalHunks, summary: summarizeDiff(totalAdded, totalRemoved) };
-}
-
-type EditOperationSummary = ReturnType<typeof summarizeEditOperations>;
-
-function getCachedEditOperationSummary(ctx: any, key: string, operations: Array<{ oldText: string; newText: string }>): EditOperationSummary {
-	if (ctx.state?._editSummaryKey === key && ctx.state._editSummary) {
-		return ctx.state._editSummary as EditOperationSummary;
-	}
-	const summary = summarizeEditOperations(operations);
-	if (ctx.state) {
-		ctx.state._editSummaryKey = key;
-		ctx.state._editSummary = summary;
-	}
-	return summary;
-}
-
 function normalizeToLf(text: string): string {
 	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-}
-
-function stripBomText(text: string): string {
-	return text.startsWith("\uFEFF") ? text.slice(1) : text;
-}
-
-function normalizeTextForFuzzyMatch(text: string): string {
-	return text
-		.normalize("NFKC")
-		.split("\n")
-		.map((line) => line.trimEnd())
-		.join("\n")
-		.replace(/[\u2018\u2019\u201A\u201B]/g, "'")
-		.replace(/[\u201C\u201D\u201E\u201F]/g, '"')
-		.replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
-		.replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ");
-}
-
-function findEditMatch(content: string, oldText: string): { found: boolean; index: number; matchLength: number; usedFuzzyMatch: boolean } {
-	const exactIndex = content.indexOf(oldText);
-	if (exactIndex !== -1) return { found: true, index: exactIndex, matchLength: oldText.length, usedFuzzyMatch: false };
-	const fuzzyContent = normalizeTextForFuzzyMatch(content);
-	const fuzzyOldText = normalizeTextForFuzzyMatch(oldText);
-	const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
-	return fuzzyIndex === -1
-		? { found: false, index: -1, matchLength: 0, usedFuzzyMatch: false }
-		: { found: true, index: fuzzyIndex, matchLength: fuzzyOldText.length, usedFuzzyMatch: true };
-}
-
-function countFuzzyOccurrences(content: string, oldText: string): number {
-	const fuzzyContent = normalizeTextForFuzzyMatch(content);
-	const fuzzyOldText = normalizeTextForFuzzyMatch(oldText);
-	return fuzzyContent.split(fuzzyOldText).length - 1;
-}
-
-function lineNumberAtIndex(text: string, index: number): number {
-	return text.slice(0, Math.max(0, index)).split("\n").length;
-}
-
-function countLineBreaks(text: string): number {
-	return (text.match(/\n/g) ?? []).length;
-}
-
-function offsetParsedDiff(diff: ParsedDiff, oldOffset: number, newOffset = oldOffset): ParsedDiff {
-	return {
-		...diff,
-		lines: diff.lines.map((line) =>
-			line.type === "sep"
-				? line
-				: {
-					...line,
-					oldNum: line.oldNum === null ? null : line.oldNum + oldOffset,
-					newNum: line.newNum === null ? null : line.newNum + newOffset,
-				},
-		),
-	};
-}
-
-function getFirstChangedNewLine(diff: ParsedDiff): number {
-	let currentNewLine = 0;
-	for (let i = 0; i < diff.lines.length; i++) {
-		const line = diff.lines[i];
-		if (line.type === "sep") {
-			currentNewLine = 0;
-			continue;
-		}
-		if (line.type === "ctx") {
-			currentNewLine = (line.newNum ?? currentNewLine) + 1;
-			continue;
-		}
-		if (line.type === "add") return line.newNum ?? currentNewLine;
-		if (currentNewLine > 0) return currentNewLine;
-		const next = diff.lines.slice(i + 1).find((entry) => entry.type !== "sep" && entry.newNum !== null);
-		if (next && next.newNum !== null) return next.newNum;
-		return line.oldNum ?? 0;
-	}
-	return 0;
-}
-
-interface LocalizedEditDiff {
-	diff: ParsedDiff;
-	line: number;
-}
-
-async function computeLocalizedEditDiffs(filePath: string, operations: Array<{ oldText: string; newText: string }>, cwd: string): Promise<LocalizedEditDiff[] | null> {
-	if (!filePath || operations.length === 0) return null;
-	try {
-		const rawContent = await readFileAsync(resolve(cwd, filePath), "utf8");
-		const normalizedContent = normalizeToLf(stripBomText(rawContent));
-		const normalizedOps = operations.map((edit) => ({ oldText: normalizeToLf(edit.oldText), newText: normalizeToLf(edit.newText) }));
-		const baseContent = normalizedOps.some((edit) => findEditMatch(normalizedContent, edit.oldText).usedFuzzyMatch)
-			? normalizeTextForFuzzyMatch(normalizedContent)
-			: normalizedContent;
-		const matches = normalizedOps.map((edit, editIndex) => {
-			const match = findEditMatch(baseContent, edit.oldText);
-			if (!match.found || countFuzzyOccurrences(baseContent, edit.oldText) !== 1) return null;
-			return { editIndex, matchIndex: match.index, matchLength: match.matchLength, newText: edit.newText };
-		});
-		if (matches.some((match) => match === null)) return null;
-		const ordered = [...(matches as Array<{ editIndex: number; matchIndex: number; matchLength: number; newText: string }>)].sort((a, b) => a.matchIndex - b.matchIndex);
-		for (let i = 1; i < ordered.length; i++) {
-			const prev = ordered[i - 1];
-			const current = ordered[i];
-			if (prev.matchIndex + prev.matchLength > current.matchIndex) return null;
-		}
-		const localized: Array<LocalizedEditDiff | null> = Array(operations.length).fill(null);
-		let lineDelta = 0;
-		for (const match of ordered) {
-			const oldChunk = baseContent.slice(match.matchIndex, match.matchIndex + match.matchLength);
-			const oldStartLine = lineNumberAtIndex(baseContent, match.matchIndex);
-			const newStartLine = oldStartLine + lineDelta;
-			const diff = offsetParsedDiff(parseDiff(oldChunk, match.newText), oldStartLine - 1, newStartLine - 1);
-			localized[match.editIndex] = { diff, line: getFirstChangedNewLine(diff) };
-			lineDelta += countLineBreaks(match.newText) - countLineBreaks(oldChunk);
-		}
-		return localized.every(Boolean) ? (localized as LocalizedEditDiff[]) : null;
-	} catch {
-		return null;
-	}
-}
-
-function renderEditPreviewBody(
-	ctx: any,
-	key: string,
-	theme: Theme,
-	language: BundledLanguage | undefined,
-	operations: Array<{ oldText: string; newText: string }>,
-	diffs: ParsedDiff[],
-	lines: number[],
-	summary: string,
-): void {
-	const dc = resolveDiffColors(theme);
-	const branchWidth = branchDiffWidth();
-	if (operations.length === 1) {
-		const [diff] = diffs;
-		const line = lines[0] ?? getFirstChangedNewLine(diff);
-		renderSplit(diff, language, ctx.expanded ? MAX_PREVIEW_LINES : 32, dc, branchWidth)
-			.then((rendered) => {
-				if (ctx.state._pk !== key) return;
-				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}\n${rendered}`;
-				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-				safeInvalidate(ctx);
-			})
-			.catch(() => {
-				if (ctx.state._pk !== key) return;
-				ctx.state._ptBody = `${summarizeDiff(diff.added, diff.removed)}${formatLineMeta(line, theme)}`;
-				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-				safeInvalidate(ctx);
-			});
-		return;
-	}
-	const maxShown = ctx.expanded ? operations.length : Math.min(operations.length, 3);
-	const previewLines = ctx.expanded
-		? Math.max(6, Math.floor(MAX_RENDER_LINES / Math.max(1, maxShown)))
-		: Math.max(8, Math.floor(MAX_PREVIEW_LINES / Math.max(1, maxShown)));
-	mapWithConcurrency(diffs.slice(0, maxShown), DIFF_RENDER_CONCURRENCY, async (diff, index) => {
-		const line = lines[index] ?? getFirstChangedNewLine(diff);
-		return renderSplit(diff, language, previewLines, dc, branchWidth)
-			.then((rendered) => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)}\n${rendered}`)
-			.catch(() => `Edit ${index + 1}/${operations.length}${formatLineMeta(line, theme)} ${summarizeDiff(diff.added, diff.removed)}`);
-	})
-		.then((sections) => {
-			if (ctx.state._pk !== key) return;
-			const remainder = operations.length - maxShown;
-			const suffix = remainder > 0
-				? `\n${theme.fg("muted", `… ${remainder} more edit blocks${toolOutputDetailHint(theme, ctx.expanded, true)}`)}`
-				: "";
-			ctx.state._ptBody = `${operations.length} edits ${summary}\n\n${sections.join("\n\n")}${suffix}`;
-			ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-			safeInvalidate(ctx);
-		})
-		.catch(() => {
-			if (ctx.state._pk !== key) return;
-			ctx.state._ptBody = `${operations.length} edits ${summary}`;
-			ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-			safeInvalidate(ctx);
-		});
 }
 
 function stripThinkingPresentationArtifacts(text: string): string {
@@ -6837,7 +6579,9 @@ export default function (pi: ExtensionAPI) {
 					ctx.state._ptdwHashFor = d;
 					ctx.state._ptdwHash = `${hashText(content)}:${hashText(previousContent ?? "")}`;
 				}
-				const key = `ptdw:${ctx.state._ptdwHash}:${d.fileExistedBeforeWrite ? 1 : 0}:${diffWidth}:${isExpanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}`;
+				// _toolBranchVisualEpoch is bumped on every /theme or /cc-tools
+				// rebind, so theme-derived colors in the cached text stay fresh.
+				const key = `ptdw:${ctx.state._ptdwHash}:${d.fileExistedBeforeWrite ? 1 : 0}:${diffWidth}:${isExpanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}:${_toolBranchVisualEpoch}`;
 				if (ctx.state._ptdwKey !== key) {
 					const component = renderWriteDiffResult(
 						content,
@@ -6862,6 +6606,7 @@ export default function (pi: ExtensionAPI) {
 			// Legacy details recorded by sessions predating the ptd-diff switch.
 			if (d?._type === "noChange") return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "✓ no changes"), theme));
 			if (d?._type === "diff") return makeText(ctx.lastComponent, withBranch(String(d.summary ?? "Written"), theme));
+			if (d?._type === "new") return makeText(ctx.lastComponent, withBranch(theme.fg("success", `Created (${d.lines ?? "?"} lines)`), theme));
 			return makeText(ctx.lastComponent, withBranch(theme.fg("success", "Written"), theme));
 		},
 	});
@@ -6873,39 +6618,9 @@ export default function (pi: ExtensionAPI) {
 		description: editTool.description,
 		parameters: editTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, _ctx) {
-			const fp = params.path ?? (params as any).file_path ?? "";
-			const operations = getEditOperations(params);
-			const localizedDiffs = operations.length === 1 ? await computeLocalizedEditDiffs(fp, operations, cwd) : null;
-			const result = await editTool.execute(toolCallId, params, signal, onUpdate);
-			if (operations.length === 0) return result;
-			const { diffs, summary, totalLines, totalHunks } = summarizeEditOperations(operations);
-			const baseDetails = (((result as any).details ?? {}) as Record<string, unknown>);
-			if (operations.length === 1) {
-				const localized = localizedDiffs?.[0];
-				const editLine = localized?.line ?? (typeof baseDetails.firstChangedLine === "number" ? baseDetails.firstChangedLine : 0);
-				const diff = localized?.diff ?? diffs[0];
-				(result as any).details = {
-					...baseDetails,
-					_type: "editInfo",
-					summary,
-					editLine,
-					hunks: countDiffHunks(diff),
-					added: diff?.added ?? 0,
-					removed: diff?.removed ?? 0,
-				};
-				return result;
-			}
-			(result as any).details = {
-				...baseDetails,
-				_type: "multiEditInfo",
-				summary,
-				editCount: operations.length,
-				diffLineCount: totalLines,
-				hunks: totalHunks,
-				totalAdded: diffs.reduce((sum, diff) => sum + diff.added, 0),
-				totalRemoved: diffs.reduce((sum, diff) => sum + diff.removed, 0),
-			};
-			return result;
+			// renderResult only consumes details.diff from the underlying tool;
+			// no extra details enrichment needed since the ptd-diff switch.
+			return editTool.execute(toolCallId, params, signal, onUpdate);
 		},
 		renderCall(args, theme, ctx) {
 			const fp = args?.path ?? (args as any)?.file_path ?? "";
@@ -6932,7 +6647,7 @@ export default function (pi: ExtensionAPI) {
 			if (!previewData) return makeText(ctx.lastComponent, hdr);
 			const cfg = ptdDiffConfig();
 			const diffWidth = branchDiffWidth();
-			const renderKey = `${previewKey}:${diffWidth}:${ctx.expanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}`;
+			const renderKey = `${previewKey}:${diffWidth}:${ctx.expanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}:${_toolBranchVisualEpoch}`;
 			if (ctx.state._ptdePendingRenderKey !== renderKey) {
 				let body: string;
 				if (previewData.notice || typeof previewData.nextContent !== "string") {
@@ -6988,7 +6703,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.state._ptdeHashFor = result;
 				ctx.state._ptdeHash = hashText(diffStr);
 			}
-			const key = `ptde:${ctx.state._ptdeHash}:${fp}:${diffWidth}:${isExpanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}`;
+			const key = `ptde:${ctx.state._ptdeHash}:${fp}:${diffWidth}:${isExpanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}:${_toolBranchVisualEpoch}`;
 			if (ctx.state._ptdeKey !== key) {
 				const component = renderEditDiffResult(
 					details,
