@@ -45,7 +45,11 @@ import {
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 
-import { renderWriteDiffResult } from "./ptd-diff/diff-renderer.js";
+import { renderEditDiffResult, renderWriteDiffResult } from "./ptd-diff/diff-renderer.js";
+import {
+	buildPendingEditPreviewData,
+	type PendingDiffPreviewData,
+} from "./ptd-diff/pending-diff-preview.js";
 import {
 	DEFAULT_TOOL_DISPLAY_CONFIG as PTD_DEFAULT_CONFIG,
 	type ToolDisplayConfig as PtdToolDisplayConfig,
@@ -6846,29 +6850,50 @@ export default function (pi: ExtensionAPI) {
 			const summary = stableCallSummary(ctx, "_callSummary", () => shouldRevealCallArgs(ctx) && operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp), revealSummary);
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader("Edit", summary, theme, ` ${toolStatusDot(ctx, theme)}`, liveLineCountTrailing(ctx, theme));
-			if (!(ctx.argsComplete && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
-			const diffWidth = branchDiffWidth();
-			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
-			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, key, operations);
-			if (ctx.state._pk !== key) {
-				ctx.state._pk = key;
-				ctx.state._ptBody = theme.fg("muted", "(rendering…)");
-				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
-				const lg = lang(fp);
-				void computeLocalizedEditDiffs(fp, operations, cwd)
-					.then((localizedDiffs) => {
-						if (ctx.state._pk !== key) return;
-						const diffs = localizedDiffs?.map((entry) => entry.diff) ?? fallbackDiffs;
-						const lines = localizedDiffs?.map((entry) => entry.line) ?? diffs.map((diff) => getFirstChangedNewLine(diff));
-						renderEditPreviewBody(ctx, key, theme, lg, operations, diffs, lines, editSummary);
-					})
-					.catch(() => {
-						if (ctx.state._pk !== key) return;
-						renderEditPreviewBody(ctx, key, theme, lg, operations, fallbackDiffs, fallbackDiffs.map((diff) => getFirstChangedNewLine(diff)), editSummary);
-					});
+			// Diff body moved to renderResult (ptd-diff, 1:1 with pi-tool-display).
+			// While the tool is still running, show pi-tool-display's pending
+			// edit preview (projected from args against the on-disk file).
+			if (!(ctx.argsComplete && operations.length > 0 && ctx.isPartial)) return makeText(ctx.lastComponent, hdr);
+			const previewKey = JSON.stringify({
+				path: fp || null,
+				edits: (args as any)?.edits ?? null,
+				oldText: (args as any)?.oldText ?? null,
+				newText: (args as any)?.newText ?? null,
+			});
+			if (ctx.state._ptdePendingKey !== previewKey) {
+				ctx.state._ptdePendingKey = previewKey;
+				ctx.state._ptdePendingData = buildPendingEditPreviewData(args, String(ctx.cwd ?? cwd));
 			}
-				const body = liveBranchDisplay(ctx.state, theme) ?? (ctx.state._ptDisplay as string | undefined);
-			return makeText(ctx.lastComponent, body ? `${hdr}\n${body}` : hdr);
+			const previewData = ctx.state._ptdePendingData as PendingDiffPreviewData | undefined;
+			if (!previewData) return makeText(ctx.lastComponent, hdr);
+			const cfg = ptdDiffConfig();
+			const diffWidth = branchDiffWidth();
+			const renderKey = `${previewKey}:${diffWidth}:${ctx.expanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}`;
+			if (ctx.state._ptdePendingRenderKey !== renderKey) {
+				let body: string;
+				if (previewData.notice || typeof previewData.nextContent !== "string") {
+					body = theme.fg("warning", previewData.notice || "Preview unavailable.");
+				} else {
+					const component = renderWriteDiffResult(
+						previewData.nextContent,
+						{
+							expanded: !!ctx.expanded,
+							filePath: previewData.filePath,
+							previousContent: previewData.previousContent,
+							fileExistedBeforeWrite: previewData.fileExistedBeforeWrite,
+							headerLabel: previewData.headerLabel,
+						},
+						cfg,
+						theme,
+						"",
+					);
+					body = component.render(diffWidth).join("\n");
+				}
+				ctx.state._ptdePendingRenderKey = renderKey;
+				ctx.state._ptdePendingText = indentBranchBlock(withBranch(body, theme, false, true));
+			}
+			const pendingBody = ctx.state._ptdePendingText as string | undefined;
+			return makeText(ctx.lastComponent, pendingBody ? `${hdr}\n${pendingBody}` : hdr);
 		},
 		renderResult(result, { expanded, isPartial }, theme, ctx) {
 			if (isPartial) {
@@ -6884,18 +6909,31 @@ export default function (pi: ExtensionAPI) {
 						.join("\n") ?? "Error";
 				return makeText(ctx.lastComponent, indentBranchBlock(withBranch(theme.fg("error", e), theme)));
 			}
-			if ((result as any).details?._type === "editInfo") {
-				const { editLine, hunks, added, removed } = (result as any).details;
-				const loc = formatLineMeta(editLine ?? 0, theme);
-				const summary = diffSummaryWithMeta(added ?? 0, removed ?? 0, hunks ?? 0, "");
-				return makeText(ctx.lastComponent, indentBranchBlock(withBranch(`${summary}${loc}`, theme)));
+			const details = (result as any).details as Record<string, unknown> | undefined;
+			const isExpanded = !!(ctx.expanded ?? expanded);
+			const cfg = ptdDiffConfig();
+			const diffWidth = branchDiffWidth();
+			const fp =
+				ctx.args?.path ??
+				(ctx.args as any)?.file_path ??
+				(typeof details?.filePath === "string" ? (details.filePath as string) : "");
+			const diffStr = typeof details?.diff === "string" ? (details.diff as string) : "";
+			const key = `ptde:${hashText(diffStr)}:${fp}:${diffWidth}:${isExpanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}`;
+			if (ctx.state._ptdeKey !== key) {
+				const component = renderEditDiffResult(
+					details,
+					{ expanded: isExpanded, filePath: fp || undefined },
+					cfg,
+					theme,
+					theme.fg("success", "Applied"),
+				);
+				ctx.state._ptdeKey = key;
+				ctx.state._ptdeText = indentBranchBlock(withFinalBranchBlock(component.render(diffWidth).join("\n"), theme));
 			}
-			if ((result as any).details?._type === "multiEditInfo") {
-				const { editCount, diffLineCount, hunks, totalAdded, totalRemoved } = (result as any).details;
-				const summary = diffSummaryWithMeta(totalAdded ?? 0, totalRemoved ?? 0, hunks ?? 0, "");
-				return makeText(ctx.lastComponent, indentBranchBlock(withBranch(`${editCount} edits ${summary}${typeof diffLineCount === "number" ? ` ${theme.fg("muted", `(${diffLineCount} diff lines)`)}` : ""}`, theme)));
-			}
-			return makeText(ctx.lastComponent, indentBranchBlock(withBranch(theme.fg("success", "Applied"), theme)));
+			return makeText(
+				ctx.lastComponent,
+				(ctx.state._ptdeText as string) || indentBranchBlock(withBranch(theme.fg("success", "Applied"), theme)),
+			);
 		},
 	});
 
