@@ -3157,6 +3157,66 @@ function ptdCaptureFileSnapshot(fullPath: string): string | undefined {
 	}
 }
 
+// Light-background fg accents for the diff slots (from pi's bundled
+// light.json); dark falls back to the old engine's universal accents.
+const PTD_LIGHT_DIFF_ADD_FG: Rgb = { r: 88, g: 132, b: 88 };
+const PTD_LIGHT_DIFF_DEL_FG: Rgb = { r: 170, g: 85, b: 85 };
+const PTD_LIGHT_DIFF_CTX_FG: Rgb = { r: 108, g: 108, b: 108 };
+const PTD_DARK_DIFF_CTX_FG: Rgb = { r: 128, g: 128, b: 128 };
+
+const ptdDiffThemeCache = new WeakMap<object, unknown>();
+
+/**
+ * Wraps the live theme so getFgAnsi/getBgAnsi always yield RGB-parseable ANSI
+ * for the diff slots the ptd renderer mixes tints from. Real theme values pass
+ * through untouched when parseable; otherwise substitute stand-ins built on
+ * the same light/dark detection and fallback bases the legacy theme-adaptive
+ * engine uses (isLightThemeBackground / FALLBACK_BASE_BG_* / UNIVERSAL_*), so
+ * edit/write diffs stay coherent with apply_patch. Everything else proxies to
+ * the original theme.
+ */
+export function ptdThemeForDiff<T extends object>(theme: T): T {
+	const cached = ptdDiffThemeCache.get(theme);
+	if (cached) return cached as T;
+	const onLight = isLightThemeBackground(theme);
+	const standIns: Record<string, Rgb | undefined> = {
+		"bg:toolSuccessBg": onLight ? FALLBACK_BASE_BG_LIGHT : FALLBACK_BASE_BG_DARK,
+		"bg:toolPendingBg": onLight ? FALLBACK_BASE_BG_LIGHT : FALLBACK_BASE_BG_DARK,
+		"bg:toolErrorBg": onLight ? FALLBACK_BASE_BG_LIGHT : FALLBACK_BASE_BG_DARK,
+		"bg:userMessageBg": onLight ? FALLBACK_BASE_BG_LIGHT : FALLBACK_BASE_BG_DARK,
+		"fg:toolDiffAdded": onLight ? PTD_LIGHT_DIFF_ADD_FG : UNIVERSAL_DIFF_ADD_FG,
+		"fg:toolDiffRemoved": onLight ? PTD_LIGHT_DIFF_DEL_FG : UNIVERSAL_DIFF_DEL_FG,
+		"fg:toolDiffContext": onLight ? PTD_LIGHT_DIFF_CTX_FG : PTD_DARK_DIFF_CTX_FG,
+	};
+	const substitute = (kind: "fg" | "bg", slot: string): string => {
+		let ansi = "";
+		try {
+			const t = theme as any;
+			const real = kind === "fg" ? t.getFgAnsi : t.getBgAnsi;
+			if (typeof real === "function") ansi = real.call(t, slot) ?? "";
+		} catch {
+			ansi = "";
+		}
+		if (ansi && parseAnsiRgb(ansi)) return ansi;
+		const rgb = standIns[`${kind}:${slot}`];
+		if (rgb) {
+			const { r, g, b } = rgb;
+			return `\x1b[${kind === "bg" ? 48 : 38};2;${Math.round(r)};${Math.round(g)};${Math.round(b)}m`;
+		}
+		return ansi;
+	};
+	const wrapped = new Proxy(theme as any, {
+		get(target, prop) {
+			if (prop === "getFgAnsi") return (slot: string) => substitute("fg", slot);
+			if (prop === "getBgAnsi") return (slot: string) => substitute("bg", slot);
+			const value = Reflect.get(target, prop, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	}) as T;
+	ptdDiffThemeCache.set(theme, wrapped);
+	return wrapped;
+}
+
 function diffCollapsedLimit(): number {
 	const value = readSettings().diffCollapsedLines;
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 24;
@@ -3671,6 +3731,27 @@ const DELETION_TINT_TARGET = { r: 232, g: 95, b: 122 };
 const FALLBACK_BASE_BG_DARK = { r: 32, g: 35, b: 42 };
 const FALLBACK_BASE_BG_LIGHT = { r: 232, g: 233, b: 236 };
 
+let _agentThemeNameCache: { value: string; timestamp: number } | null = null;
+
+/** `theme` (light/dark/…) lives in pi's agent settings, not ~/.pi/settings.json. */
+function agentSettingsThemeName(): string {
+	const now = Date.now();
+	if (_agentThemeNameCache && now - _agentThemeNameCache.timestamp < SETTINGS_CACHE_TTL_MS) {
+		return _agentThemeNameCache.value;
+	}
+	let value = "";
+	try {
+		const parsed = JSON.parse(
+			readFileSync(`${process.env.HOME ?? ""}/.pi/agent/settings.json`, "utf8"),
+		) as Record<string, unknown>;
+		value = String(parsed.theme ?? "").toLowerCase();
+	} catch {
+		value = "";
+	}
+	_agentThemeNameCache = { value, timestamp: now };
+	return value;
+}
+
 function isLightThemeBackground(theme: any): boolean {
 	const panel =
 		themeBgRgb(theme, "toolSuccessBg") ||
@@ -3685,7 +3766,12 @@ function isLightThemeBackground(theme: any): boolean {
 		const lum = 0.2126 * fg.r + 0.7152 * fg.g + 0.0722 * fg.b;
 		return lum < 95;
 	}
-	return false;
+	// Nothing RGB-parseable (e.g. 16-color-only terminals). Fall back to the
+	// Theme instance's name, then the configured theme in pi's agent settings.
+	const name = typeof theme?.name === "string" ? theme.name.toLowerCase() : "";
+	if (name.includes("light")) return true;
+	if (name.includes("dark")) return false;
+	return agentSettingsThemeName().includes("light");
 }
 
 function syncDiffShikiTheme(theme: any): void {
@@ -6784,7 +6870,7 @@ export default function (pi: ExtensionAPI) {
 							fileExistedBeforeWrite: !!d.fileExistedBeforeWrite,
 						},
 						cfg,
-						theme,
+						ptdThemeForDiff(theme),
 						theme.fg("success", "Written"),
 					);
 					ctx.state._ptdwKey = key;
@@ -6884,7 +6970,7 @@ export default function (pi: ExtensionAPI) {
 							headerLabel: previewData.headerLabel,
 						},
 						cfg,
-						theme,
+						ptdThemeForDiff(theme),
 						"",
 					);
 					body = component.render(diffWidth).join("\n");
@@ -6924,7 +7010,7 @@ export default function (pi: ExtensionAPI) {
 					details,
 					{ expanded: isExpanded, filePath: fp || undefined },
 					cfg,
-					theme,
+					ptdThemeForDiff(theme),
 					theme.fg("success", "Applied"),
 				);
 				ctx.state._ptdeKey = key;
