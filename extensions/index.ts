@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { readFile as readFileAsync } from "node:fs/promises";
 import { basename, dirname, extname, relative, resolve } from "node:path";
 
@@ -44,6 +44,12 @@ import {
 
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
+
+import { renderWriteDiffResult } from "./ptd-diff/diff-renderer.js";
+import {
+	DEFAULT_TOOL_DISPLAY_CONFIG as PTD_DEFAULT_CONFIG,
+	type ToolDisplayConfig as PtdToolDisplayConfig,
+} from "./ptd-diff/types.js";
 
 const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
@@ -91,7 +97,17 @@ interface SettingsFile {
 	liveToolPreviewLines?: number;
 	showTruncationHints?: boolean;
 	diffCollapsedLines?: number;
+	/** Diff layout for edit/write (ptd-diff renderer): auto (default), split, or unified. */
+	diffViewMode?: "auto" | "split" | "unified" | "stacked";
+	/** Change indicator style for edit/write diffs: bars (default), classic, or none. */
+	diffIndicatorMode?: "bars" | "classic" | "none";
+	/** Minimum width before `auto` picks the split layout. Default 120, clamped 70–240. */
+	diffSplitMinWidth?: number;
+	/** Wrap long diff lines instead of truncating. Default true. */
+	diffWordWrap?: boolean;
+	/** Legacy (apply_patch engine only): shiki theme override for diff hunks. */
 	diffTheme?: string;
+	/** Legacy (apply_patch engine only): hex color overrides for diff hunks. */
 	diffColors?: Record<string, string>;
 	/**
 	 * When true (default), derive borders, dim text, branch rules, and diff
@@ -3069,6 +3085,72 @@ function liveToolPreviewEnabled(): boolean {
 function liveToolPreviewLimit(): number {
 	const value = readSettings().liveToolPreviewLines;
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 5;
+}
+
+// ---------------------------------------------------------------------------
+// ptd-diff bridge — edit/write diff bodies are rendered 1:1 by the verbatim
+// pi-tool-display port in ./ptd-diff (see extensions/ptd-diff/README.md).
+// The legacy engine below stays untouched for apply_patch.
+// ---------------------------------------------------------------------------
+
+const PTD_DIFF_VIEW_MODES = ["auto", "split", "unified"] as const;
+const PTD_DIFF_INDICATOR_MODES = ["bars", "classic", "none"] as const;
+/** Mirrors pi-tool-display's readWorkspaceUtf8File 1 MiB-ish snapshot cap. */
+const PTD_WRITE_SNAPSHOT_MAX_BYTES = 1_000_000;
+
+/** Same semantics as pi-tool-display config-store clampNumber. */
+function ptdClampNumber(value: unknown, min: number, max: number, fallback: number): number {
+	if (typeof value !== "number" || Number.isNaN(value)) return fallback;
+	const rounded = Math.floor(value);
+	if (rounded < min) return min;
+	if (rounded > max) return max;
+	return rounded;
+}
+
+/** Builds the renderer config from ~/.pi/settings.json, mirroring pi-tool-display's normalization. */
+function ptdDiffConfig(): PtdToolDisplayConfig {
+	const s = readSettings();
+	const viewMode =
+		s.diffViewMode === "stacked"
+			? "unified"
+			: PTD_DIFF_VIEW_MODES.includes(s.diffViewMode as (typeof PTD_DIFF_VIEW_MODES)[number])
+				? (s.diffViewMode as PtdToolDisplayConfig["diffViewMode"])
+				: PTD_DEFAULT_CONFIG.diffViewMode;
+	const indicatorMode = PTD_DIFF_INDICATOR_MODES.includes(
+		s.diffIndicatorMode as (typeof PTD_DIFF_INDICATOR_MODES)[number],
+	)
+		? (s.diffIndicatorMode as PtdToolDisplayConfig["diffIndicatorMode"])
+		: PTD_DEFAULT_CONFIG.diffIndicatorMode;
+	return {
+		...PTD_DEFAULT_CONFIG,
+		diffViewMode: viewMode,
+		diffIndicatorMode: indicatorMode,
+		diffSplitMinWidth: ptdClampNumber(s.diffSplitMinWidth, 70, 240, PTD_DEFAULT_CONFIG.diffSplitMinWidth),
+		diffWordWrap: typeof s.diffWordWrap === "boolean" ? s.diffWordWrap : PTD_DEFAULT_CONFIG.diffWordWrap,
+		diffCollapsedLines: ptdClampNumber(s.diffCollapsedLines, 4, 240, PTD_DEFAULT_CONFIG.diffCollapsedLines),
+		expandedPreviewMaxLines: ptdClampNumber(
+			s.expandedPreviewMaxLines,
+			0,
+			20_000,
+			PTD_DEFAULT_CONFIG.expandedPreviewMaxLines,
+		),
+	};
+}
+
+/** Cache-key fingerprint of the diff-relevant config (settings file has a 5s TTL). */
+function ptdDiffConfigKey(cfg: PtdToolDisplayConfig): string {
+	return `${cfg.diffViewMode}:${cfg.diffIndicatorMode}:${cfg.diffSplitMinWidth}:${cfg.diffWordWrap ? 1 : 0}:${cfg.diffCollapsedLines}:${cfg.expandedPreviewMaxLines}`;
+}
+
+/** Pre-write snapshot for overwrite diffs; undefined when missing or oversized. */
+function ptdCaptureFileSnapshot(fullPath: string): string | undefined {
+	try {
+		const stat = statSync(fullPath);
+		if (!stat.isFile() || stat.size > PTD_WRITE_SNAPSHOT_MAX_BYTES) return undefined;
+		return readFileSync(fullPath, "utf-8");
+	} catch {
+		return undefined;
+	}
 }
 
 function diffCollapsedLimit(): number {
@@ -6642,22 +6724,14 @@ export default function (pi: ExtensionAPI) {
 			const fullPath = fp ? resolve(cwd, fp) : "";
 			const existedBefore = !!fullPath && fileExistsForTool(cwd, fp);
 			WRITE_EXISTED_BEFORE.set(toolCallId, existedBefore);
-			let old: string | null = null;
-			try {
-				if (fullPath && existedBefore) old = readFileSync(fullPath, "utf-8");
-			} catch {
-				old = null;
-			}
+			const previousContent = fullPath && existedBefore ? ptdCaptureFileSnapshot(fullPath) : undefined;
 			const result = await writeTool.execute(toolCallId, params, signal, onUpdate);
-			const content = params.content ?? "";
-			if (old !== null && old !== content) {
-				const diff = parseDiff(old, content);
-				(result as any).details = { _type: "diff", summary: summarizeDiff(diff.added, diff.removed), diff, language: lang(fp) };
-			} else if (old === null) {
-				(result as any).details = { _type: "new", lines: lineCount(content), filePath: fp };
-			} else if (old === content) {
-				(result as any).details = { _type: "noChange" };
-			}
+			(result as any).details = {
+				_type: "ptdWrite",
+				filePath: fp,
+				fileExistedBeforeWrite: existedBefore,
+				previousContent,
+			};
 			return result;
 		},
 		renderCall(args, theme, ctx) {
@@ -6689,59 +6763,37 @@ export default function (pi: ExtensionAPI) {
 				return makeText(ctx.lastComponent, withBranch(theme.fg("error", e), theme));
 			}
 			const d = (result as any).details;
-			if (d?._type === "diff") {
-				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
-				const hunks = d.diff?.lines?.filter((l: any) => l.type === "sep").length + (d.diff?.lines?.length ? 1 : 0);
-				const diffWidth = branchDiffWidth();
-				const mode = shouldUseSplit(d.diff, diffWidth, previewLines) ? "split" : "unified";
-				const richSummary = diffSummaryWithMeta(d.diff.added, d.diff.removed, hunks, mode);
-				const key = `wd:${diffWidth}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}:${ctx.expanded ? 1 : 0}`;
-				if (ctx.state._wdk !== key) {
-					ctx.state._wdk = key;
-					ctx.state._wdt = withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
-					const dc = resolveDiffColors(theme);
-					renderSplit(d.diff, d.language, previewLines, dc, diffWidth)
-						.then((rendered) => {
-							if (ctx.state._wdk !== key) return;
-							ctx.state._wdt = withFinalBranchBlock(`${richSummary}\n${rendered}`, theme);
-							safeInvalidate(ctx);
-						})
-						.catch(() => {
-							if (ctx.state._wdk !== key) return;
-							ctx.state._wdt = withBranch(richSummary, theme);
-							safeInvalidate(ctx);
-						});
-				}
-				return makeText(ctx.lastComponent, ctx.state._wdt ?? withBranch(richSummary, theme));
-			}
-			if (d?._type === "noChange") return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "✓ no changes"), theme));
-			if (d?._type === "new") {
+			if (d?._type === "ptdWrite") {
 				const content = typeof ctx.args?.content === "string" ? ctx.args.content : "";
-				const lineTotal = typeof d.lines === "number" ? d.lines : lineCount(content);
-				const contentHash = hashText(content);
-				const syntheticDiff = getCachedParsedDiff(ctx, `nf-diff:${d.filePath}:${contentHash}`, "", content);
-				const richSummary = diffSummaryWithMeta(syntheticDiff.added, 0, 1, "new file");
-				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
+				const isExpanded = !!ctx.expanded;
+				const cfg = ptdDiffConfig();
 				const diffWidth = branchDiffWidth();
-				const pk = `nf:${d.filePath}:${contentHash}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
-				if (ctx.state._nfk !== pk) {
-					ctx.state._nfk = pk;
-					ctx.state._nft = withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
-					const dc = resolveDiffColors(theme);
-					renderUnified(syntheticDiff, lang(d.filePath), previewLines, dc, diffWidth)
-						.then((rendered) => {
-							if (ctx.state._nfk !== pk) return;
-							ctx.state._nft = withFinalBranchBlock(`${richSummary}\n${rendered}`, theme);
-							safeInvalidate(ctx);
-						})
-						.catch(() => {
-							if (ctx.state._nfk !== pk) return;
-							ctx.state._nft = withBranch(`${richSummary} ${theme.fg("muted", `(${lineTotal} lines)`)}`, theme);
-							safeInvalidate(ctx);
-						});
+				const previousContent = typeof d.previousContent === "string" ? d.previousContent : undefined;
+				const key = `ptdw:${hashText(content)}:${hashText(previousContent ?? "")}:${d.fileExistedBeforeWrite ? 1 : 0}:${diffWidth}:${isExpanded ? 1 : 0}:${ptdDiffConfigKey(cfg)}`;
+				if (ctx.state._ptdwKey !== key) {
+					const component = renderWriteDiffResult(
+						content,
+						{
+							expanded: isExpanded,
+							filePath: typeof d.filePath === "string" && d.filePath ? d.filePath : undefined,
+							previousContent,
+							fileExistedBeforeWrite: !!d.fileExistedBeforeWrite,
+						},
+						cfg,
+						theme,
+						theme.fg("success", "Written"),
+					);
+					ctx.state._ptdwKey = key;
+					ctx.state._ptdwText = withFinalBranchBlock(component.render(diffWidth).join("\n"), theme);
 				}
-				return makeText(ctx.lastComponent, ctx.state._nft ?? withBranch(`${richSummary} ${theme.fg("muted", `(${lineTotal} lines)`)}`, theme));
+				return makeText(
+					ctx.lastComponent,
+					(ctx.state._ptdwText as string) || withBranch(theme.fg("success", "Written"), theme),
+				);
 			}
+			// Legacy details recorded by sessions predating the ptd-diff switch.
+			if (d?._type === "noChange") return makeText(ctx.lastComponent, withBranch(theme.fg("muted", "✓ no changes"), theme));
+			if (d?._type === "diff") return makeText(ctx.lastComponent, withBranch(String(d.summary ?? "Written"), theme));
 			return makeText(ctx.lastComponent, withBranch(theme.fg("success", "Written"), theme));
 		},
 	});
