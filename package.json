@@ -38,7 +38,8 @@
     "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/index.ts extensions/spinner.ts",
     "pack:dry-run": "npm pack --dry-run",
     "publish:dry-run": "npm publish --dry-run",
-    "bench:tools": "bun scripts/benchmark-tools.ts"
+    "bench:tools": "bun scripts/benchmark-tools.ts",
+    "test:parity": "node scripts/parity-ptd-diff.mjs"
   },
   "dependencies": {
     "@shikijs/cli": "^4.0.2",
@@ -60,6 +61,7 @@
     "@earendil-works/pi-tui": "^0.79.1",
     "@sinclair/typebox": "^0.34.49",
     "@types/node": "^25.7.0",
+    "jiti": "^2.7.0",
     "typescript": "^6.0.3"
   }
 }
