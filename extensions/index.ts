@@ -3599,7 +3599,11 @@ function isLightThemeBackground(theme: any): boolean {
 		const lum = 0.2126 * fg.r + 0.7152 * fg.g + 0.0722 * fg.b;
 		return lum < 95;
 	}
-	return false;
+	// Nothing RGB-parseable (e.g. terminals where chalk only emits basic
+	// 16-color SGR, which parseAnsiRgb cannot read). Fall back to the Theme
+	// name, which pi's loadTheme sets for every configured theme.
+	const name = typeof theme?.name === "string" ? theme.name.toLowerCase() : "";
+	return name.includes("light");
 }
 
 function syncDiffShikiTheme(theme: any): void {
