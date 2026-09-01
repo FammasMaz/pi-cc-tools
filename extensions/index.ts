@@ -6440,7 +6440,7 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
 			const rewrite = ensureRtkRewriteForContext(ctx, args);
-			const summary = stableCallSummary(ctx, "_callSummary", () => summarizeText(args.command, 72));
+			const summary = stableCallSummary(ctx, "_callSummary", () => summarizeText(args.command, Infinity));
 			const rtkBadge = rewrite ? theme.fg("muted", " (RTK)") : "";
 			return makeText(
 				ctx.lastComponent,
