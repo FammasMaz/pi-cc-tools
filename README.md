@@ -21,7 +21,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Adaptive edit/write diffs** with split or unified layouts, syntax highlighting, and inline word-level emphasis
 - **Diff stat bar** with colored add/remove summary and hunk metadata
 - **Progressive collapsed diff hints** that shorten on narrow terminals
-- **Visible thinking traces** with context sanitization and zero-height collapsed traces
+- **Live-only thinking** (default) — only the actively-streaming thinking renders expanded; finished thinking collapses to a one-line `Thought for Xs` row (`/cc-tools thinking full` restores always-expanded, `Ctrl+O` still expands anything)
 - **MCP-aware rendering** with hidden, summary, and preview modes
 - **Configurable output modes** for read, search, bash, and MCP results
 - **Live running previews** that show a few output lines for active tool calls (latest lines for bash), persisting until the next tool/text activity
@@ -50,6 +50,7 @@ Set in `.pi/settings.json` or `~/.pi/settings.json`:
   "extraExpandedPreviewMaxLines": 12000,
   "extraToolOutputExpanded": false,
   "groupToolCalls": true,
+  "thinkingMode": "live",
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
   "bashCommandPreviewLines": 8,
@@ -122,6 +123,8 @@ Use `/cc-tools` to control tool UI at runtime:
 /cc-tools outlines        # tool style: outlines, transparent, or default
 /cc-tools group toggle    # toggle grouped adjacent/concurrent tool calls
 /cc-tools group off       # disable grouping (also ungroups current grouped rows)
+/cc-tools thinking live   # default: only the streaming thinking expands; finished ones collapse
+/cc-tools thinking full   # always render thinking expanded, like stock pi
 /cc-tools detail toggle   # same mode as Ctrl+Shift+O
 ```
 
@@ -143,6 +146,7 @@ Use `/cc-tools` to control tool UI at runtime:
 | `extraExpandedPreviewMaxLines` | `12000` | Max lines after Ctrl+Shift+O extra-detail mode |
 | `extraToolOutputExpanded` | `false` | Start with Ctrl+Shift+O extra-detail mode enabled |
 | `groupToolCalls` | `true` | Group adjacent/concurrent calls, collapsing repeated targets into one row |
+| `thinkingMode` | `live` | `live` = only streaming thinking expands (finished collapse to `Thought for Xs`); `full` = always expanded |
 | `bashCollapsedLines` | `10` | Lines for collapsed bash output |
 | `bashCommandPreviewLines` | `8` | Verbatim script lines shown while bash runs or after failure; `0` disables them |
 | `liveToolPreview` | `true` | Show a small live output preview while tools are still running |

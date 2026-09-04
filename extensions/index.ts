@@ -125,6 +125,13 @@ interface SettingsFile {
 	 * "(thinking · ↓ 10 tokens · 2s)" trailer). Defaults to "muted".
 	 */
 	spinnerStatusColor?: string;
+	/**
+	 * Thinking display mode. `live` (default): only the currently-streaming
+	 * thinking is expanded; finished thinking collapses to a one-line
+	 * `Thought for Xs` row (Ctrl+O still expands it). `full`: thinking always
+	 * renders expanded, like stock pi.
+	 */
+	thinkingMode?: "live" | "full";
 	/** Gray level 0–255 for ├ └ │ when branch color mode is `fixed`. */
 	toolBranchRgbGray?: number;
 	/** `fixed` (default): rgb gray 72, theme-independent. `theme`: dim → muted → borderMuted. */
@@ -489,6 +496,18 @@ function toolGroupingEnabled(): boolean {
 
 function setToolGroupingEnabled(enabled: boolean): void {
 	writeSettingsKey("groupToolCalls", enabled);
+}
+
+type ThinkingMode = "live" | "full";
+
+function getThinkingMode(): ThinkingMode {
+	return getMode(readSettings().thinkingMode, ["live", "full"] as const, "live");
+}
+
+function isLiveThinkingMessage(message: any): boolean {
+	if (!message || message.role !== "assistant") return false;
+	if ((message as any)[THINKING_ACTIVE_KEY]) return true;
+	return thinkingBlockInFlight && !assistantMessageThinkingComplete(message);
 }
 
 type ToolStatus = "pending" | "success" | "error";
@@ -2287,16 +2306,28 @@ function patchAssistantMessages(): void {
 		if (!message || !Array.isArray(message.content)) {
 			return originalUpdateContent.call(this, message);
 		}
-		if ((this as any).hideThinkingBlock && messageHasThinkingContent(message)) {
+		// Thinking display: stock pi decides collapsed-vs-expanded via
+		// `hideThinkingBlock`, which we always respect. On top of that, live mode
+		// (default) collapses *finished* thinking to the one-line
+		// `Thought for Xs` summary while the actively-streaming thinking stays
+		// expanded. Ctrl+O still expands everything (hideThinkingBlock=false).
+		const thinkingLiveOnly = getThinkingMode() === "live" && !isLiveThinkingMessage(message);
+		if (((this as any).hideThinkingBlock || thinkingLiveOnly) && messageHasThinkingContent(message)) {
 			// Pi wraps this in theme.italic/fg again — keep plain label for the placeholder pass.
 			(this as any).hiddenThinkingLabel = "Thinking…";
 		}
-		// Call original to build all children (text, thinking, spacers, errors)
-		originalUpdateContent.call(this, message);
+		const savedHideThinking = (this as any).hideThinkingBlock;
+		if (thinkingLiveOnly) (this as any).hideThinkingBlock = true;
+		try {
+			// Call original to build all children (text, thinking, spacers, errors)
+			originalUpdateContent.call(this, message);
+		} finally {
+			(this as any).hideThinkingBlock = savedHideThinking;
+		}
 		// Replace text-block Markdown children with DottedParagraph wrappers
 		const container = (this as any).contentContainer;
 		if (!container?.children) return;
-		if ((this as any).hideThinkingBlock && messageHasThinkingContent(message)) {
+		if (((this as any).hideThinkingBlock || thinkingLiveOnly) && messageHasThinkingContent(message)) {
 			replaceHiddenThinkingPlaceholders(container, message);
 		}
 		const mdTheme = (this as any).markdownTheme;
@@ -6301,7 +6332,7 @@ export default function (pi: ExtensionAPI) {
 	// /cc-tools command — control tool chrome, grouping, and detail level.
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
 	const TOOL_BOOL_MODES = ["on", "off", "toggle", "status"] as const;
-	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "branch", "status"] as const;
+	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "thinking", "branch", "status"] as const;
 	const booleanMode = (raw: string | undefined, current: boolean): boolean | "status" | undefined => {
 		const mode = raw || "toggle";
 		if (mode === "on") return true;
@@ -6324,6 +6355,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify([
 			`Tool style: ${toolBackgroundMode}`,
 			`Tool grouping: ${toolGroupingEnabled() ? "on" : "off"}`,
+			`Thinking: ${getThinkingMode()}`,
 			`Extra detail: ${extraToolOutputExpanded ? "on" : "off"} (${rawKeyHint("ctrl+shift+o", "toggle")})`,
 			branchLine,
 			`  /cc-tools branch <0-255> | theme | fixed | reset`,
@@ -6342,6 +6374,7 @@ export default function (pi: ExtensionAPI) {
 						label: m,
 						description:
 							m === "group" ? "Toggle grouped adjacent/concurrent tool rows"
+							: m === "thinking" ? "Thinking display: live (default) or full"
 							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
 							: m === "branch" ? "├ └ │ gray (0-255), theme, fixed, or reset"
 							: m === "status" ? "Show tool UI settings"
@@ -6356,6 +6389,12 @@ export default function (pi: ExtensionAPI) {
 				return opts
 					.filter((o) => o.startsWith(second))
 					.map((o) => ({ value: `branch ${o}`, label: o, description: "Branch connector color" }));
+			}
+			if (first === "thinking") {
+				const second = parts[1] ?? "";
+				return ["live", "full", "status"]
+					.filter((m) => m.startsWith(second))
+					.map((m) => ({ value: `thinking ${m}`, label: m, description: `${m} thinking display` }));
 			}
 			if (first === "group" || first === "detail" || first === "extra") {
 				const second = parts[1] ?? "";
@@ -6429,6 +6468,24 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			if (sub === "thinking") {
+				const arg = (parts[1] ?? "status").toLowerCase();
+				if (arg === "status" || !arg) {
+					if (ctx.hasUI) ctx.ui.notify(`Thinking: ${getThinkingMode()} (live = only streaming thinking expands; full = always expanded)`, "info");
+					return;
+				}
+				if (arg !== "live" && arg !== "full") {
+					if (ctx.hasUI) ctx.ui.notify("Usage: /cc-tools thinking live|full|status", "error");
+					return;
+				}
+				writeSettingsKey("thinkingMode", arg);
+				if (ctx.hasUI) {
+					ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
+					ctx.ui.notify(`Thinking → ${arg}${arg === "live" ? " (only the active thinking expands)" : " (thinking always expanded)"}`, "info");
+				}
+				return;
+			}
+
 			if (sub === "detail" || sub === "extra") {
 				const next = booleanMode(parts[1], extraToolOutputExpanded);
 				if (next === undefined) {
@@ -6448,7 +6505,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (!(TOOL_MODES as readonly string[]).includes(sub)) {
-				if (ctx.hasUI) ctx.ui.notify(`Unknown option "${sub}". Try /cc-tools status, /cc-tools branch 72, or /cc-tools group toggle.`, "error");
+				if (ctx.hasUI) ctx.ui.notify(`Unknown option "${sub}". Try /cc-tools status, /cc-tools thinking live, or /cc-tools group toggle.`, "error");
 				return;
 			}
 			toolBackgroundOverride = sub as typeof toolBackgroundMode;
