@@ -1,5 +1,5 @@
 import { AssistantMessageComponent, CustomMessageComponent, UserMessageComponent } from "@earendil-works/pi-coding-agent";
-import { Container } from "@earendil-works/pi-tui";
+import { Container, Spacer } from "@earendil-works/pi-tui";
 import { initTheme, theme } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 
 initTheme("dark", false);
@@ -232,6 +232,128 @@ const neq = (a: string[], b: string[], label: string) => {
 		throw new Error("Hermes auto-review notice did not adopt thinking-text color without extra dimming");
 	}
 	console.log("OK  Hermes notice: thinking-text color without extra dimming");
+}
+
+// ---------------------------------------------------------------------------
+// 8. Thinking blocks: Ctrl+T toggles between collapsed summary and expanded markdown.
+// ---------------------------------------------------------------------------
+{
+	const clean = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\][^\x07]*\x07/g, "").trim();
+	const oldMsg = {
+		role: "assistant",
+		content: [
+			{ type: "thinking", thinking: "Detailed reasoning that was completed earlier." },
+			{ type: "text", text: "Here is the final response." }
+		],
+		stopReason: "stop",
+		_piClaudeStyleThinkingDurationMs: 4200
+	};
+	const comp = new AssistantMessageComponent(oldMsg as any, true);
+	let lines = comp.render(W).map(clean).filter(Boolean);
+	if (!lines.some((l) => l.includes("Thought for 4s"))) {
+		throw new Error(`thinking block did not start collapsed with Thought for 4s; got: ${JSON.stringify(lines)}`);
+	}
+
+	// User presses Ctrl+T to expand thinking blocks
+	comp.setHideThinkingBlock(false);
+	lines = comp.render(W).map(clean).filter(Boolean);
+	if (!lines.some((l) => l.includes("Detailed reasoning that was completed earlier."))) {
+		throw new Error(`thinking block did not expand on Ctrl+T; got: ${JSON.stringify(lines)}`);
+	}
+
+	// User presses Ctrl+T again to collapse thinking blocks
+	comp.setHideThinkingBlock(true);
+	lines = comp.render(W).map(clean).filter(Boolean);
+	if (!lines.some((l) => l.includes("Thought for 4s"))) {
+		throw new Error(`thinking block did not collapse back on Ctrl+T; got: ${JSON.stringify(lines)}`);
+	}
+	console.log("OK  thinking blocks: Ctrl+T expands and collapses old thoughts on demand");
+}
+
+// ---------------------------------------------------------------------------
+// 9. Tool grouping: consecutive tools (>= 8) group without any 4-tool truncation.
+// ---------------------------------------------------------------------------
+{
+	const { ToolExecutionComponent } = await import("@earendil-works/pi-coding-agent");
+	const parent = new Container();
+	for (let i = 1; i <= 8; i++) {
+		const tool = new ToolExecutionComponent("bash", "call_" + i, { command: "echo tool_" + i }, {}, undefined as any, undefined as any, process.cwd());
+		(tool as any).updateResult({ content: [{ type: "text", text: "tool " + i + " output\n" }], isError: false });
+		parent.addChild(tool);
+	}
+	if (parent.children.length !== 1) throw new Error(`expected 1 ToolGroup child, got ${parent.children.length}`);
+	const group = parent.children[0] as any;
+	if (group.tools?.length !== 8) throw new Error(`expected 8 tools in group, got ${group.tools?.length}`);
+	const clean = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\][^\x07]*\x07/g, "").trim();
+	const lines = parent.render(W).map(clean).filter(Boolean);
+	if (!lines.some((l) => l.includes("8 done"))) throw new Error(`group header did not report 8 done; got: ${JSON.stringify(lines)}`);
+	console.log("OK  tool grouping: 8 tools group into 1 group without 4-tool cap");
+}
+
+// ---------------------------------------------------------------------------
+// 10. Merging consecutive thoughts: adjacent thinking-only messages merge into one summary.
+// ---------------------------------------------------------------------------
+{
+	const parent = new Container();
+	const comp1 = new AssistantMessageComponent({
+		role: "assistant",
+		content: [{ type: "thinking", thinking: "Thought part 1" }],
+		stopReason: "toolUse",
+		_piClaudeStyleThinkingDurationMs: 3000
+	} as any, true);
+	const comp2 = new AssistantMessageComponent({
+		role: "assistant",
+		content: [{ type: "thinking", thinking: "Thought part 2" }],
+		stopReason: "toolUse",
+		_piClaudeStyleThinkingDurationMs: 1000
+	} as any, true);
+	const comp3 = new AssistantMessageComponent({
+		role: "assistant",
+		content: [{ type: "thinking", thinking: "Thought part 3" }],
+		stopReason: "stop",
+		_piClaudeStyleThinkingDurationMs: 7000
+	} as any, true);
+
+	parent.addChild(comp1);
+	parent.addChild(new Spacer(1));
+	parent.addChild(comp2);
+	parent.addChild(new Spacer(1));
+	parent.addChild(comp3);
+
+	const clean = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\][^\x07]*\x07/g, "").trim();
+	const lines = parent.render(W).map(clean).filter(Boolean);
+	const thoughtLines = lines.filter((l) => l.includes("Thought for"));
+	if (thoughtLines.length !== 1) {
+		throw new Error(`expected exactly 1 merged thought line, got ${thoughtLines.length}: ${JSON.stringify(thoughtLines)}`);
+	}
+	if (!thoughtLines[0].includes("Thought for 11s")) {
+		throw new Error(`expected Thought for 11s, got: ${thoughtLines[0]}`);
+	}
+	console.log("OK  consecutive thoughts: merged into single Thought for 11s");
+}
+
+// ---------------------------------------------------------------------------
+// 11. Finished message with missing or fast duration never stuck on Thinking...
+// ---------------------------------------------------------------------------
+{
+	const clean = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\][^\x07]*\x07/g, "").trim();
+	const finishedFastMsg = {
+		role: "assistant",
+		content: [
+			{ type: "thinking", thinking: "Short fast thought from provider without duration events" },
+			{ type: "text", text: "Done!" }
+		],
+		stopReason: "stop"
+	};
+	const comp = new AssistantMessageComponent(finishedFastMsg as any, true);
+	const lines = comp.render(W).map(clean).filter(Boolean);
+	if (lines.some((l) => l.includes("Thinking…") || l.includes("Thinking..."))) {
+		throw new Error(`finished message remained stuck on Thinking...: ${JSON.stringify(lines)}`);
+	}
+	if (!lines.some((l) => l.includes("Thought for"))) {
+		throw new Error(`finished message did not resolve to Thought for Xs: ${JSON.stringify(lines)}`);
+	}
+	console.log("OK  finished thoughts: fast/untimed messages resolve to Thought for Xs");
 }
 
 console.log("\nAll correctness checks passed.");

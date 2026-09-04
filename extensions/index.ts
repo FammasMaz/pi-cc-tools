@@ -504,10 +504,37 @@ function getThinkingMode(): ThinkingMode {
 	return getMode(readSettings().thinkingMode, ["live", "full"] as const, "live");
 }
 
-function isLiveThinkingMessage(message: any): boolean {
+function isAssistantThinkingComplete(comp: any, message: any): boolean {
 	if (!message || message.role !== "assistant") return false;
+	if (typeof message[THINKING_DURATION_KEY] === "number") return true;
+	if (message[THINKING_ACTIVE_KEY]) return false;
+	if (typeof message.stopReason === "string" && message.stopReason.length > 0) return true;
+	if (Array.isArray(message.content)) {
+		let sawThinking = false;
+		for (const block of message.content) {
+			if (block?.type === "thinking" && block.thinking?.trim()) {
+				sawThinking = true;
+			} else if (sawThinking && (
+				(block?.type === "text" && block.text?.trim()) ||
+				block?.type === "toolCall"
+			)) {
+				return true;
+			}
+		}
+	}
+	if (!thinkingBlockInFlight && comp?.isStreaming !== true) return true;
+	return false;
+}
+
+function isLiveThinkingMessage(comp: any, message: any): boolean {
+	if (!message || message.role !== "assistant") return false;
+	if (isAssistantThinkingComplete(comp, message)) return false;
 	if ((message as any)[THINKING_ACTIVE_KEY]) return true;
-	return thinkingBlockInFlight && !assistantMessageThinkingComplete(message);
+	if (thinkingBlockInFlight) return true;
+	if (Array.isArray(message.content)) {
+		return message.content.some((b: any) => b?.type === "thinking" && b?.thinking?.trim());
+	}
+	return false;
 }
 
 type ToolStatus = "pending" | "success" | "error";
@@ -1035,23 +1062,37 @@ function isToolGroupComponent(value: unknown): value is ToolGroupComponent {
 	return value instanceof ToolGroupComponent;
 }
 
+function isSpacerComponent(value: unknown): value is InstanceType<typeof Spacer> {
+	return value instanceof Spacer || (value as any)?.constructor?.name === "Spacer";
+}
+
+function isTextComponent(value: unknown): value is InstanceType<typeof Text> {
+	return value instanceof Text || (value as any)?.constructor?.name === "Text";
+}
+
+function isMarkdownComponent(value: unknown): value is InstanceType<typeof Markdown> {
+	return value instanceof Markdown || (value as any)?.constructor?.name === "Markdown";
+}
+
 function isIgnorableToolSeparator(value: unknown): boolean {
-	if (value instanceof Spacer) return true;
-	if (value instanceof AssistantMessageComponent) {
+	if (isSpacerComponent(value)) return true;
+	if (value instanceof AssistantMessageComponent || (value as any)?.constructor?.name === "AssistantMessageComponent") {
 		const contentChildren = (value as any).contentContainer?.children;
-		return Array.isArray(contentChildren) && contentChildren.length === 0;
+		if (!Array.isArray(contentChildren) || contentChildren.length === 0) return true;
+		return contentChildren.every((child: any) =>
+			isSpacerComponent(child) ||
+			child instanceof HiddenThinkingSummary ||
+			(child as any)?.constructor?.name === "HiddenThinkingSummary" ||
+			isHiddenThinkingPlaceholderText(child)
+		);
 	}
 	return false;
 }
 
 function findPreviousToolSibling(children: any[], startIndex: number): { child: any; index: number } | undefined {
-	let skippedSeparators = 0;
 	for (let index = startIndex; index >= 0; index--) {
 		const child = children[index];
-		if (isIgnorableToolSeparator(child) && skippedSeparators < 3) {
-			skippedSeparators++;
-			continue;
-		}
+		if (isIgnorableToolSeparator(child)) continue;
 		return { child, index };
 	}
 	return undefined;
@@ -1076,6 +1117,58 @@ function ungroupActiveToolGroups(): void {
 	}
 }
 
+function isThinkingOnlyAssistantComponent(comp: unknown): comp is InstanceType<typeof AssistantMessageComponent> {
+	if (!comp || ((comp as any).constructor?.name !== "AssistantMessageComponent" && !(comp instanceof AssistantMessageComponent))) {
+		return false;
+	}
+	const msg = (comp as any).lastMessage;
+	if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) return false;
+	const hasThinking = msg.content.some((c: any) => c?.type === "thinking" && typeof c?.thinking === "string" && c.thinking.trim());
+	if (!hasThinking) return false;
+	const hasText = msg.content.some((c: any) => c?.type === "text" && typeof c?.text === "string" && c.text.trim());
+	if (hasText) return false;
+	const hasToolCalls = msg.content.some((c: any) => c?.type === "toolCall");
+	if (hasToolCalls) return false;
+	if ((comp as any).isStreaming === true || msg[THINKING_ACTIVE_KEY]) return false;
+	return true;
+}
+
+function maybeMergeConsecutiveThinkingMessages(parent: any): void {
+	const children = parent?.children;
+	if (!Array.isArray(children) || children.length < 2) return;
+
+	for (let i = 0; i < children.length; i++) {
+		const current = children[i];
+		if (!isThinkingOnlyAssistantComponent(current)) continue;
+
+		let nextIdx = i + 1;
+		while (nextIdx < children.length && isSpacerComponent(children[nextIdx])) {
+			nextIdx++;
+		}
+		if (nextIdx >= children.length) break;
+
+		const nextComp = children[nextIdx];
+		if (isThinkingOnlyAssistantComponent(nextComp)) {
+			const curMsg = (current as any).lastMessage;
+			const nextMsg = (nextComp as any).lastMessage;
+
+			const durA = getMessageThinkingDurationMs(curMsg);
+			const durB = getMessageThinkingDurationMs(nextMsg);
+			const mergedDuration = durA + durB;
+
+			const nextThinkingBlocks = nextMsg.content.filter((c: any) => c?.type === "thinking");
+			curMsg.content.push(...nextThinkingBlocks);
+			curMsg[THINKING_DURATION_KEY] = mergedDuration;
+
+			(current as any).updateContent(curMsg);
+
+			const removeCount = nextIdx - i;
+			children.splice(i + 1, removeCount);
+			i--;
+		}
+	}
+}
+
 function maybeGroupToolComponent(parent: any, component: any): void {
 	if (!toolGroupingEnabled() || !isGroupableTool(component) || isToolGroupComponent(parent)) return;
 	const children = parent?.children;
@@ -1088,6 +1181,7 @@ function maybeGroupToolComponent(parent: any, component: any): void {
 	if (isToolGroupComponent(previous)) {
 		children.splice(index, 1);
 		previous.addTool(component);
+		maybeMergeConsecutiveThinkingMessages(parent);
 		return;
 	}
 	if (isGroupableTool(previous)) {
@@ -1098,6 +1192,7 @@ function maybeGroupToolComponent(parent: any, component: any): void {
 		(group as any)[COMPONENT_PARENT] = parent;
 		children[previousEntry.index] = group;
 		children.splice(index, 1);
+		maybeMergeConsecutiveThinkingMessages(parent);
 	}
 }
 
@@ -1111,6 +1206,7 @@ function patchContainerParentTracking(): void {
 		const result = originalAddChild.call(this, component);
 		if (component && typeof component === "object") component[COMPONENT_PARENT] = this;
 		maybeGroupToolComponent(this, component);
+		maybeMergeConsecutiveThinkingMessages(this);
 		return result;
 	};
 	proto.removeChild = function patchedRemoveChild(component: any) {
@@ -1156,6 +1252,7 @@ function patchGlobalToolBorders(): void {
 
 	const originalRender = proto.render;
 	proto.render = function patchedContainerRender(width: number): string[] {
+		maybeMergeConsecutiveThinkingMessages(this);
 		if (isToolExecutionLike(this)) {
 			const cached = (this as any)[TOOL_RENDER_CACHE];
 			const branchKey = toolBranchRenderCacheKey();
@@ -1466,42 +1563,43 @@ class HiddenThinkingSummary {
 	}
 }
 
-function assistantMessageThinkingComplete(this: any, message: any): boolean {
-	// During streaming pi reuses one live assistant message whose stopReason
-	// is unreliable (some providers init it to "stop"; toolUse chunks mean
-	// more thinking may still come). Only an explicit per-message duration
-	// stamp — written by our thinking_end/fallback handlers — marks thinking
-	// as truly finished. The streaming component's `isStreaming` flag is the
-	// backstop: while pi is still actively rendering the stream, never treat
-	// thinking as finished.
-	if ((this as any)?.isStreaming === true) return false;
-	if (typeof (message as any)?.[THINKING_DURATION_KEY] === "number") return true;
-	if ((message as any)?.[THINKING_ACTIVE_KEY]) return false;
-	if (thinkingBlockInFlight) return false;
-	const reason = message?.stopReason;
-	if (reason === "toolUse") return false;
-	return typeof reason === "string" && reason.length > 0;
+function getMessageThinkingDurationMs(message: any): number {
+	const stored = (message as any)?.[THINKING_DURATION_KEY];
+	if (typeof stored === "number" && stored > 0) return stored;
+	if (typeof lastThinkingBlockDurationMs === "number" && lastThinkingBlockDurationMs > 0) {
+		return lastThinkingBlockDurationMs;
+	}
+	if (typeof (message as any)?.[WORKED_DURATION_KEY] === "number" && (message as any)[WORKED_DURATION_KEY] > 0) {
+		return (message as any)[WORKED_DURATION_KEY];
+	}
+	let totalChars = 0;
+	if (Array.isArray(message?.content)) {
+		for (const block of message.content) {
+			if (block?.type === "thinking" && typeof block.thinking === "string") {
+				totalChars += block.thinking.length;
+			}
+		}
+	}
+	return Math.max(1000, Math.round((totalChars / 150) * 1000));
 }
 
-function hiddenThinkingSummaryForMessage(message: any): string {
-	// Per-message flags win over globals so a late render pass cannot keep
-	// "Thinking…" after thinking_end already stored duration on this message.
-	if ((message as any)?.[THINKING_ACTIVE_KEY]) return thinkingActiveSummaryText();
-	const stored = (message as any)?.[THINKING_DURATION_KEY];
-	const durationMs = typeof stored === "number"
-		? stored
-		: assistantMessageThinkingComplete(message) && typeof lastThinkingBlockDurationMs === "number"
-			? lastThinkingBlockDurationMs
-			: undefined;
-	if (typeof durationMs === "number" && durationMs >= MIN_THINKING_SUMMARY_MS) {
-		return thoughtDurationSummaryText(durationMs);
+function assistantMessageThinkingComplete(this: any, message: any): boolean {
+	return isAssistantThinkingComplete(this, message);
+}
+
+function hiddenThinkingSummaryForMessage(message: any, comp?: any): string {
+	if (message && !isAssistantThinkingComplete(comp, message) && isLiveThinkingMessage(comp, message)) {
+		return thinkingActiveSummaryText();
 	}
-	if (thinkingBlockInFlight) return thinkingActiveSummaryText();
-	return thinkingActiveSummaryText();
+	const durationMs = getMessageThinkingDurationMs(message);
+	if (message && typeof message === "object") {
+		(message as any)[THINKING_DURATION_KEY] = durationMs;
+	}
+	return thoughtDurationSummaryText(durationMs);
 }
 
 function isHiddenThinkingPlaceholderText(child: unknown): child is InstanceType<typeof Text> {
-	if (!(child instanceof Text)) return false;
+	if (!isTextComponent(child)) return false;
 	const plain = stripAnsi(String((child as any).text ?? "")).trim();
 	if (/^[✻∴]\s*Thinking/i.test(plain)) return true;
 	if (/^[✻∴]\s*Thought for/i.test(plain)) return true;
@@ -1939,14 +2037,27 @@ class DottedParagraph {
 function replaceHiddenThinkingPlaceholders(container: { children?: any[] }, message: any): void {
 	if (!container?.children) return;
 	const summary = hiddenThinkingSummaryForMessage(message);
+	let firstReplaced = false;
 	for (let i = 0; i < container.children.length; i++) {
 		const child = container.children[i];
-		if (child instanceof HiddenThinkingSummary) {
-			child.setSummary(summary);
+		if (child instanceof HiddenThinkingSummary || (child as any)?.constructor?.name === "HiddenThinkingSummary") {
+			if (!firstReplaced) {
+				child.setSummary(summary);
+				firstReplaced = true;
+			} else {
+				container.children.splice(i, 1);
+				i--;
+			}
 			continue;
 		}
 		if (isHiddenThinkingPlaceholderText(child)) {
-			container.children[i] = new HiddenThinkingSummary(summary);
+			if (!firstReplaced) {
+				container.children[i] = new HiddenThinkingSummary(summary);
+				firstReplaced = true;
+			} else {
+				container.children.splice(i, 1);
+				i--;
+			}
 		}
 	}
 }
@@ -2232,7 +2343,7 @@ function visitMarkdownDescendants(root: unknown, visit: (md: InstanceType<typeof
 	if (!root || typeof root !== "object") return;
 	const node = root as { children?: unknown[] };
 	for (const child of node.children ?? []) {
-		if (child instanceof Markdown) visit(child);
+		if (isMarkdownComponent(child)) visit(child);
 		else visitMarkdownDescendants(child, visit);
 	}
 }
@@ -2305,7 +2416,7 @@ function patchAssistantMessages(): void {
 		proto[ASSISTANT_RENDER_PATCH_FLAG] = true;
 	}
 	const originalUpdateContent = proto.updateContent;
-	proto.updateContent = function patchedUpdateContent(message: any) {
+	proto.updateContent = function patchedUpdateContent(message: any, isStreaming?: boolean) {
 		// Content changed (also reached via invalidate() → updateContent): drop the
 		// cached rendered output so the next render rebuilds with the new children.
 		clearMessageRenderCache(this);
@@ -2313,43 +2424,39 @@ function patchAssistantMessages(): void {
 			(this as any)[WORKED_START_KEY] = Date.now();
 		}
 		if (!message || !Array.isArray(message.content)) {
-			return originalUpdateContent.call(this, message);
+			return originalUpdateContent.call(this, message, isStreaming);
 		}
-		// Thinking display: stock pi decides collapsed-vs-expanded via
-		// `hideThinkingBlock`, which we always respect (Ctrl+O toggles it, and
-		// it must keep working even if our live-mode detection misfires).
-		// On top of that, live mode (default) collapses *finished* thinking
-		// to the one-line `Thought for Xs` summary while the
-		// actively-streaming thinking stays expanded.
-		// NOTE: the streaming path ALWAYS counts as live — pi renders each
-		// message_update through the same streamingComponent, and our
-		// thinking_* event flags may lag one frame behind updateContent.
-		// Collapsing must only kick in for finished messages (message_end /
-		// history renders), never mid-stream.
-		const thinkingFinished = assistantMessageThinkingComplete.call(this, message);
-		const thinkingLiveOnly = getThinkingMode() === "live" && thinkingFinished && !isLiveThinkingMessage(message);
-		if (((this as any).hideThinkingBlock || thinkingLiveOnly) && messageHasThinkingContent(message)) {
+		// Thinking display:
+		// When thinking blocks are expanded via Ctrl+T (`hideThinkingBlock === false`),
+		// all thinking blocks (old and new) render in full markdown.
+		// When thinking blocks are collapsed (`hideThinkingBlock === true`):
+		// - "live" mode (default): the actively-streaming thinking block renders
+		//   expanded while streaming, and collapses to `Thought for Xs` once done.
+		// - "full" mode: behaves like stock pi (stays collapsed).
+		const liveMode = getThinkingMode() === "live";
+		const thinkingCollapsed = !!(this as any).hideThinkingBlock;
+		const showLiveThinking = liveMode && thinkingCollapsed && isLiveThinkingMessage(this, message);
+		if (thinkingCollapsed && messageHasThinkingContent(message)) {
 			// Pi wraps this in theme.italic/fg again — keep plain label for the placeholder pass.
 			(this as any).hiddenThinkingLabel = "Thinking…";
 		}
-		const savedHideThinking = (this as any).hideThinkingBlock;
-		if (thinkingLiveOnly) (this as any).hideThinkingBlock = true;
+		if (showLiveThinking) (this as any).hideThinkingBlock = false;
 		try {
 			// Call original to build all children (text, thinking, spacers, errors)
-			originalUpdateContent.call(this, message);
+			originalUpdateContent.call(this, message, isStreaming);
 		} finally {
-			(this as any).hideThinkingBlock = savedHideThinking;
+			if (showLiveThinking) (this as any).hideThinkingBlock = true;
 		}
 		// Replace text-block Markdown children with DottedParagraph wrappers
 		const container = (this as any).contentContainer;
 		if (!container?.children) return;
-		if (((this as any).hideThinkingBlock || thinkingLiveOnly) && messageHasThinkingContent(message)) {
+		if (thinkingCollapsed && !showLiveThinking && messageHasThinkingContent(message)) {
 			replaceHiddenThinkingPlaceholders(container, message);
 		}
 		const mdTheme = (this as any).markdownTheme;
 		for (let i = container.children.length - 1; i >= 0; i--) {
 			const child = container.children[i];
-			if (child instanceof Markdown) {
+			if (isMarkdownComponent(child)) {
 				const text = (child as any).text;
 				if (!text) continue;
 				const isThinking = !!(child as any).defaultTextStyle?.italic;
@@ -5157,15 +5264,10 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 	}
 	if (evt.type === "thinking_end") {
 		thinkingBlockInFlight = false;
-		const duration = Date.now() - thinkingBlockStartMs;
+		const duration = Math.max(0, Date.now() - thinkingBlockStartMs);
 		if (message?.role === "assistant") delete (message as any)[THINKING_ACTIVE_KEY];
-		if (duration >= MIN_THINKING_SUMMARY_MS) {
-			lastThinkingBlockDurationMs = duration;
-			if (message?.role === "assistant") (message as any)[THINKING_DURATION_KEY] = duration;
-		} else {
-			lastThinkingBlockDurationMs = undefined;
-			if (message?.role === "assistant") delete (message as any)[THINKING_DURATION_KEY];
-		}
+		lastThinkingBlockDurationMs = duration;
+		if (message?.role === "assistant") (message as any)[THINKING_DURATION_KEY] = duration;
 		refreshThinkingChrome();
 		return;
 	}
@@ -5178,14 +5280,11 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 	if ((message as any)?.[THINKING_ACTIVE_KEY] || thinkingBlockInFlight) {
 		if (evt.type === "text_start" || evt.type === "text_delta" || evt.type === "toolcall_start" || evt.type === "toolcall_end") {
 			thinkingBlockInFlight = false;
-			const duration = Date.now() - thinkingBlockStartMs;
+			const duration = thinkingBlockStartMs > 0 ? Math.max(0, Date.now() - thinkingBlockStartMs) : undefined;
 			if (message?.role === "assistant") delete (message as any)[THINKING_ACTIVE_KEY];
-			if (duration >= MIN_THINKING_SUMMARY_MS) {
+			if (typeof duration === "number") {
 				lastThinkingBlockDurationMs = duration;
 				if (message?.role === "assistant") (message as any)[THINKING_DURATION_KEY] = duration;
-			} else {
-				lastThinkingBlockDurationMs = undefined;
-				if (message?.role === "assistant") delete (message as any)[THINKING_DURATION_KEY];
 			}
 			refreshThinkingChrome();
 		}
@@ -5249,21 +5348,18 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			// it, or the turn ended on toolUse/text), freeze any live "Thinking..."
 			// into its "Thought for Xs" duration here so the row always resolves
 			// at the end of the message instead of sticking into later calls.
-			if ((message as any)[THINKING_ACTIVE_KEY] || thinkingBlockInFlight) {
-				thinkingBlockInFlight = false;
-				const thinkingDuration = Date.now() - thinkingBlockStartMs;
-				delete (message as any)[THINKING_ACTIVE_KEY];
-				if (thinkingDuration >= MIN_THINKING_SUMMARY_MS) {
-					lastThinkingBlockDurationMs = thinkingDuration;
-					(message as any)[THINKING_DURATION_KEY] = thinkingDuration;
-				} else {
-					lastThinkingBlockDurationMs = undefined;
-					delete (message as any)[THINKING_DURATION_KEY];
+			thinkingBlockInFlight = false;
+			delete (message as any)[THINKING_ACTIVE_KEY];
+			if (typeof (message as any)[THINKING_DURATION_KEY] !== "number") {
+				const duration = thinkingBlockStartMs > 0 ? Math.max(0, Date.now() - thinkingBlockStartMs) : undefined;
+				if (typeof duration === "number" && duration > 0) {
+					lastThinkingBlockDurationMs = duration;
+					(message as any)[THINKING_DURATION_KEY] = duration;
+				} else if (typeof lastThinkingBlockDurationMs === "number" && lastThinkingBlockDurationMs > 0) {
+					(message as any)[THINKING_DURATION_KEY] = lastThinkingBlockDurationMs;
 				}
 			}
-			if (typeof lastThinkingBlockDurationMs === "number") {
-				(message as any)[THINKING_DURATION_KEY] = lastThinkingBlockDurationMs;
-			}
+			thinkingBlockStartMs = 0;
 			const started = typeof currentAgentWorkStartMs === "number"
 				? currentAgentWorkStartMs
 				: typeof (message as any)[WORKED_START_KEY] === "number"
