@@ -508,6 +508,11 @@ function isAssistantThinkingComplete(comp: any, message: any): boolean {
 	if (!message || message.role !== "assistant") return false;
 	if (typeof message[THINKING_DURATION_KEY] === "number") return true;
 	if (message[THINKING_ACTIVE_KEY]) return false;
+	// Providers keep stopReason "pending" for the whole stream ("deferred" while
+	// a deferred call is unresolved); both are in-flight sentinels, never
+	// completion signals. Without this, live-thinking detection would depend on
+	// THINKING_ACTIVE_KEY being stamped before the UI renders the same event.
+	if (message.stopReason === "pending" || message.stopReason === "deferred") return false;
 	if (typeof message.stopReason === "string" && message.stopReason.length > 0) return true;
 	if (Array.isArray(message.content)) {
 		let sawThinking = false;
@@ -1076,14 +1081,13 @@ function isMarkdownComponent(value: unknown): value is InstanceType<typeof Markd
 function isIgnorableToolSeparator(value: unknown): boolean {
 	if (isSpacerComponent(value)) return true;
 	if (value instanceof AssistantMessageComponent || (value as any)?.constructor?.name === "AssistantMessageComponent") {
+		// Empty assistant framing stays ignorable so it never splits tool groups.
+		// A rendered thinking row ("Thought for Xs" / live thinking) is a visible
+		// boundary: tool calls that follow it must start a new group instead of
+		// silently joining the batch that ran before the thought.
 		const contentChildren = (value as any).contentContainer?.children;
 		if (!Array.isArray(contentChildren) || contentChildren.length === 0) return true;
-		return contentChildren.every((child: any) =>
-			isSpacerComponent(child) ||
-			child instanceof HiddenThinkingSummary ||
-			(child as any)?.constructor?.name === "HiddenThinkingSummary" ||
-			isHiddenThinkingPlaceholderText(child)
-		);
+		return contentChildren.every((child: any) => isSpacerComponent(child));
 	}
 	return false;
 }
