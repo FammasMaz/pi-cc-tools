@@ -30,11 +30,13 @@
   "files": [
     "extensions/index.ts",
     "extensions/spinner.ts",
+    "extensions/bash-command.ts",
     "config/config.example.json",
     "README.md",
     "CHANGELOG.md"
   ],
   "scripts": {
+    "test": "node --experimental-strip-types --test scripts/bash-command.test.ts",
     "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/index.ts extensions/spinner.ts",
     "pack:dry-run": "npm pack --dry-run",
     "publish:dry-run": "npm publish --dry-run",

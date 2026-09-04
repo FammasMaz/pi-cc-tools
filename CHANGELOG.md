@@ -33,6 +33,13 @@
 
 - **Hide transient context tags** — hide transient context tags in streaming prose.
 
+## Unreleased
+
+### Fixed
+
+- **Grouped Bash commands show live progress** (Raine Virta) - collapsed running Bash rows display their latest non-empty output line beneath the command.
+- **Final timing status stays presentation-only** (Raine Virta) - the `Turn took` line renders as a styled TUI component without adding ANSI escapes or display text to persisted assistant messages.
+
 ## 1.0.75 — 2026-07-29
 
 ### Fixed
