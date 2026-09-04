@@ -629,9 +629,8 @@ function formatToolNameList(tools: any[]): string {
 		counts.set(name, (counts.get(name) ?? 0) + 1);
 	}
 	return [...counts.entries()]
-		.slice(0, 4)
 		.map(([name, count]) => `${humanizeToolName(name)}${count > 1 ? `×${count}` : ""}`)
-		.join(", ") + (counts.size > 4 ? ", …" : "");
+		.join(", ");
 }
 
 function getRepeatedToolSubject(tools: any[], groupedName: string | undefined): string {
@@ -1467,8 +1466,18 @@ class HiddenThinkingSummary {
 	}
 }
 
-function assistantMessageThinkingComplete(message: any): boolean {
-	// toolUse is an intermediate assistant chunk — thinking may still be in progress on the next chunk.
+function assistantMessageThinkingComplete(this: any, message: any): boolean {
+	// During streaming pi reuses one live assistant message whose stopReason
+	// is unreliable (some providers init it to "stop"; toolUse chunks mean
+	// more thinking may still come). Only an explicit per-message duration
+	// stamp — written by our thinking_end/fallback handlers — marks thinking
+	// as truly finished. The streaming component's `isStreaming` flag is the
+	// backstop: while pi is still actively rendering the stream, never treat
+	// thinking as finished.
+	if ((this as any)?.isStreaming === true) return false;
+	if (typeof (message as any)?.[THINKING_DURATION_KEY] === "number") return true;
+	if ((message as any)?.[THINKING_ACTIVE_KEY]) return false;
+	if (thinkingBlockInFlight) return false;
 	const reason = message?.stopReason;
 	if (reason === "toolUse") return false;
 	return typeof reason === "string" && reason.length > 0;
@@ -2307,11 +2316,18 @@ function patchAssistantMessages(): void {
 			return originalUpdateContent.call(this, message);
 		}
 		// Thinking display: stock pi decides collapsed-vs-expanded via
-		// `hideThinkingBlock`, which we always respect. On top of that, live mode
-		// (default) collapses *finished* thinking to the one-line
-		// `Thought for Xs` summary while the actively-streaming thinking stays
-		// expanded. Ctrl+O still expands everything (hideThinkingBlock=false).
-		const thinkingLiveOnly = getThinkingMode() === "live" && !isLiveThinkingMessage(message);
+		// `hideThinkingBlock`, which we always respect (Ctrl+O toggles it, and
+		// it must keep working even if our live-mode detection misfires).
+		// On top of that, live mode (default) collapses *finished* thinking
+		// to the one-line `Thought for Xs` summary while the
+		// actively-streaming thinking stays expanded.
+		// NOTE: the streaming path ALWAYS counts as live — pi renders each
+		// message_update through the same streamingComponent, and our
+		// thinking_* event flags may lag one frame behind updateContent.
+		// Collapsing must only kick in for finished messages (message_end /
+		// history renders), never mid-stream.
+		const thinkingFinished = assistantMessageThinkingComplete.call(this, message);
+		const thinkingLiveOnly = getThinkingMode() === "live" && thinkingFinished && !isLiveThinkingMessage(message);
 		if (((this as any).hideThinkingBlock || thinkingLiveOnly) && messageHasThinkingContent(message)) {
 			// Pi wraps this in theme.italic/fg again — keep plain label for the placeholder pass.
 			(this as any).hiddenThinkingLabel = "Thinking…";
