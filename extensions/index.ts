@@ -512,27 +512,26 @@ function isAssistantThinkingComplete(comp: any, message: any): boolean {
 	if (Array.isArray(message.content)) {
 		let sawThinking = false;
 		for (const block of message.content) {
-			if (block?.type === "thinking" && block.thinking?.trim()) {
+			if (block?.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
 				sawThinking = true;
 			} else if (sawThinking && (
-				(block?.type === "text" && block.text?.trim()) ||
+				(block?.type === "text" && typeof block.text === "string" && block.text.trim()) ||
 				block?.type === "toolCall"
 			)) {
 				return true;
 			}
 		}
+		if (sawThinking) return false;
 	}
-	if (!thinkingBlockInFlight && comp?.isStreaming !== true) return true;
-	return false;
+	return true;
 }
 
 function isLiveThinkingMessage(comp: any, message: any): boolean {
 	if (!message || message.role !== "assistant") return false;
 	if (isAssistantThinkingComplete(comp, message)) return false;
 	if ((message as any)[THINKING_ACTIVE_KEY]) return true;
-	if (thinkingBlockInFlight) return true;
 	if (Array.isArray(message.content)) {
-		return message.content.some((b: any) => b?.type === "thinking" && b?.thinking?.trim());
+		return message.content.some((b: any) => b?.type === "thinking" && typeof b?.thinking === "string" && b.thinking.trim());
 	}
 	return false;
 }
