@@ -4,6 +4,8 @@ import net from "node:net";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Loader } from "@earendil-works/pi-tui";
 
+import { getUserSettingsPath } from "./settings-path";
+
 // ---------------------------------------------------------------------------
 // Patch built-in Loader with Claude/OpenBrawd-style glyphs.
 // Keep animation cadence constant so the spinner doesn't appear to slow down
@@ -44,7 +46,7 @@ function readSpinnerSettings(): { adaptive: boolean; verbColor: string; statusCo
 	// orange as the glyph on themes like openAntigravity-dark.
 	let verbColor = "borderAccent";
 	let statusColor = "muted";
-	const paths = [`${process.cwd()}/.pi/settings.json`, `${process.env.HOME ?? ""}/.pi/settings.json`];
+	const paths = [`${process.cwd()}/.pi/settings.json`, getUserSettingsPath()];
 	for (const p of paths) {
 		try {
 			if (!p || !existsSync(p)) continue;

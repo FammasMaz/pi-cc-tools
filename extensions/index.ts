@@ -52,6 +52,7 @@ import {
 	formatBashDuration,
 	getLastBashOutputLine,
 } from "./bash-command";
+import { getUserSettingsPath } from "./settings-path";
 
 const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
@@ -147,7 +148,7 @@ function readSettings(): SettingsFile {
 		return _settingsCache.value;
 	}
 	const cwdPath = `${process.cwd()}/.pi/settings.json`;
-	const homePath = `${process.env.HOME ?? ""}/.pi/settings.json`;
+	const homePath = getUserSettingsPath();
 	const merged: SettingsFile = {};
 	for (const path of [cwdPath, homePath]) {
 		try {
@@ -175,9 +176,9 @@ function bustSpinnerSettingsCache(): void {
 function writeSettingsKey(key: string, value: unknown): void {
 	_settingsCache = null; // invalidate cache on write
 	const home = process.env.HOME ?? "";
-	if (!home) return;
-	const dir = `${home}/.pi`;
-	const path = `${dir}/settings.json`;
+	if (!home && !process.env.PI_CODING_AGENT_DIR) return;
+	const path = getUserSettingsPath();
+	const dir = dirname(path);
 	let settings: Record<string, unknown> = {};
 	try {
 		if (existsSync(path)) settings = JSON.parse(readFileSync(path, "utf8")) ?? {};
