@@ -37,7 +37,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 
 ## Configuration
 
-Set in `.pi/settings.json` or `~/.pi/settings.json`:
+Set in `.pi/settings.json` or the active Pi agent settings file (`$PI_CODING_AGENT_DIR/settings.json`, defaulting to `~/.pi/settings.json`):
 
 ```json
 {
@@ -93,7 +93,7 @@ On `/resume`, `/new`, or `/fork`, tool chrome is rebound from the **current** pi
 /cc-theme toggle    # flip the current value
 ```
 
-The selection is persisted to `~/.pi/settings.json` and applied to the next rendered tool row. No restart required.
+The selection is persisted to the active Pi agent settings file and applied to the next rendered tool row. No restart required.
 
 #### Repaint the spinner with `/cc-spinner`
 
@@ -106,7 +106,7 @@ The spinner glyph itself is still colored by pi's loader using `accent`, while t
 /cc-spinner reset            # restore defaults (verb=borderAccent, status=muted)
 ```
 
-The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in `~/.pi/settings.json` and applied on the next spinner tick.
+The selection is persisted as `spinnerVerbColor` / `spinnerStatusColor` in the active Pi agent settings file and applied on the next spinner tick.
 
 ### Tool background modes
 
