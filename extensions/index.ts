@@ -1873,16 +1873,30 @@ function shouldFormatStandaloneMath(text: string): boolean {
 	return !/[.!?]\s/.test(plain) && plain.length <= 240;
 }
 
-function appendMarkdownSegment(segments: ParagraphSegment[], text: string, theme: MarkdownThemeLike): void {
+// Options Pi hands to the Markdown components it builds, including the markdown
+// transformers (Pi's own Mermaid renderer, extension transformers, ...). Paragraph
+// wrappers rebuild those components, so they have to forward the options.
+type MarkdownOptions = ConstructorParameters<typeof Markdown>[5]
+
+function appendMarkdownSegment(
+	segments: ParagraphSegment[],
+	text: string,
+	theme: MarkdownThemeLike,
+	options?: MarkdownOptions,
+): void {
 	if (!text.trim()) return;
 	const normalized = shouldFormatStandaloneMath(text) ? formatMathForDisplay(text, false) : replaceInlineMath(text);
-	segments.push({ kind: "markdown", md: new Markdown(normalized, 0, 0, theme) });
+	segments.push({ kind: "markdown", md: new Markdown(normalized, 0, 0, theme, undefined, options) });
 }
 
-function buildParagraphSegments(text: string, theme: MarkdownThemeLike): ParagraphSegment[] {
+function buildParagraphSegments(
+	text: string,
+	theme: MarkdownThemeLike,
+	options?: MarkdownOptions,
+): ParagraphSegment[] {
 	const segments: ParagraphSegment[] = [];
 	if (!hasDisplayMathMarkers(text)) {
-		appendMarkdownSegment(segments, text, theme);
+		appendMarkdownSegment(segments, text, theme, options);
 		return segments;
 	}
 	const scanLoose = shouldScanLooseBracketMath(text);
@@ -1890,12 +1904,12 @@ function buildParagraphSegments(text: string, theme: MarkdownThemeLike): Paragra
 	while (cursor < text.length) {
 		const next = findNextDisplayMathBlock(text, cursor, scanLoose);
 		if (!next) break;
-		appendMarkdownSegment(segments, text.slice(cursor, next.index), theme);
+		appendMarkdownSegment(segments, text.slice(cursor, next.index), theme, options);
 		const raw = text.slice(next.contentStart, next.contentEnd).trim();
 		if (raw) segments.push({ kind: "math", raw });
 		cursor = next.endIndex;
 	}
-	appendMarkdownSegment(segments, text.slice(cursor), theme);
+	appendMarkdownSegment(segments, text.slice(cursor), theme, options);
 	return segments;
 }
 
@@ -1982,9 +1996,9 @@ class DottedParagraph {
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
-	constructor(text: string, markdownTheme: MarkdownThemeLike) {
+	constructor(text: string, markdownTheme: MarkdownThemeLike, options?: MarkdownOptions) {
 		this.markdownTheme = copySafeMarkdownTheme(markdownTheme);
-		this.segments = buildParagraphSegments(stripTransientMagicContextTags(text), this.markdownTheme);
+		this.segments = buildParagraphSegments(stripTransientMagicContextTags(text), this.markdownTheme, options);
 	}
 
 	invalidate(): void {
@@ -2076,13 +2090,16 @@ class ThinkingParagraph {
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 	private chromeEpoch = -1;
+	private options?: MarkdownOptions;
 
 	constructor(
 		text: string,
 		_markdownTheme: ConstructorParameters<typeof Markdown>[3],
 		_defaultTextStyle?: ConstructorParameters<typeof Markdown>[4],
+		options?: MarkdownOptions,
 	) {
 		this.text = stripTransientMagicContextTags(text);
+		this.options = options;
 	}
 
 	private thinkingMarkdown(): InstanceType<typeof Markdown> {
@@ -2110,7 +2127,7 @@ class ThinkingParagraph {
 			italic: false,
 			color: (s: string) => `${DIM_FG}${s}`,
 		};
-		return new Markdown(this.text, 0, 0, plainTheme, plainStyle);
+		return new Markdown(this.text, 0, 0, plainTheme, plainStyle, this.options);
 	}
 
 	invalidate(): void {
@@ -2469,17 +2486,18 @@ function patchAssistantMessages(): void {
 			if (isMarkdownComponent(inner)) {
 				const text = (inner as any).text;
 				if (!text) continue;
+				const options = (inner as any).options as MarkdownOptions;
 				const isThinking = !!(inner as any).defaultTextStyle?.italic;
 				if (isThinking) {
 					const style = (inner as any).defaultTextStyle;
-					const replacement = new ThinkingParagraph(text, mdTheme, style);
+					const replacement = new ThinkingParagraph(text, mdTheme, style, options);
 					if ((child as any)?.child !== undefined) {
 						(child as any).child = replacement;
 					} else {
 						container.children[i] = replacement;
 					}
 				} else {
-					const replacement = new DottedParagraph(text, mdTheme);
+					const replacement = new DottedParagraph(text, mdTheme, options);
 					if ((child as any)?.child !== undefined) {
 						(child as any).child = replacement;
 					} else {
