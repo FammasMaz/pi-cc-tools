@@ -1,6 +1,6 @@
 {
   "name": "pi-claude-code-ui",
-  "version": "1.0.83",
+  "version": "1.0.84",
   "description": "Claude Code-style grouped tool rows for pi with Ctrl+O/Ctrl+Shift+O previews, math rendering, and consistent built-in, MCP, and custom tool rendering",
   "keywords": [
     "pi-package",
@@ -37,6 +37,7 @@
   ],
   "scripts": {
     "test": "node --experimental-strip-types --test scripts/bash-command.test.ts",
+    "test:fullscreen": "node scripts/fullscreen-mouse.test.mjs",
     "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/index.ts extensions/spinner.ts",
     "pack:dry-run": "npm pack --dry-run",
     "publish:dry-run": "npm publish --dry-run",

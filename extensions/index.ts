@@ -41,6 +41,24 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import * as PiTui from "@earendil-works/pi-tui";
+
+// Pi 0.85+ fullscreen mouse types. The 0.79 peer typings do not export them yet.
+interface TuiMouseEvent {
+	type: string;
+	button: string;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+interface TuiMouseEventResult {
+	handled?: boolean;
+	capture?: boolean;
+	focus?: boolean;
+	render?: boolean;
+}
+type MouseLayoutEntry = { component?: any; height: number; top: number };
 
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
@@ -71,6 +89,8 @@ const TOOL_RENDER_CACHE = Symbol.for("pi-claude-style-tools:tool-render-cache");
 const COMPONENT_PARENT = Symbol.for("pi-claude-style-tools:component-parent");
 const PARENT_TRACKING_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-parent-tracking");
 const TOOL_CACHE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-cache-invalidation");
+const TOOL_MOUSE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-fullscreen-mouse");
+const FULLSCREEN_HOVER_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-fullscreen-hover");
 const TOOL_IMAGE_EXPAND_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-read-image-expansion");
 const CUSTOM_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-custom-message-render");
 const USER_MESSAGE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-user-message-render");
@@ -880,7 +900,8 @@ function isGroupableTool(value: unknown): value is InstanceType<typeof ToolExecu
 
 class ToolGroupComponent extends Container {
 	private tools: any[] = [];
-	private expanded = false;
+	expanded = false;
+	private mouseLayout?: { width: number; children: MouseLayoutEntry[] };
 	// Memoize full group output. Grouped history is the long-chat bottleneck:
 	// each warm frame used to re-render every child tool, re-branch lines, and
 	// re-clamp every row even when nothing changed.
@@ -933,6 +954,8 @@ class ToolGroupComponent extends Container {
 	addTool(tool: any): void {
 		ACTIVE_TOOL_GROUPS.add(this);
 		this.tools.push(tool);
+		setToolHover(tool, false);
+		if (hoveredClickTarget?.owner === tool) hoveredClickTarget = undefined;
 		tool[COMPONENT_PARENT] = this;
 		// Don't cascade invalidate into every child — only drop our own cache.
 		// Child tools already rebuild via their own updateDisplay path.
@@ -948,7 +971,7 @@ class ToolGroupComponent extends Container {
 	}
 
 	setExpanded(expanded: boolean): void {
-		if (this.expanded === expanded) return;
+		if (this.expanded === expanded && this.tools.every((tool) => tool.expanded === expanded)) return;
 		this.expanded = expanded;
 		for (const tool of this.tools) tool.setExpanded?.(expanded);
 		this.clearRenderCache();
@@ -962,8 +985,27 @@ class ToolGroupComponent extends Container {
 		this.clearRenderCache();
 	}
 
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const target = mouseLayoutTarget(this.mouseLayout, event);
+		if (event.type === "move") {
+			const row = target?.top ?? -1;
+			claimClickHover(this, () => { if (setGroupHover(this, -1)) requestComponentRender(this); });
+			return setGroupHover(this, row) ? { handled: true, render: true } : undefined;
+		}
+		if (isPrimaryClick(event) && target) {
+			const targets = target.component
+				? Array.isArray(target.component) ? target.component : [target.component]
+				: this.tools;
+			return toggleGroupedTools(this, targets);
+		}
+		return undefined;
+	}
+
 	render(width: number): string[] {
-		if (this.tools.length === 0) return [];
+		if (this.tools.length === 0) {
+			rememberMouseLayout(this, width, []);
+			return [];
+		}
 		const safeWidth = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1;
 		// Fast path: settled groups with a valid memo skip ALL child walks.
 		// Child mutations mark dirty via clearToolRenderCache → invalidate().
@@ -975,7 +1017,7 @@ class ToolGroupComponent extends Container {
 			&& this.cachedMode === toolBackgroundMode
 			&& this.cachedExpanded === this.expanded
 		) {
-			return this.cachedLines;
+			return applyGroupHover(this.cachedLines, this.mouseLayout, (this as any)[GROUP_HOVER_KEY]);
 		}
 
 		const status = this.statusSnapshot();
@@ -988,6 +1030,12 @@ class ToolGroupComponent extends Container {
 		const label = getToolGroupLabel(this.tools);
 		const names = groupedName ? "" : formatToolNameList(this.tools);
 		const overall: ToolStatus = status.error > 0 ? "error" : status.pending > 0 ? "pending" : "success";
+		const mouseChildren: MouseLayoutEntry[] = [];
+		let mouseY = 0;
+		const recordLines = (rowLines: string[], target?: any) => {
+			mouseChildren.push({ component: target, height: rowLines.length, top: mouseY });
+			mouseY += rowLines.length;
+		};
 		// Group header breathes only when every pending member is Agent-family;
 		// mixed groups keep the ordinary on/off light.
 		const pendingTools = this.tools.filter((tool) => getToolStatusForGroup(tool) === "pending");
@@ -1006,13 +1054,17 @@ class ToolGroupComponent extends Container {
 		if (collapseToSingleRow) {
 			const entry = { tools: this.tools, name: groupedName, subject };
 			const entryLine = getCollapsedToolEntryLine(entry, Math.max(1, safeWidth - 3));
-			lines.push(clampLineWidth(
+			const row = [clampLineWidth(
 				` ${light} ${entryLine}${toolOutputDetailHint(undefined as any, false, true)}`,
 				safeWidth,
-			));
+			)];
+			recordLines(row, undefined);
+			lines.push(...row);
 		} else {
 			const summary = ` ${light} ${summaryLabel} ${countsText}${names ? ` ${TRANSPARENT_RESET}• ${names}` : ""}${toolOutputDetailHint(undefined as any, this.expanded, true)}`;
-			lines.push(" ".repeat(safeWidth), clampLineWidth(summary, safeWidth));
+			const header = [" ".repeat(safeWidth), clampLineWidth(summary, safeWidth)];
+			recordLines(header, undefined);
+			lines.push(...header);
 			const childWidth = Math.max(1, safeWidth - 6);
 			if (this.expanded) {
 				for (let index = 0; index < total; index++) {
@@ -1025,7 +1077,9 @@ class ToolGroupComponent extends Container {
 						getToolStatusForGroup(tool),
 						{ agentBreathe: isAgentFamilyToolName(getToolName(tool)) },
 					);
-					for (const line of branched) lines.push(clampLineWidth(line, safeWidth));
+					const row = branched.map((line) => clampLineWidth(line, safeWidth));
+					recordLines(row, tool);
+					lines.push(...row);
 				}
 			} else {
 				const entries = collapseRepeatedToolEntries(this.tools);
@@ -1039,10 +1093,13 @@ class ToolGroupComponent extends Container {
 						getToolGroupOverallStatus(entry.tools),
 						{ agentBreathe: entry.tools.every((tool) => isAgentFamilyToolName(getToolName(tool))) },
 					);
-					for (const line of branched) lines.push(clampLineWidth(line, safeWidth));
+					const row = branched.map((line) => clampLineWidth(line, safeWidth));
+					recordLines(row, entry.tools.length === 1 ? entry.tools[0] : entry.tools);
+					lines.push(...row);
 				}
 			}
 		}
+		rememberMouseLayout(this, safeWidth, mouseChildren);
 
 		// Final clamp already applied per-line above; avoid a second full pass.
 		if (canCache) {
@@ -1058,8 +1115,18 @@ class ToolGroupComponent extends Container {
 		} else {
 			this.clearRenderCache();
 		}
-		return lines;
+		return applyGroupHover(lines, this.mouseLayout, (this as any)[GROUP_HOVER_KEY]);
 	}
+}
+
+function applyGroupHover(lines: string[], layout: { children: MouseLayoutEntry[] } | undefined, hoverStart: unknown): string[] {
+	if (typeof hoverStart !== "number" || hoverStart < 0 || !layout) return lines;
+	const entry = layout.children.find((candidate) => candidate.top === hoverStart);
+	if (!entry) return lines;
+	const rendered = lines.slice();
+	const line = entry.top + (entry.component ? 0 : Math.max(0, entry.height - 1));
+	if (line < rendered.length) rendered[line] = brightenRenderedLine(rendered[line]);
+	return rendered;
 }
 
 function isToolGroupComponent(value: unknown): value is ToolGroupComponent {
@@ -1189,7 +1256,7 @@ function maybeGroupToolComponent(parent: any, component: any): void {
 	}
 	if (isGroupableTool(previous)) {
 		const group = new ToolGroupComponent();
-		group.setExpanded(Boolean((previous as any).expanded));
+		group.expanded = (previous as any).expanded === true || (component as any).expanded === true;
 		group.addTool(previous);
 		group.addTool(component);
 		(group as any)[COMPONENT_PARENT] = parent;
@@ -1265,17 +1332,21 @@ function patchGlobalToolBorders(): void {
 				&& cached?.branchKey === branchKey
 				&& cached?.branchEpoch === _toolBranchVisualEpoch
 			) {
+				// A cache hit skips Container.render, which is also where fullscreen
+				// mouse targets are recorded. Restore the layout from that render.
+				if (cached.mouseLayout) (this as { mouseLayout?: unknown }).mouseLayout = cached.mouseLayout;
 				return cached.lines;
 			}
 		}
 
 		const rendered = originalRender.call(this, width);
+		const mouseLayout = (this as { mouseLayout?: unknown }).mouseLayout;
 		if (!Array.isArray(rendered) || rendered.length === 0) return rendered;
 		const todoOverlay = formatTodoOverlayLines(rendered, width);
 		if (!isToolExecutionLike(this)) return todoOverlay;
 		const branchCache = { branchKey: toolBranchRenderCacheKey(), branchEpoch: _toolBranchVisualEpoch };
 		if (toolBackgroundMode === "default") {
-			(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: rendered, ...branchCache };
+			(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: rendered, mouseLayout, ...branchCache };
 			return rendered;
 		}
 
@@ -1287,7 +1358,7 @@ function patchGlobalToolBorders(): void {
 
 		const { textLines, imageLines } = splitRenderedImageBlock(rendered.slice(start, end + 1));
 		if (imageLines.length > 0) {
-			(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: rendered, ...branchCache };
+			(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: rendered, mouseLayout, ...branchCache };
 			return rendered;
 		}
 		// Agent-family tools stay column-aligned with every other tool row — no extra
@@ -1307,7 +1378,7 @@ function patchGlobalToolBorders(): void {
 			result = [spacerLine, ...core, ...imageLines];
 		}
 
-		(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: result, ...branchCache };
+		(this as any)[TOOL_RENDER_CACHE] = { width, mode: toolBackgroundMode, lines: result, mouseLayout, ...branchCache };
 		return result;
 	};
 
@@ -1379,6 +1450,96 @@ function clearToolRenderCache(value: unknown): void {
 	if (isToolGroupComponent(parent)) parent.invalidate();
 }
 
+/** Fullscreen hit-testing reads the layout recorded by the last render. */
+function rememberMouseLayout(component: object, width: number, children: MouseLayoutEntry[]): void {
+	(component as { mouseLayout?: { width: number; children: MouseLayoutEntry[] } }).mouseLayout = { width, children };
+}
+
+function isPrimaryClick(event: TuiMouseEvent): boolean {
+	return event.type === "click" && event.button === "left";
+}
+
+function toggleExpandedComponent(component: any): boolean {
+	if (!component || typeof component.setExpanded !== "function") return false;
+	component.setExpanded(component.expanded !== true);
+	return true;
+}
+
+function requestComponentRender(component: any): void {
+	const ui = component?.ui;
+	if (typeof ui?.requestRender === "function") ui.requestRender();
+}
+
+const GROUP_HOVER_KEY = Symbol.for("pi-claude-style-tools:group-hover");
+
+function setGroupHover(group: any, rowStart: number): boolean {
+	if (group[GROUP_HOVER_KEY] === rowStart) return false;
+	group[GROUP_HOVER_KEY] = rowStart;
+	return true;
+}
+
+function mouseLayoutTarget(
+	layout: { width: number; children: MouseLayoutEntry[] } | undefined,
+	event: TuiMouseEvent,
+): MouseLayoutEntry | undefined {
+	if (!layout || layout.width !== event.width || event.y < 0 || event.y >= event.height) return undefined;
+	return layout.children.find((entry) => event.y >= entry.top && event.y < entry.top + entry.height);
+}
+
+function toggleGroupedTools(group: any, tools: any[]): { handled: true } | undefined {
+	const targets = tools.filter((tool) => typeof tool?.setExpanded === "function");
+	if (targets.length === 0) return undefined;
+	const expanded = targets.some((tool) => tool.expanded !== true);
+	for (const tool of targets) tool.setExpanded(expanded);
+	if (Array.isArray(group?.tools)) group.expanded = group.tools.some((tool: any) => tool?.expanded === true);
+	group.invalidate?.();
+	const ui = targets.find((tool) => typeof tool?.ui?.requestRender === "function")?.ui;
+	ui?.requestRender?.();
+	return { handled: true };
+}
+
+let hoveredClickTarget: { owner: object; clear: () => void } | undefined;
+let hoverClaimedThisMove = false;
+
+function claimClickHover(owner: object, clear: () => void): void {
+	hoverClaimedThisMove = true;
+	if (hoveredClickTarget?.owner === owner) return;
+	const previous = hoveredClickTarget;
+	hoveredClickTarget = { owner, clear };
+	previous?.clear();
+}
+
+function patchFullscreenHoverExit(): void {
+	const proto = (PiTui as any).TuiAltScreen?.prototype;
+	if (!proto || proto[FULLSCREEN_HOVER_PATCH_FLAG] || typeof proto.handleMouseEvent !== "function") return;
+	const originalHandleMouse = proto.handleMouseEvent;
+	proto.handleMouseEvent = function patchedFullscreenMouseEvent(raw: { button: number }) {
+		const isMove = (raw.button & 35) === 35;
+		if (isMove) hoverClaimedThisMove = false;
+		const result = originalHandleMouse.call(this, raw);
+		if (isMove && !hoverClaimedThisMove && hoveredClickTarget) {
+			const previous = hoveredClickTarget;
+			hoveredClickTarget = undefined;
+			previous.clear();
+			this.requestRender();
+		}
+		return result;
+	};
+	if (typeof proto.handleViewportInput === "function") {
+		const originalInput = proto.handleViewportInput;
+		proto.handleViewportInput = function patchedFullscreenInput(data: string) {
+			if (data === "\x1b[O" && hoveredClickTarget) {
+				const previous = hoveredClickTarget;
+				hoveredClickTarget = undefined;
+				previous.clear();
+				this.requestRender();
+			}
+			return originalInput.call(this, data);
+		};
+	}
+	proto[FULLSCREEN_HOVER_PATCH_FLAG] = true;
+}
+
 function unrefTimer(timer: ReturnType<typeof setTimeout> | null | undefined): void {
 	(timer as any)?.unref?.();
 }
@@ -1393,6 +1554,7 @@ function safeInvalidate(ctx: any): void {
 
 const ASSISTANT_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-message");
 const ASSISTANT_RENDER_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-message-render");
+const ASSISTANT_MOUSE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-assistant-fullscreen-mouse");
 const TOOL_EXECUTION_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-execution");
 
 // Rendered-output cache for assistant/user/custom message components.
@@ -1450,9 +1612,8 @@ const WORKED_TURNS_KEY = "_piClaudeStyleWorkedTurns";
 const WORKED_DURATION_MARKER = "Turn took";
 const THINKING_DURATION_KEY = "_piClaudeStyleThinkingDurationMs";
 const THINKING_ACTIVE_KEY = "_piClaudeStyleThinkingActive";
-const MIN_THINKING_SUMMARY_MS = 100;
+const MAX_REASONABLE_THINKING_DURATION_MS = 24 * 60 * 60 * 1000;
 
-let lastThinkingBlockDurationMs: number | undefined;
 let thinkingBlockStartMs = 0;
 /** True from thinking_start until thinking_end on the current assistant stream. */
 let thinkingBlockInFlight = false;
@@ -1518,9 +1679,25 @@ function pluralizeTurns(n: number): string {
 	return `${n} turn${n === 1 ? "" : "s"}`;
 }
 
-function thinkingSummaryStyledText(body: string): string {
+function thinkingSummaryStyledText(body: string, hovered = false): string {
 	// Preserve the visible thinking text column while omitting ∴ when collapsed.
-	return `   ${WORKED_LINE_FG}${body}${RESET}`;
+	const color = hovered ? brightenAnsi(WORKED_LINE_FG) : WORKED_LINE_FG;
+	return `   ${color}${body}${RESET}`;
+}
+
+/** Brighten an existing color without changing its hue. */
+function brightenAnsi(baseAnsi: string): string {
+	const rgb = parseAnsiRgb(baseAnsi);
+	if (!rgb) return "\x1b[97m";
+	const maximum = Math.max(rgb.r, rgb.g, rgb.b);
+	if (maximum === 0) return baseAnsi;
+	const scale = Math.min(1.12, 255 / maximum);
+	const lift = (channel: number) => Math.round(channel * scale);
+	return `\x1b[38;2;${lift(rgb.r)};${lift(rgb.g)};${lift(rgb.b)}m`;
+}
+
+function brightenRenderedLine(line: string): string {
+	return line.replace(/\x1b\[38;2;(\d+);(\d+);(\d+)m/g, (_match, r, g, b) => brightenAnsi(`\x1b[38;2;${r};${g};${b}m`));
 }
 
 function thinkingActiveSummaryText(): string {
@@ -1533,34 +1710,47 @@ function thoughtDurationSummaryText(ms: number): string {
 
 /** Single-line hidden thinking row — no Text paddingX or thinking symbol. */
 class HiddenThinkingSummary {
-	private summaryText: string;
+	private body: string;
+	private hovered = false;
 	private cachedWidth?: number;
+	private cachedHovered?: boolean;
 	private cachedLines?: string[];
 
-	constructor(summaryText: string) {
-		this.summaryText = summaryText;
+	constructor(body: string) {
+		this.body = stripAnsi(body).trim();
 	}
 
 	setSummary(summaryText: string): void {
-		this.summaryText = summaryText;
+		const body = stripAnsi(summaryText).trim();
+		if (this.body === body) return;
+		this.body = body;
+		this.invalidate();
+	}
+
+	setHovered(hovered: boolean): void {
+		if (this.hovered === hovered) return;
+		this.hovered = hovered;
 		this.invalidate();
 	}
 
 	invalidate(): void {
 		this.cachedWidth = undefined;
+		this.cachedHovered = undefined;
 		this.cachedLines = undefined;
 	}
 
 	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) return this.cachedLines;
+		if (this.cachedLines && this.cachedWidth === width && this.cachedHovered === this.hovered) return this.cachedLines;
 		const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
 		if (safeWidth <= 0) {
 			this.cachedWidth = width;
+			this.cachedHovered = this.hovered;
 			this.cachedLines = [""];
 			return this.cachedLines;
 		}
-		const line = padRenderedLineToWidth(this.summaryText, safeWidth);
+		const line = padRenderedLineToWidth(thinkingSummaryStyledText(this.body, this.hovered), safeWidth);
 		this.cachedWidth = width;
+		this.cachedHovered = this.hovered;
 		this.cachedLines = [line];
 		return this.cachedLines;
 	}
@@ -1568,13 +1758,8 @@ class HiddenThinkingSummary {
 
 function getMessageThinkingDurationMs(message: any): number {
 	const stored = (message as any)?.[THINKING_DURATION_KEY];
-	if (typeof stored === "number" && stored > 0) return stored;
-	if (typeof lastThinkingBlockDurationMs === "number" && lastThinkingBlockDurationMs > 0) {
-		return lastThinkingBlockDurationMs;
-	}
-	if (typeof (message as any)?.[WORKED_DURATION_KEY] === "number" && (message as any)[WORKED_DURATION_KEY] > 0) {
-		return (message as any)[WORKED_DURATION_KEY];
-	}
+	if (typeof stored === "number" && Number.isFinite(stored) && stored > 0 && stored <= MAX_REASONABLE_THINKING_DURATION_MS) return stored;
+	if (message && typeof message === "object" && stored !== undefined) delete (message as any)[THINKING_DURATION_KEY];
 	let totalChars = 0;
 	if (Array.isArray(message?.content)) {
 		for (const block of message.content) {
@@ -2073,9 +2258,17 @@ function replaceHiddenThinkingPlaceholders(container: { children?: any[] }, mess
 
 class ThinkingParagraph {
 	private text: string;
+	private hovered = false;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private cachedHovered = false;
 	private chromeEpoch = -1;
+
+	setHovered(hovered: boolean): void {
+		if (this.hovered === hovered) return;
+		this.hovered = hovered;
+		this.invalidate();
+	}
 
 	constructor(
 		text: string,
@@ -2123,6 +2316,7 @@ class ThinkingParagraph {
 		if (
 			this.cachedLines
 			&& this.cachedWidth === width
+			&& this.cachedHovered === this.hovered
 			&& this.chromeEpoch === _toolBranchVisualEpoch
 		) {
 			return this.cachedLines;
@@ -2144,8 +2338,9 @@ class ThinkingParagraph {
 			return this.cachedLines;
 		}
 		const lines = sanitizeRenderedTextBlockLines(md.render(safeWidth - PREFIX_W), safeWidth - PREFIX_W);
+		const displayLines = this.hovered ? lines.map((line) => brightenRenderedLine(line)) : lines;
 		let symbolPlaced = false;
-		const rendered = lines.map((line: string) => {
+		const rendered = displayLines.map((line: string) => {
 			if (!symbolPlaced && stripAnsi(line).trim()) {
 				symbolPlaced = true;
 				return ` ${prefix} ${line}`;
@@ -2153,6 +2348,7 @@ class ThinkingParagraph {
 			return `   ${line}`;
 		}).map((line) => clampLineWidth(line, safeWidth));
 		this.cachedWidth = width;
+		this.cachedHovered = this.hovered;
 		this.cachedLines = rendered;
 		this.chromeEpoch = _toolBranchVisualEpoch;
 		return rendered;
@@ -2444,8 +2640,10 @@ function patchAssistantMessages(): void {
 		// - "full" mode: behaves like stock pi (stays collapsed).
 		const liveMode = getThinkingMode() === "live";
 		const thinkingCollapsed = !!(this as any).hideThinkingBlock;
-		const showLiveThinking = liveMode && thinkingCollapsed && isLiveThinkingMessage(this, message);
-		if (thinkingCollapsed && messageHasThinkingContent(message)) {
+		const override = (this as any).thinkingVisibilityOverrides?.get?.(0);
+		const showLiveThinking = liveMode && thinkingCollapsed && override !== true && isLiveThinkingMessage(this, message);
+		const hideThinking = override ?? (thinkingCollapsed && !showLiveThinking);
+		if (hideThinking && messageHasThinkingContent(message)) {
 			// Pi wraps this in theme.italic/fg again — keep plain label for the placeholder pass.
 			(this as any).hiddenThinkingLabel = "Thinking…";
 		}
@@ -2459,7 +2657,7 @@ function patchAssistantMessages(): void {
 		// Replace text-block Markdown children with DottedParagraph wrappers
 		const container = (this as any).contentContainer;
 		if (!container?.children) return;
-		if (thinkingCollapsed && !showLiveThinking && messageHasThinkingContent(message)) {
+		if (hideThinking && messageHasThinkingContent(message)) {
 			replaceHiddenThinkingPlaceholders(container, message);
 		}
 		const mdTheme = (this as any).markdownTheme;
@@ -2513,7 +2711,119 @@ function patchAssistantMessages(): void {
 	proto[ASSISTANT_PATCH_FLAG] = true;
 }
 
+const THINKING_HOVER_KEY = Symbol.for("pi-claude-style-tools:thinking-hover");
+
+function thinkingVisualChild(child: any): any {
+	const inner = child?.child ?? child;
+	if (
+		inner instanceof HiddenThinkingSummary
+		|| inner instanceof ThinkingParagraph
+		|| inner?.constructor?.name === "HiddenThinkingSummary"
+		|| inner?.constructor?.name === "ThinkingParagraph"
+	) return inner;
+	return undefined;
+}
+
+function thinkingLayout(component: any, width: number): Array<{ component: any; height: number }> {
+	const container = component?.contentContainer;
+	const children = Array.isArray(container?.children) ? container.children : [];
+	if (container?.mouseLayout?.width === width) return container.mouseLayout.children;
+	return children.map((child: any) => ({ component: child, height: child.render(width).length }));
+}
+
+function thinkingRowAt(component: any, event: TuiMouseEvent): any {
+	let childY = 0;
+	for (const entry of thinkingLayout(component, event.width)) {
+		if (event.y >= childY && event.y < childY + entry.height) return thinkingVisualChild(entry.component);
+		childY += entry.height;
+	}
+	return undefined;
+}
+
+function setThinkingHover(component: any, hovered: any): boolean {
+	const previous = component[THINKING_HOVER_KEY];
+	if (previous === hovered) return false;
+	previous?.setHovered?.(false);
+	if (hovered) hovered.setHovered(true);
+	component[THINKING_HOVER_KEY] = hovered;
+	clearMessageRenderCache(component);
+	return true;
+}
+
+function patchAssistantFullscreenMouse(): void {
+	const proto = AssistantMessageComponent.prototype as any;
+	if (proto[ASSISTANT_MOUSE_PATCH_FLAG]) return;
+	const originalHandleMouse = proto.handleMouse;
+	proto.handleMouse = function patchedAssistantHandleMouse(event: TuiMouseEvent) {
+		const hovered = thinkingRowAt(this, event);
+		if (event.type === "move" && hovered) {
+			claimClickHover(this, () => { if (setThinkingHover(this, undefined)) requestComponentRender(this); });
+		}
+		const hoverChanged = event.type === "move" ? setThinkingHover(this, hovered) : false;
+		if (event.type === "move") return hoverChanged ? { handled: true, render: true } : undefined;
+		// Claim the row before Pi's MouseRegion. Its handler restores the italic
+		// "Thinking…" label while a block is streaming.
+		if (isPrimaryClick(event) && hovered && this.lastMessage) {
+			const overrides = this.thinkingVisibilityOverrides instanceof Map
+				? this.thinkingVisibilityOverrides
+				: new Map();
+			this.thinkingVisibilityOverrides = overrides;
+			overrides.set(0, hovered instanceof ThinkingParagraph);
+			this.updateContent(this.lastMessage);
+			return { handled: true };
+		}
+		return typeof originalHandleMouse === "function" ? originalHandleMouse.call(this, event) : undefined;
+	};
+	proto[ASSISTANT_MOUSE_PATCH_FLAG] = true;
+}
+
 const TOOL_BG_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-bg-sync");
+
+const TOOL_HOVER_KEY = Symbol.for("pi-claude-style-tools:tool-hover");
+
+function setToolHover(component: any, hovered: boolean): boolean {
+	if (component[TOOL_HOVER_KEY] === hovered) return false;
+	component[TOOL_HOVER_KEY] = hovered;
+	clearToolRenderCache(component);
+	return true;
+}
+
+function patchToolFullscreenMouse(): void {
+	const proto = ToolExecutionComponent.prototype as any;
+	if (proto[TOOL_MOUSE_PATCH_FLAG]) return;
+	const originalHandleMouse = proto.handleMouse;
+	if (typeof originalHandleMouse !== "function") return;
+	const originalRender = proto.render;
+	proto.render = function patchedToolHoverRender(width: number) {
+		const lines = originalRender.call(this, width);
+		if (this[TOOL_HOVER_KEY] !== true || !Array.isArray(lines)) return lines;
+		const titleIndex = lines.findIndex((line: string) => stripAnsi(line).trim().length > 0 && !/^\s*[╭╰─│]+\s*$/.test(stripAnsi(line)));
+		if (titleIndex < 0) return lines;
+		const rendered = lines.slice();
+		rendered[titleIndex] = brightenRenderedLine(rendered[titleIndex]);
+		return rendered;
+	};
+	proto.handleMouse = function patchedToolHandleMouse(event: TuiMouseEvent) {
+		if (event.type === "move") {
+			claimClickHover(this, () => { if (setToolHover(this, false)) requestComponentRender(this); });
+			return setToolHover(this, true) ? { handled: true, render: true } : undefined;
+		}
+		const result = originalHandleMouse.call(this, event);
+		if (result) return result;
+		// Self-rendered rows forward into their own content. Default-shell rows
+		// reach here only when no nested region claimed the click, including the
+		// blank outline padding our container patch paints around the content.
+		if (!isPrimaryClick(event) || !this.result) return undefined;
+		const group = this[COMPONENT_PARENT];
+		if (group?.constructor?.name === "ToolGroupComponent") {
+			return toggleGroupedTools(group, [this]);
+		}
+		if (!toggleExpandedComponent(this)) return undefined;
+		requestComponentRender(this);
+		return { handled: true };
+	};
+	proto[TOOL_MOUSE_PATCH_FLAG] = true;
+}
 
 function patchToolExecutionBackgroundSync(): void {
 	const proto = ToolExecutionComponent.prototype as any;
@@ -5274,7 +5584,6 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 	if (evt.type === "thinking_start") {
 		thinkingBlockInFlight = true;
 		thinkingBlockStartMs = Date.now();
-		lastThinkingBlockDurationMs = undefined;
 		if (message?.role === "assistant") {
 			(message as any)[THINKING_ACTIVE_KEY] = true;
 			delete (message as any)[THINKING_DURATION_KEY];
@@ -5284,10 +5593,14 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 	}
 	if (evt.type === "thinking_end") {
 		thinkingBlockInFlight = false;
-		const duration = Math.max(0, Date.now() - thinkingBlockStartMs);
+		const duration = thinkingBlockStartMs > 0
+			? Math.max(0, Date.now() - thinkingBlockStartMs)
+			: undefined;
 		if (message?.role === "assistant") delete (message as any)[THINKING_ACTIVE_KEY];
-		lastThinkingBlockDurationMs = duration;
-		if (message?.role === "assistant") (message as any)[THINKING_DURATION_KEY] = duration;
+		if (typeof duration === "number" && duration <= MAX_REASONABLE_THINKING_DURATION_MS) {
+			if (message?.role === "assistant") (message as any)[THINKING_DURATION_KEY] = duration;
+		}
+		thinkingBlockStartMs = 0;
 		refreshThinkingChrome();
 		return;
 	}
@@ -5302,10 +5615,10 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 			thinkingBlockInFlight = false;
 			const duration = thinkingBlockStartMs > 0 ? Math.max(0, Date.now() - thinkingBlockStartMs) : undefined;
 			if (message?.role === "assistant") delete (message as any)[THINKING_ACTIVE_KEY];
-			if (typeof duration === "number") {
-				lastThinkingBlockDurationMs = duration;
+			if (typeof duration === "number" && duration <= MAX_REASONABLE_THINKING_DURATION_MS) {
 				if (message?.role === "assistant") (message as any)[THINKING_DURATION_KEY] = duration;
 			}
+			thinkingBlockStartMs = 0;
 			refreshThinkingChrome();
 		}
 	}
@@ -5354,6 +5667,7 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			// global in-flight flag set and the next message renders a stale
 			// "Thinking..." row until its own thinking events arrive.
 			thinkingBlockInFlight = false;
+			thinkingBlockStartMs = 0;
 			delete (message as any)[THINKING_ACTIVE_KEY];
 		}
 	});
@@ -5370,13 +5684,10 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			// at the end of the message instead of sticking into later calls.
 			thinkingBlockInFlight = false;
 			delete (message as any)[THINKING_ACTIVE_KEY];
-			if (typeof (message as any)[THINKING_DURATION_KEY] !== "number") {
-				const duration = thinkingBlockStartMs > 0 ? Math.max(0, Date.now() - thinkingBlockStartMs) : undefined;
-				if (typeof duration === "number" && duration > 0) {
-					lastThinkingBlockDurationMs = duration;
+			if (typeof (message as any)[THINKING_DURATION_KEY] !== "number" && thinkingBlockStartMs > 0) {
+				const duration = Math.max(0, Date.now() - thinkingBlockStartMs);
+				if (duration <= MAX_REASONABLE_THINKING_DURATION_MS) {
 					(message as any)[THINKING_DURATION_KEY] = duration;
-				} else if (typeof lastThinkingBlockDurationMs === "number" && lastThinkingBlockDurationMs > 0) {
-					(message as any)[THINKING_DURATION_KEY] = lastThinkingBlockDurationMs;
 				}
 			}
 			thinkingBlockStartMs = 0;
@@ -6440,11 +6751,14 @@ export default function (pi: ExtensionAPI) {
 	patchToolExecutionBackgroundSync();
 	patchToolRenderCacheInvalidation();
 	patchReadImageExpansion();
+	patchFullscreenHoverExit();
+	patchToolFullscreenMouse();
 	patchContainerParentTracking();
 	patchGlobalToolBorders();
 	patchCustomMessageRender();
 	patchUserMessageRender();
 	patchAssistantMessages();
+	patchAssistantFullscreenMouse();
 	patchToolExecutionRenderers();
 	applyDiffPalette();
 	registerThinkingLabels(pi);
