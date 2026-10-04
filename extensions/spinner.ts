@@ -784,7 +784,12 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function syncWorkingMessage(force = false): void {
-		if (!activeCtx?.hasUI) return;
+		try {
+			if (!activeCtx?.hasUI) return;
+		} catch {
+			// Session replacement/reload invalidated the captured context.
+			return;
+		}
 		// Re-derive colors on every tick so /cc-spinner verb/status changes
 		// take effect within ~250 ms without waiting for the next pi event.
 		// applyThemeColors is identity-cached on (theme, verbKey, statusKey) so
@@ -800,7 +805,12 @@ export default function (pi: ExtensionAPI) {
 
 	function restoreDefaultWorkingMessage(): void {
 		lastWorkingMessage = null;
-		if (!activeCtx?.hasUI) return;
+		try {
+			if (!activeCtx?.hasUI) return;
+		} catch {
+			// Session replacement/reload invalidated the captured context.
+			return;
+		}
 		try {
 			activeCtx.ui.setWorkingMessage();
 		} catch { /* noop */ }
@@ -1032,20 +1042,25 @@ export default function (pi: ExtensionAPI) {
 			clearThoughtStatusTimer();
 		}
 
-		if (activeCtx?.hasUI) {
-			const message = `${STATUS_DIM}✻ Turn took ${formatDuration(elapsed)}${RESET}`;
-			lastWorkingMessage = message;
-			try {
-				activeCtx.ui.setWorkingMessage(message);
-			} catch { /* noop */ }
-			completionTimer = setTimeout(() => {
-				completionTimer = null;
-				if (activeTurnId !== turnId) return;
+		try {
+			if (activeCtx?.hasUI) {
+				const message = `${STATUS_DIM}✻ Turn took ${formatDuration(elapsed)}${RESET}`;
+				lastWorkingMessage = message;
+				try {
+					activeCtx.ui.setWorkingMessage(message);
+				} catch { /* noop */ }
+				completionTimer = setTimeout(() => {
+					completionTimer = null;
+					if (activeTurnId !== turnId) return;
+					restoreDefaultWorkingMessage();
+				}, TURN_COMPLETION_MS);
+				unrefTimer(completionTimer);
+			} else if (typeof thinkingStatus !== "number") {
 				restoreDefaultWorkingMessage();
-			}, TURN_COMPLETION_MS);
-			unrefTimer(completionTimer);
-		} else if (typeof thinkingStatus !== "number") {
-			restoreDefaultWorkingMessage();
+			}
+		} catch {
+			// Session replacement/reload invalidated the captured context.
+			return;
 		}
 
 		responseLength = 0;
