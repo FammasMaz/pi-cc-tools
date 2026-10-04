@@ -2,9 +2,10 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
-const root = process.env.PI_AGENT_ROOT ?? resolve(require.resolve("@earendil-works/pi-coding-agent/package.json"), "..");
+const root = process.env.PI_AGENT_ROOT ?? resolve(require.resolve("@earendil-works/pi-coding-agent/dist/index.js"), "../..");
 const { version } = require(`${root}/node_modules/@earendil-works/pi-tui/package.json`);
-if (Number(version.split(".")[1]) < 85) {
+const [major = 0, minor = 0] = version.split(".").map(Number);
+if (major === 0 && minor < 85) {
 	throw new Error(`Fullscreen mouse test requires Pi TUI 0.85+ (found ${version}); set PI_AGENT_ROOT to a current Pi install`);
 }
 const extensionPath = resolve(fileURLToPath(new URL("../extensions/index.ts", import.meta.url)));
