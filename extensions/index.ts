@@ -2338,7 +2338,9 @@ class ThinkingParagraph {
 		_defaultTextStyle?: ConstructorParameters<typeof Markdown>[4],
 		options?: MarkdownOptions,
 	) {
-		this.text = stripTransientMagicContextTags(text);
+		// Prefix only the renderer's private copy. The assistant message itself is
+		// canonical session data and must remain untouched for compaction replay.
+		this.text = prefixThinkingLine(stripTransientMagicContextTags(text), undefined);
 		this.options = options;
 	}
 
@@ -2751,9 +2753,10 @@ function patchAssistantMessages(): void {
 				}
 			}
 		}
-		const explicitDuration = (message as any)[WORKED_DURATION_KEY];
-		const explicitSessionTotal = (message as any)[WORKED_SESSION_TOTAL_KEY];
-		const explicitTurns = (message as any)[WORKED_TURNS_KEY];
+		const workedMetadata = workedMetadataForMessage(message);
+		const explicitDuration = workedMetadata?.duration;
+		const explicitSessionTotal = workedMetadata?.sessionTotal;
+		const explicitTurns = workedMetadata?.turns;
 		// The "Turn took" line must only appear once the stream has truly closed.
 		// `message.stopReason === "stop"` is not a safe "finished" signal here because
 		// providers may initialize a live message with that value. The `message_end`
@@ -5654,8 +5657,8 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 		thinkingBlockInFlight = true;
 		thinkingBlockStartMs = Date.now();
 		if (message?.role === "assistant") {
-			(message as any)[THINKING_ACTIVE_KEY] = true;
-			delete (message as any)[THINKING_DURATION_KEY];
+			thinkingActiveMessages.add(message);
+			thinkingDurationByMessage.delete(message);
 		}
 		refreshThinkingChrome();
 		return;
@@ -5665,9 +5668,9 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 		const duration = thinkingBlockStartMs > 0
 			? Math.max(0, Date.now() - thinkingBlockStartMs)
 			: undefined;
-		if (message?.role === "assistant") delete (message as any)[THINKING_ACTIVE_KEY];
-		if (typeof duration === "number" && duration <= MAX_REASONABLE_THINKING_DURATION_MS) {
-			if (message?.role === "assistant") (message as any)[THINKING_DURATION_KEY] = duration;
+		if (message?.role === "assistant") thinkingActiveMessages.delete(message);
+		if (typeof duration === "number" && duration <= MAX_REASONABLE_THINKING_DURATION_MS && message?.role === "assistant") {
+			thinkingDurationByMessage.set(message, duration);
 		}
 		thinkingBlockStartMs = 0;
 		refreshThinkingChrome();
@@ -5679,13 +5682,13 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 	// run normally. Any non-thinking stream event on the same assistant message
 	// means thinking is no longer the live activity: freeze the elapsed time into
 	// a "Thought for Xs" duration so the row always resolves.
-	if ((message as any)?.[THINKING_ACTIVE_KEY] || thinkingBlockInFlight) {
+	if (hasThinkingActiveMetadata(message) || thinkingBlockInFlight) {
 		if (evt.type === "text_start" || evt.type === "text_delta" || evt.type === "toolcall_start" || evt.type === "toolcall_end") {
 			thinkingBlockInFlight = false;
 			const duration = thinkingBlockStartMs > 0 ? Math.max(0, Date.now() - thinkingBlockStartMs) : undefined;
-			if (message?.role === "assistant") delete (message as any)[THINKING_ACTIVE_KEY];
-			if (typeof duration === "number" && duration <= MAX_REASONABLE_THINKING_DURATION_MS) {
-				if (message?.role === "assistant") (message as any)[THINKING_DURATION_KEY] = duration;
+			if (message?.role === "assistant") thinkingActiveMessages.delete(message);
+			if (typeof duration === "number" && duration <= MAX_REASONABLE_THINKING_DURATION_MS && message?.role === "assistant") {
+				thinkingDurationByMessage.set(message, duration);
 			}
 			thinkingBlockStartMs = 0;
 			refreshThinkingChrome();
@@ -5700,11 +5703,9 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		if (theme) applyThemePaletteIfNeeded(theme);
 		const message = event?.message;
 		if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return;
-		for (const block of message.content) {
-			if (block && block.type === "thinking" && typeof block.thinking === "string") {
-				block.thinking = prefixThinkingLine(block.thinking, theme);
-			}
-		}
+		// Thinking labels are applied by ThinkingParagraph while rendering. Never
+		// rewrite the assistant message object: context/compaction consumers need
+		// its canonical thinking content unchanged.
 	};
 	pi.on("before_agent_start", async () => {
 		// Start once per top-level request. Steering/follow-up messages can be
@@ -5730,14 +5731,14 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 		}
 		if (message?.role === "assistant") {
 			currentAssistantMessageStartMs = Date.now();
-			(message as any)[WORKED_START_KEY] = currentAssistantMessageStartMs;
+			workedStartByMessage.set(message, currentAssistantMessageStartMs);
 			// A new assistant message starts a fresh thinking lifecycle. Without
 			// this, a missing thinking_end on the previous message leaves the
 			// global in-flight flag set and the next message renders a stale
 			// "Thinking..." row until its own thinking events arrive.
 			thinkingBlockInFlight = false;
 			thinkingBlockStartMs = 0;
-			delete (message as any)[THINKING_ACTIVE_KEY];
+			thinkingActiveMessages.delete(message);
 		}
 	});
 	pi.on("message_update", async (event, ctx) => {
@@ -5752,27 +5753,22 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			// into its "Thought for Xs" duration here so the row always resolves
 			// at the end of the message instead of sticking into later calls.
 			thinkingBlockInFlight = false;
-			delete (message as any)[THINKING_ACTIVE_KEY];
-			if (typeof (message as any)[THINKING_DURATION_KEY] !== "number" && thinkingBlockStartMs > 0) {
+			thinkingActiveMessages.delete(message);
+			if (getThinkingDurationMetadata(message) === undefined && thinkingBlockStartMs > 0) {
 				const duration = Math.max(0, Date.now() - thinkingBlockStartMs);
-				if (duration <= MAX_REASONABLE_THINKING_DURATION_MS) {
-					(message as any)[THINKING_DURATION_KEY] = duration;
-				}
+				if (duration <= MAX_REASONABLE_THINKING_DURATION_MS) thinkingDurationByMessage.set(message, duration);
 			}
 			thinkingBlockStartMs = 0;
 			const started = typeof currentAgentWorkStartMs === "number"
 				? currentAgentWorkStartMs
-				: typeof (message as any)[WORKED_START_KEY] === "number"
-					? (message as any)[WORKED_START_KEY]
-					: currentAssistantMessageStartMs;
+				: workedStartByMessage.get(message)
+					?? (typeof (message as any)[WORKED_START_KEY] === "number" ? (message as any)[WORKED_START_KEY] : currentAssistantMessageStartMs);
 			const isFinalAssistantMessage = message.stopReason === "stop";
 			if (started !== undefined && isFinalAssistantMessage) {
 				const durationMs = Date.now() - started;
 				const sessionTotalMs = typeof sessionStartMs === "number" ? Date.now() - sessionStartMs : undefined;
 				const turns = userTurnCount > 0 ? userTurnCount : undefined;
-				(message as any)[WORKED_DURATION_KEY] = durationMs;
-				if (typeof sessionTotalMs === "number") (message as any)[WORKED_SESSION_TOTAL_KEY] = sessionTotalMs;
-				if (typeof turns === "number") (message as any)[WORKED_TURNS_KEY] = turns;
+				workedDurationByMessage.set(message, { duration: durationMs, sessionTotal: sessionTotalMs, turns });
 				// Duration metadata drives the assistant component's TUI-only status line.
 				// Message content stays presentation-neutral for persistence and consumers.
 			}
@@ -5820,17 +5816,10 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			sessionStartMs = sessionStartMs === undefined ? earliest : Math.min(sessionStartMs, earliest);
 		}
 		if (userCount > userTurnCount) userTurnCount = userCount;
-		for (const msg of messages) {
-			if (!msg || msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-			for (const block of msg.content) {
-				if (block && block.type === "thinking" && typeof block.thinking === "string") {
-					block.thinking = stripThinkingPresentationArtifacts(block.thinking);
-				}
-				if (block && block.type === "text" && typeof block.text === "string") {
-					block.text = stripWorkedDurationLine(block.text);
-				}
-			}
-		}
+		// Do not normalize or strip message content here. The context event is also
+		// consumed by compaction/replay integrations that compare these objects
+		// against the persisted session projection. Presentation cleanup belongs in
+		// the renderer and must not mutate canonical history.
 	});
 }
 
