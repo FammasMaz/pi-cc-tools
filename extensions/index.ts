@@ -527,8 +527,8 @@ function getThinkingMode(): ThinkingMode {
 
 function isAssistantThinkingComplete(comp: any, message: any): boolean {
 	if (!message || message.role !== "assistant") return false;
-	if (typeof message[THINKING_DURATION_KEY] === "number") return true;
-	if (message[THINKING_ACTIVE_KEY]) return false;
+	if (getThinkingDurationMetadata(message) !== undefined) return true;
+	if (hasThinkingActiveMetadata(message)) return false;
 	// Providers keep stopReason "pending" for the whole stream ("deferred" while
 	// a deferred call is unresolved); both are in-flight sentinels, never
 	// completion signals. Without this, live-thinking detection would depend on
@@ -555,7 +555,7 @@ function isAssistantThinkingComplete(comp: any, message: any): boolean {
 function isLiveThinkingMessage(comp: any, message: any): boolean {
 	if (!message || message.role !== "assistant") return false;
 	if (isAssistantThinkingComplete(comp, message)) return false;
-	if ((message as any)[THINKING_ACTIVE_KEY]) return true;
+	if (hasThinkingActiveMetadata(message)) return true;
 	if (Array.isArray(message.content)) {
 		return message.content.some((b: any) => b?.type === "thinking" && typeof b?.thinking === "string" && b.thinking.trim());
 	}
@@ -1200,7 +1200,7 @@ function isThinkingOnlyAssistantComponent(comp: unknown): comp is InstanceType<t
 	if (hasText) return false;
 	const hasToolCalls = msg.content.some((c: any) => c?.type === "toolCall");
 	if (hasToolCalls) return false;
-	if ((comp as any).isStreaming === true || msg[THINKING_ACTIVE_KEY]) return false;
+	if ((comp as any).isStreaming === true || hasThinkingActiveMetadata(msg)) return false;
 	return true;
 }
 
@@ -1228,10 +1228,13 @@ function maybeMergeConsecutiveThinkingMessages(parent: any): void {
 			const mergedDuration = durA + durB;
 
 			const nextThinkingBlocks = nextMsg.content.filter((c: any) => c?.type === "thinking");
-			curMsg.content.push(...nextThinkingBlocks);
-			curMsg[THINKING_DURATION_KEY] = mergedDuration;
+			const mergedMessage = {
+				...curMsg,
+				content: [...curMsg.content, ...nextThinkingBlocks],
+				[THINKING_DURATION_KEY]: mergedDuration,
+			};
 
-			(current as any).updateContent(curMsg);
+			(current as any).updateContent(mergedMessage);
 
 			const removeCount = nextIdx - i;
 			children.splice(i + 1, removeCount);
@@ -1615,6 +1618,46 @@ const THINKING_DURATION_KEY = "_piClaudeStyleThinkingDurationMs";
 const THINKING_ACTIVE_KEY = "_piClaudeStyleThinkingActive";
 const MAX_REASONABLE_THINKING_DURATION_MS = 24 * 60 * 60 * 1000;
 
+// Presentation metadata belongs to the renderer, not the canonical session
+// messages. Weak collections keep live state available to the TUI without
+// changing the objects Pi persists or projects for compaction replay.
+const thinkingDurationByMessage = new WeakMap<object, number>();
+const thinkingActiveMessages = new WeakSet<object>();
+const workedStartByMessage = new WeakMap<object, number>();
+const workedDurationByMessage = new WeakMap<object, { duration: number; sessionTotal?: number; turns?: number }>();
+
+function getThinkingDurationMetadata(message: any): number | undefined {
+	if (!message || typeof message !== "object") return undefined;
+	const stored = thinkingDurationByMessage.get(message) ?? message[THINKING_DURATION_KEY];
+	return typeof stored === "number"
+		&& Number.isFinite(stored)
+		&& stored > 0
+		&& stored <= MAX_REASONABLE_THINKING_DURATION_MS
+		? stored
+		: undefined;
+}
+
+function hasThinkingActiveMetadata(message: any): boolean {
+	return !!message
+		&& typeof message === "object"
+		&& (thinkingActiveMessages.has(message) || message[THINKING_ACTIVE_KEY] === true);
+}
+
+function workedMetadataForMessage(message: any): { duration: number; sessionTotal?: number; turns?: number } | undefined {
+	if (!message || typeof message !== "object") return undefined;
+	const metadata = workedDurationByMessage.get(message);
+	if (metadata) return metadata;
+	const duration = message[WORKED_DURATION_KEY];
+	if (typeof duration !== "number" || !Number.isFinite(duration) || duration < 0) return undefined;
+	const sessionTotal = message[WORKED_SESSION_TOTAL_KEY];
+	const turns = message[WORKED_TURNS_KEY];
+	return {
+		duration,
+		sessionTotal: typeof sessionTotal === "number" ? sessionTotal : undefined,
+		turns: typeof turns === "number" ? turns : undefined,
+	};
+}
+
 let thinkingBlockStartMs = 0;
 /** True from thinking_start until thinking_end on the current assistant stream. */
 let thinkingBlockInFlight = false;
@@ -1758,9 +1801,8 @@ class HiddenThinkingSummary {
 }
 
 function getMessageThinkingDurationMs(message: any): number {
-	const stored = (message as any)?.[THINKING_DURATION_KEY];
-	if (typeof stored === "number" && Number.isFinite(stored) && stored > 0 && stored <= MAX_REASONABLE_THINKING_DURATION_MS) return stored;
-	if (message && typeof message === "object" && stored !== undefined) delete (message as any)[THINKING_DURATION_KEY];
+	const stored = getThinkingDurationMetadata(message);
+	if (stored !== undefined) return stored;
 	let totalChars = 0;
 	if (Array.isArray(message?.content)) {
 		for (const block of message.content) {
@@ -1781,9 +1823,6 @@ function hiddenThinkingSummaryForMessage(message: any, comp?: any): string {
 		return thinkingActiveSummaryText();
 	}
 	const durationMs = getMessageThinkingDurationMs(message);
-	if (message && typeof message === "object") {
-		(message as any)[THINKING_DURATION_KEY] = durationMs;
-	}
 	return thoughtDurationSummaryText(durationMs);
 }
 
@@ -1964,13 +2003,20 @@ function patchTerminalWriteTagScrubber(): void {
 
 function replaceInlineMath(text: string): string {
 	if (!hasInlineMathMarkers(text)) return text;
-	const withParens = text.replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => {
-		return codeSpan(formatMathForDisplay(body, false));
-	});
-	return withParens.replace(/(^|[^\\])\$([^\n$]{1,200})\$/g, (match, prefix: string, body: string) => {
-		if (!looksLikeInlineMath(body)) return match;
-		return `${prefix}${codeSpan(formatMathForDisplay(body, false))}`;
-	});
+	const transform = (segment: string): string => {
+		const withParens = segment.replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => {
+			return codeSpan(formatMathForDisplay(body, false));
+		});
+		return withParens.replace(/(^|[^\\])\$([^\n$]{1,200})\$/g, (match, prefix: string, body: string) => {
+			if (!looksLikeInlineMath(body)) return match;
+			return `${prefix}${codeSpan(formatMathForDisplay(body, false))}`;
+		});
+	};
+	// Markdown code spans and fenced blocks are literal source. Apply math
+	// formatting only to prose segments so shell variables such as `$base` and
+	// `$scope` remain byte-for-byte unchanged in displayed/copied commands.
+	const parts = text.split(/(`{3,}[\s\S]*?`{3,}|`[^`\n]*`)/g);
+	return parts.map((part, index) => index % 2 === 1 ? part : transform(part)).join("");
 }
 
 interface MathBlock {
@@ -3792,6 +3838,10 @@ function expandedPreviewLimit(): number {
 function bashCollapsedLimit(): number {
 	const value = readSettings().bashCollapsedLines;
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 10;
+}
+
+function bashOutputMode(): "opencode" | "summary" | "preview" {
+	return getMode(readSettings().bashOutputMode, ["opencode", "summary", "preview"] as const, "opencode");
 }
 
 function bashCommandPreviewLimit(): number {
@@ -7319,9 +7369,15 @@ export default function (pi: ExtensionAPI) {
 			let text = exitCode === null || exitCode === 0 ? theme.fg("success", "Done") : theme.fg("error", `Exit ${exitCode}`);
 			text += theme.fg("muted", ` (${nonEmpty.total} lines)`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " [truncated]");
+			const mode = bashOutputMode();
+			if (mode === "summary") return makeText(ctx.lastComponent, withBranch(text, theme));
 			const persistentPreview = shouldPreserveBashPreview(ctx) ? buildPersistentBashPreview(nonEmpty.lines, theme) : "";
-			if (!expanded && persistentPreview) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}\n${persistentPreview}`, theme));
-			if (!expanded && nonEmpty.total > 0) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
+			if (mode === "preview") {
+				if (!expanded && persistentPreview) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}\n${persistentPreview}`, theme));
+				if (!expanded && nonEmpty.total > 0) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
+				if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
+			}
+			if (!expanded && mode === "opencode" && nonEmpty.total > 0) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
 			const collapsed = bashCollapsedLimit();
 			if (rewrite) text += `\n${formatRtkRewriteDetails(rewrite, theme)}`;
