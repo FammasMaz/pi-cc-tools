@@ -7203,6 +7203,8 @@ export default function (pi: ExtensionAPI) {
 		name: "read",
 		label: "read",
 		description: readTool.description,
+		promptSnippet: (readTool as any).promptSnippet,
+		promptGuidelines: (readTool as any).promptGuidelines,
 		parameters: readTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate) {
 			return readTool.execute(toolCallId, params, signal, onUpdate);
@@ -7258,6 +7260,8 @@ export default function (pi: ExtensionAPI) {
 		name: "bash",
 		label: "bash",
 		description: bashTool.description,
+		promptSnippet: (bashTool as any).promptSnippet,
+		promptGuidelines: (bashTool as any).promptGuidelines,
 		parameters: bashTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate) {
 			return bashTool.execute(toolCallId, params, signal, onUpdate);
@@ -7331,6 +7335,8 @@ export default function (pi: ExtensionAPI) {
 		name: "grep",
 		label: "grep",
 		description: grepTool.description,
+		promptSnippet: (grepTool as any).promptSnippet,
+		promptGuidelines: (grepTool as any).promptGuidelines,
 		parameters: grepTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate) {
 			return grepTool.execute(toolCallId, params, signal, onUpdate);
@@ -7371,6 +7377,8 @@ export default function (pi: ExtensionAPI) {
 		name: "find",
 		label: "find",
 		description: findTool.description,
+		promptSnippet: (findTool as any).promptSnippet,
+		promptGuidelines: (findTool as any).promptGuidelines,
 		parameters: findTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate) {
 			return findTool.execute(toolCallId, params, signal, onUpdate);
@@ -7422,6 +7430,8 @@ export default function (pi: ExtensionAPI) {
 		name: "ls",
 		label: "ls",
 		description: lsTool.description,
+		promptSnippet: (lsTool as any).promptSnippet,
+		promptGuidelines: (lsTool as any).promptGuidelines,
 		parameters: lsTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate) {
 			return lsTool.execute(toolCallId, params, signal, onUpdate);
@@ -7473,6 +7483,8 @@ export default function (pi: ExtensionAPI) {
 		name: "write",
 		label: "write",
 		description: writeTool.description,
+		promptSnippet: (writeTool as any).promptSnippet,
+		promptGuidelines: (writeTool as any).promptGuidelines,
 		parameters: writeTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, _ctx) {
 			const fp = params.path ?? (params as any).file_path ?? "";
@@ -7588,6 +7600,8 @@ export default function (pi: ExtensionAPI) {
 		name: "edit",
 		label: "edit",
 		description: editTool.description,
+		promptSnippet: (editTool as any).promptSnippet,
+		promptGuidelines: (editTool as any).promptGuidelines,
 		parameters: editTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate, _ctx) {
 			const fp = params.path ?? (params as any).file_path ?? "";
