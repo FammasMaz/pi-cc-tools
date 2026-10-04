@@ -7361,10 +7361,13 @@ export default function (pi: ExtensionAPI) {
 			const mode = bashOutputMode();
 			if (mode === "summary") return makeText(ctx.lastComponent, withBranch(text, theme));
 			const persistentPreview = shouldPreserveBashPreview(ctx) ? buildPersistentBashPreview(nonEmpty.lines, theme) : "";
-			if (mode === "preview") {
-				if (!expanded && persistentPreview) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}\n${persistentPreview}`, theme));
-				if (!expanded && nonEmpty.total > 0) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
-				if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
+			if (!expanded && mode === "preview") {
+				const previewLines = nonEmpty.lines.slice(0, bashCollapsedLimit());
+				const preview = previewLines.length > 0
+					? buildPreviewText(previewLines, false, theme, bashCollapsedLimit(), nonEmpty.total, (line) => theme.fg("dim", line || " "))
+					: "";
+				const suffix = toolOutputDetailHint(theme, expanded);
+				return makeText(ctx.lastComponent, withBranch(`${text}${suffix}${preview ? `\n${preview}` : ""}`, theme));
 			}
 			if (!expanded && mode === "opencode" && nonEmpty.total > 0) return makeText(ctx.lastComponent, withBranch(`${text}${toolOutputDetailHint(theme, expanded)}`, theme));
 			if (!expanded) return makeText(ctx.lastComponent, withBranch(text, theme));
