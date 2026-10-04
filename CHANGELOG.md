@@ -39,6 +39,16 @@
 
 - **Hide transient context tags** — hide transient context tags in streaming prose.
 
+## 1.0.85 — 2026-09-07
+
+### Fixed
+
+- Preserve Markdown code literals while formatting inline mathematics.
+- Keep assistant presentation state out of canonical session messages so compacted sessions can replay safely.
+- Respect `bashOutputMode` for completed Bash output.
+- Preserve native prompt metadata in wrapped core tools.
+- Harden spinner cleanup when Pi replaces a stale UI context.
+
 ## Unreleased
 
 ### Fixed
