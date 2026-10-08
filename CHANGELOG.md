@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.86 — 2026-10-08
+
+### Fixed
+
+- **Display-math scanning no longer splits fenced blocks on `$$` and `\[ … \]`** (Perry Trolard, [#33](https://github.com/FammasMaz/pi-cc-tools/issues/33)) - paragraph rebuilding now respects the same Markdown code regions as inline math formatting, so `$$` (shell PID) and `\[ … \]` (grep/ripgrep char-class regexes) inside ```` ``` ```` fences and inline code stay literal instead of cutting the block into a math segment.
+
 ## 1.0.83 — 2026-09-07
 
 ### Fixed

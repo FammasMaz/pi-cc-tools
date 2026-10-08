@@ -2001,6 +2001,32 @@ function patchTerminalWriteTagScrubber(): void {
 	proto[TERMINAL_SCRUB_PATCH_FLAG] = true;
 }
 
+// Code spans and fenced blocks are literal Markdown source. Math preprocessing
+// must never touch delimiters inside them: `$$` is the shell PID and `\[ … \]
+// appears in grep/ripgrep class regexes. Inline formatting splits on this
+// expression before transforming; display-math block scanning below reuses it
+// so a math candidate opening inside code is skipped in favor of real prose.
+const MARKDOWN_CODE_REGION_RE = /(`{3,}[\s\S]*?`{3,}|`[^`\n]*`)/g;
+
+interface CodeRegion {
+	start: number;
+	end: number;
+}
+
+function findMarkdownCodeRegions(text: string): CodeRegion[] {
+	const regions: CodeRegion[] = [];
+	MARKDOWN_CODE_REGION_RE.lastIndex = 0;
+	let match: RegExpExecArray | null;
+	while ((match = MARKDOWN_CODE_REGION_RE.exec(text))) {
+		regions.push({ start: match.index, end: match.index + match[0].length });
+	}
+	return regions;
+}
+
+function codeRegionContaining(regions: CodeRegion[], index: number): CodeRegion | undefined {
+	return regions.find((region) => index >= region.start && index < region.end);
+}
+
 function replaceInlineMath(text: string): string {
 	if (!hasInlineMathMarkers(text)) return text;
 	const transform = (segment: string): string => {
@@ -2012,10 +2038,7 @@ function replaceInlineMath(text: string): string {
 			return `${prefix}${codeSpan(formatMathForDisplay(body, false))}`;
 		});
 	};
-	// Markdown code spans and fenced blocks are literal source. Apply math
-	// formatting only to prose segments so shell variables such as `$base` and
-	// `$scope` remain byte-for-byte unchanged in displayed/copied commands.
-	const parts = text.split(/(`{3,}[\s\S]*?`{3,}|`[^`\n]*`)/g);
+	const parts = text.split(MARKDOWN_CODE_REGION_RE);
 	return parts.map((part, index) => index % 2 === 1 ? part : transform(part)).join("");
 }
 
@@ -2132,14 +2155,31 @@ function buildParagraphSegments(
 		return segments;
 	}
 	const scanLoose = shouldScanLooseBracketMath(text);
+	// Code regions are computed once for the whole paragraph: a display-math
+	// candidate must be rejected before its fence gets cut into separate
+	// Markdown segments (issue #33, sibling of the inline fix in 2ccd158).
+	const codeRegions = findMarkdownCodeRegions(text);
+	// `cursor` marks the start of prose not yet emitted; `scanFrom` only advances
+	// past rejected code regions so skipped candidates never erase prose.
 	let cursor = 0;
-	while (cursor < text.length) {
-		const next = findNextDisplayMathBlock(text, cursor, scanLoose);
+	let scanFrom = 0;
+	while (scanFrom < text.length) {
+		let next = findNextDisplayMathBlock(text, scanFrom, scanLoose);
+		// Math delimiters found inside a fenced block or code span are literal
+		// source, not math. Resume the scan after that code region so a later
+		// genuine `$$ … $$` in prose is still honored.
+		while (next) {
+			const region = codeRegionContaining(codeRegions, next.index);
+			if (!region) break;
+			scanFrom = region.end;
+			next = findNextDisplayMathBlock(text, scanFrom, scanLoose);
+		}
 		if (!next) break;
 		appendMarkdownSegment(segments, text.slice(cursor, next.index), theme, options);
 		const raw = text.slice(next.contentStart, next.contentEnd).trim();
 		if (raw) segments.push({ kind: "math", raw });
 		cursor = next.endIndex;
+		scanFrom = next.endIndex;
 	}
 	appendMarkdownSegment(segments, text.slice(cursor), theme, options);
 	return segments;
@@ -7876,3 +7916,11 @@ export default function (pi: ExtensionAPI) {
 		bumpToolBranchVisualEpoch();
 	});
 }
+
+// Test-only escape hatch: this package is a default-export extension and the
+// export surface Pi consumes must stay minimal. Regression tests for math
+// preprocessing reach these internals through this namespace instead of
+// widening the public export (see scripts/math-preprocess.test.ts).
+export const __mathPreprocessInternals = {
+	buildParagraphSegments,
+};
