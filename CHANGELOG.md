@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.90 — 2026-10-19
+
+### Fixed
+
+- **Split diffs wrap long lines again** - with `"diffLayout": "split"` long lines were cut off with `›` after one row (two or three on wide terminals) instead of wrapping, because split columns kept the wrap limit meant for the auto layout. Forced split now wraps each line in full, up to 8 rows. Thanks @nabsiddiqui ([#34](https://github.com/FammasMaz/pi-cc-tools/issues/34)).
+
 ## 1.0.89 — 2026-10-19
 
 ### Fixed
