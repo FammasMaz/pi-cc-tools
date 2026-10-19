@@ -920,6 +920,7 @@ class ToolGroupComponent extends Container {
 	private cachedStatusKey?: string;
 	private cachedToolCount?: number;
 	private cachedLines?: string[];
+	private paletteFingerprint?: string;
 
 	private clearRenderCache(): void {
 		this.dirty = true;
@@ -989,6 +990,15 @@ class ToolGroupComponent extends Container {
 		// only; children keep their own ToolText/TOOL_RENDER_CACHE entries and
 		// recompute only when their content actually changes.
 		this.clearRenderCache();
+		// Exception: a theme switch (Pi calls ui.invalidate()) changes colors the
+		// child renderers baked into their text, so those must re-run once.
+		// (Child invalidation re-enters here via clearToolRenderCache; the palette is
+		// recorded first so that re-entry is a no-op.)
+		const palette = currentThemePaletteFingerprint();
+		if (palette === undefined || palette === this.paletteFingerprint) return;
+		const changed = this.paletteFingerprint !== undefined;
+		this.paletteFingerprint = palette;
+		if (changed) for (const tool of this.tools) tool?.invalidate?.();
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -1014,6 +1024,8 @@ class ToolGroupComponent extends Container {
 		}
 		const safeWidth = Number.isFinite(width) ? Math.max(1, Math.floor(width)) : 1;
 		// Fast path: settled groups with a valid memo skip ALL child walks.
+		// Remember the palette this group was drawn with (see invalidate()).
+		if (this.paletteFingerprint === undefined) this.paletteFingerprint = currentThemePaletteFingerprint();
 		// Child mutations mark dirty via clearToolRenderCache → invalidate().
 		if (
 			!this.dirty
@@ -4181,6 +4193,13 @@ function themeBgRgb(theme: any, key: string): Rgb | null {
 let _themePaletteCacheTheme: unknown = null;
 let _themePaletteCacheName: string | null = null;
 let _themePaletteCacheFingerprint: string | null = null;
+// Pi passes the same global theme Proxy everywhere, so keeping the last one lets
+// non-render code (group invalidation) read the current palette.
+let _lastSeenTheme: unknown = null;
+
+function currentThemePaletteFingerprint(): string | undefined {
+	return _lastSeenTheme ? themePaletteFingerprint(_lastSeenTheme) : undefined;
+}
 
 /** Resolved-color fingerprint so palette re-derives when the active theme file changes under the same name/object. */
 function themePaletteFingerprint(theme: any): string {
@@ -4595,6 +4614,7 @@ function resetThemePalette(): void {
 
 function applyThemePaletteIfNeeded(theme: any): void {
 	if (!theme) return;
+	_lastSeenTheme = theme;
 	if (!themeAdaptiveEnabled()) {
 		applyToolBranchColor(theme);
 		syncOutlineChromeFromBranch(theme);
@@ -4785,6 +4805,9 @@ function branchDiffWidth(componentWidth?: number, chromeWidth = 2): number {
 	return Math.max(20, Math.min(width - chromeWidth, MAX_TERM_WIDTH));
 }
 
+// Diff preview cache keys also carry _toolBranchVisualEpoch, which applyThemePaletteIfNeeded
+// bumps when the theme palette changes: otherwise rows rendered before a /theme or light/dark
+// switch kept the old diff backgrounds and stat colors while new rows used the new ones.
 function contextDiffWidth(ctx: any, chromeWidth = 2): number {
 	return branchDiffWidth(ctx.state?._diffComponentWidth, chromeWidth);
 }
@@ -6576,7 +6599,7 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 		return makeResponsiveDiffText(ctx, ctx.lastComponent, `${hdr}\n${withBranch(theme.fg("muted", "(rendering…)"), theme, false, true)}`);
 	}
 	const diffWidth = contextDiffWidth(ctx);
-	const key = `apply-preview:${ctx.state._applyPatchMetaKey ?? hashText(patchText)}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
+	const key = `apply-preview:${ctx.state._applyPatchMetaKey ?? hashText(patchText)}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
 	if (ctx.state._applyPatchPreviewKey !== key) {
 		ctx.state._applyPatchPreviewKey = key;
 		ctx.state._applyPatchPreviewBody = theme.fg("muted", "(rendering…)");
@@ -7798,7 +7821,7 @@ export default function (pi: ExtensionAPI) {
 				const diffWidth = contextDiffWidth(ctx);
 				const mode = shouldUseSplit(d.diff, diffWidth, previewLines) ? "split" : "unified";
 				const richSummary = diffSummaryWithMeta(d.diff.added, d.diff.removed, hunks, mode);
-				const key = `wd:${diffWidth}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}:${ctx.expanded ? 1 : 0}`;
+				const key = `wd:${diffWidth}:${d.summary}:${d.diff?.lines?.length ?? 0}:${d.language ?? ""}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
 				if (ctx.state._wdk !== key) {
 					ctx.state._wdk = key;
 					ctx.state._wdt = withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
@@ -7829,7 +7852,7 @@ export default function (pi: ExtensionAPI) {
 					return makeResponsiveDiffText(ctx, ctx.lastComponent, withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme));
 				}
 				const diffWidth = contextDiffWidth(ctx);
-				const pk = `nf:${d.filePath}:${contentHash}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
+				const pk = `nf:${d.filePath}:${contentHash}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
 				if (ctx.state._nfk !== pk) {
 					ctx.state._nfk = pk;
 					ctx.state._nft = withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme);
@@ -7922,7 +7945,7 @@ export default function (pi: ExtensionAPI) {
 				return makeResponsiveDiffText(ctx, ctx.lastComponent, `${hdr}\n${pending}`);
 			}
 			const diffWidth = contextDiffWidth(ctx, 3);
-			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
+			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}:${_toolBranchVisualEpoch}`;
 			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, key, operations);
 			if (ctx.state._pk !== key) {
 				ctx.state._pk = key;
