@@ -6730,7 +6730,7 @@ function summarizeGenericToolCall(name: string, args: any, theme: Theme, sp: (pa
 function renderMcpToolResult(result: any, expanded: boolean, isPartial: boolean, theme: Theme, ctx: any): Text {
 	if (isPartial) {
 		return makeText(ctx.lastComponent, runningPreviewBlock(result, theme.fg("dim", "MCP running..."), expanded, theme, ctx, {
-			styleLine: (line) => theme.fg("toolOutput", line || " "),
+			styleLine: (line) => theme.fg("dim", line || " "),
 		}));
 	}
 	clearBlinkTimer(ctx);
@@ -6754,7 +6754,7 @@ function renderMcpToolResult(result: any, expanded: boolean, isPartial: boolean,
 		theme,
 		previewLimit(),
 		lines.length,
-		(line) => theme.fg(ctx.isError ? "error" : "toolOutput", line || " "),
+		(line) => theme.fg(ctx.isError ? "error" : "dim", line || " "),
 	);
 	return makeText(ctx.lastComponent, withBranch(`${statusText}\n${preview}`, theme));
 }
