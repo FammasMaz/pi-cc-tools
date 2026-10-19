@@ -57,6 +57,7 @@ Set in `.pi/settings.json` or the active Pi agent settings file (`$PI_CODING_AGE
   "liveToolPreview": true,
   "liveToolPreviewLines": 5,
   "diffCollapsedLines": 24,
+  "diffLayout": "auto",
   "themeAdaptive": true,
   "diffTheme": "github-dark"
 }
@@ -152,6 +153,7 @@ Use `/cc-tools` to control tool UI at runtime:
 | `liveToolPreview` | `true` | Show a small live output preview while tools are still running |
 | `liveToolPreviewLines` | `5` | Lines shown in the collapsed live preview |
 | `diffCollapsedLines` | `24` | Diff lines before collapsing |
+| `diffLayout` | `"auto"` | `"auto"` uses split view only when it fits without heavy wrapping; `"split"` always uses split view when both columns fit; `"unified"` always stacks |
 
 ## Notes
 

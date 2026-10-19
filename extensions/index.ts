@@ -124,6 +124,8 @@ interface SettingsFile {
 	liveToolPreviewLines?: number;
 	showTruncationHints?: boolean;
 	diffCollapsedLines?: number;
+	/** Diff layout: "auto" (default) picks split only when it fits cleanly; "split" and "unified" force one layout. */
+	diffLayout?: "auto" | "split" | "unified";
 	diffTheme?: string;
 	diffColors?: Record<string, string>;
 	/**
@@ -4961,12 +4963,20 @@ function maxLineNumber(lines: DiffLine[]): number {
 	return max;
 }
 
+function diffLayout(): "auto" | "split" | "unified" {
+	return getMode(readSettings().diffLayout, ["auto", "split", "unified"] as const, "auto");
+}
+
 function shouldUseSplit(diff: ParsedDiff, tw: number, maxRows = MAX_PREVIEW_LINES): boolean {
 	if (!diff.lines.length) return false;
-	if (tw < SPLIT_MIN_WIDTH) return false;
+	const layout = diffLayout();
+	if (layout === "unified") return false;
 	const nw = Math.max(2, String(maxLineNumber(diff.lines)).length);
 	const half = Math.floor((tw - 1) / 2);
 	const gw = nw + 5;
+	// Forced split still needs room for both code columns; below that it would overflow the row.
+	if (layout === "split") return half - gw >= 12;
+	if (tw < SPLIT_MIN_WIDTH) return false;
 	const cw = Math.max(12, half - gw);
 	if (cw < SPLIT_MIN_CODE_WIDTH) return false;
 	const vis = diff.lines.slice(0, maxRows);
