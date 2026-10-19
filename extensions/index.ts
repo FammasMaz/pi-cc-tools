@@ -3016,6 +3016,8 @@ function removeImageChildren(component: any): void {
 		try { component.removeChild?.(child); } catch { /* noop */ }
 	}
 	component.imageComponents = [];
+	// Pi reuses image components by matching imageSources; clear both caches.
+	component.imageSources = [];
 	component.imageSpacers = [];
 }
 

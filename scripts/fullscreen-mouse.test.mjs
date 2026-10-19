@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,7 @@ if (major === 0 && minor < 85) {
 const extensionPath = resolve(fileURLToPath(new URL("../extensions/index.ts", import.meta.url)));
 const { initTheme } = await import(`${root}/dist/modes/interactive/theme/theme.js`);
 initTheme("dark", false);
-const { Container, TuiAltScreen } = await import(`${root}/node_modules/@earendil-works/pi-tui/dist/index.js`);
+const { Container, TuiAltScreen, getCapabilities, setCapabilityOverrides } = await import(`${root}/node_modules/@earendil-works/pi-tui/dist/index.js`);
 const { renderLayoutFrame } = await import(`${root}/node_modules/@earendil-works/pi-tui/dist/layout.js`);
 const { dispatchMouseEvent } = await import(`${root}/node_modules/@earendil-works/pi-tui/dist/tui.js`);
 const {
@@ -246,6 +247,42 @@ const update = (event) => Promise.all((handlers.get("message_update") ?? []).map
 const orphan = { role: "assistant", content: [{ type: "thinking", thinking: "Brief" }], stopReason: "stop" };
 await update({ message: orphan, assistantMessageEvent: { type: "thinking_end" } });
 check("unmatched thinking_end cannot stamp epoch duration", !(orphan._piClaudeStyleThinkingDurationMs > 86_400_000), String(orphan._piClaudeStyleThinkingDurationMs));
+
+// Pi reuses images by matching imageSources; collapsing must clear both caches.
+const previousImageProtocol = getCapabilities().images;
+setCapabilityOverrides({ images: "kitty" });
+try {
+	const imageTool = new ToolExecutionComponent("read", "image-read", { path: "image.png" }, undefined, read, ui, process.cwd());
+	imageTool.updateResult({
+		content: [{ type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5XcAAAAASUVORK5CYII=" }],
+		isError: false,
+	}, false);
+	imageTool.setExpanded(true);
+	assert.doesNotThrow(() => imageTool.render(80), "standalone image read must render after expansion");
+	assert.equal(imageTool.imageComponents.length, 1);
+	assert.ok(imageTool.imageComponents[0]);
+
+	const imageChat = new Container();
+	imageChat.addChild(imageTool);
+	const textTool = new ToolExecutionComponent("read", "image-neighbor", { path: "text.txt" }, undefined, read, ui, process.cwd());
+	textTool.updateResult({ content: [{ type: "text", text: "neighbor" }], isError: false }, false);
+	imageChat.addChild(textTool);
+	const imageGroup = imageChat.children.find((child) => Array.isArray(child.tools));
+	assert.ok(imageGroup, "image read must join the neighboring tool group");
+	for (let cycle = 0; cycle < 10; cycle++) {
+		for (const expanded of [false, true]) {
+			imageGroup.setExpanded(expanded);
+			for (const width of [20, 80, 140]) {
+				assert.doesNotThrow(() => imageChat.render(width), "image group must render after toggling expansion");
+			}
+			assert.equal(imageTool.imageComponents.length, expanded ? 1 : 0);
+			if (expanded) assert.ok(imageTool.imageComponents[0]);
+		}
+	}
+	console.log("ok image read recreates components across standalone and grouped expansion");
+} finally {
+	setCapabilityOverrides({ images: previousImageProtocol });
+}
 
 if (failures.length) {
 	console.error(failures.join("\n"));

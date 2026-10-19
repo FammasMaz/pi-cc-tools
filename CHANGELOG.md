@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.87 — Unreleased
+
+### Fixed
+
+- **Expanding image reads no longer crashes Pi** — clear the image-source reuse cache together with the hidden image components when a `read` result is collapsed. Re-expanding standalone or grouped image reads now creates valid image components instead of reusing a missing component and throwing `TypeError: Cannot read properties of undefined (reading 'render')`.
+
 ## 1.0.86 — 2026-10-08
 
 ### Fixed
