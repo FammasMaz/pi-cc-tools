@@ -2965,6 +2965,11 @@ function syncLiveToolRenderState(component: any): void {
 		state._liveLineCount = collectNonEmptyLines(raw, 0).total;
 	} else if (component?.isPartial !== true) {
 		delete state._liveLineCount;
+		// renderCall never sees the result, so hand a finished edit's details over: its diff is redrawn from them, not from
+		// the file. A call aborted while streaming ends with a bare error instead of a toolResult; it never drew a diff.
+		if (component?.toolName === "edit" && component.result && (!ctxLike.isError || component.result.role === "toolResult")) {
+			state._editResult = component.result.details ?? {};
+		}
 	}
 }
 
@@ -3269,6 +3274,7 @@ function fileExistsForTool(cwd: string, filePath: string): boolean {
 }
 
 const WRITE_EXISTED_BEFORE = new Map<string, boolean>();
+const EDIT_LOCALIZED = new Map<string, Promise<LocalizedEditDiff[] | null>>();
 
 interface RtkRewriteRecord {
 	original: string;
@@ -5557,15 +5563,71 @@ function getFirstChangedNewLine(diff: ParsedDiff): number {
 	return 0;
 }
 
+// Where an edit's diff starts in the old and the new file, plus the text it replaced if that is not oldText verbatim
+// (a fuzzy match). Saved with the result: once the edit has run, the file no longer holds oldText to find these again.
+interface SavedEditPreview {
+	oldLine: number;
+	newLine: number;
+	oldText?: string;
+}
+
 interface LocalizedEditDiff {
 	diff: ParsedDiff;
 	line: number;
+	saved?: SavedEditPreview;
 }
 
-async function computeLocalizedEditDiffs(filePath: string, operations: Array<{ oldText: string; newText: string }>, cwd: string): Promise<LocalizedEditDiff[] | null> {
+function restoreLocalizedEditDiffs(saved: unknown, operations: Array<{ oldText: string; newText: string }>): LocalizedEditDiff[] | null {
+	if (!Array.isArray(saved) || saved.length !== operations.length) return null;
+	return operations.map((edit, i) => {
+		const { oldLine, newLine, oldText } = saved[i] as SavedEditPreview;
+		const diff = offsetParsedDiff(parseDiff(oldText ?? normalizeToLf(edit.oldText), normalizeToLf(edit.newText)), oldLine - 1, newLine - 1);
+		return { diff, line: getFirstChangedNewLine(diff) };
+	});
+}
+
+// Results saved before SavedEditPreview existed: the patch Pi saves with every edit result still holds the old lines
+// around each change, at their old line numbers. Lines it does not hold can match nothing.
+function oldContentFromPatch(patch: string, operations: Array<{ oldText: string; newText: string }>): string {
+	const known: string[] = [];
+	const changes: number[] = [];
+	for (const hunk of Diff.parsePatch(patch)[0]?.hunks ?? []) {
+		let at = hunk.oldStart - 1;
+		for (const line of hunk.lines) {
+			if (line[0] === "-" || line[0] === "+") changes.push(at);
+			if (line[0] === " " || line[0] === "-") known[at++] = line.slice(1);
+		}
+	}
+	// The patch keeps 4 lines around a change. An oldText reaching further supplies the missing lines itself, but only if
+	// it fits in exactly one place touching a change: a chance fit elsewhere would put the edit on the wrong line.
+	const fuzzy = known.map(normalizeTextForFuzzyMatch);
+	for (const { oldText } of operations) {
+		const own = normalizeToLf(oldText).split("\n");
+		const want = normalizeTextForFuzzyMatch(normalizeToLf(oldText)).split("\n");
+		const last = want.length - 1;
+		const starts = new Set<number>();
+		for (const change of changes) {
+			for (let at = Math.max(0, change - want.length); at <= change; at++) starts.add(at);
+		}
+		const fits = [...starts].filter((at) => {
+			let overlaps = false;
+			return want.every((line, i) => {
+				const have = fuzzy[at + i];
+				if (have === undefined) return true;
+				overlaps = true;
+				return i === 0 ? have.endsWith(line) : i === last ? have.startsWith(line) : have === line;
+			}) && overlaps;
+		});
+		// An empty first or last piece is only the line break before or after oldText, not a line of its own.
+		if (fits.length === 1) own.forEach((line, i) => { if (line || (i > 0 && i < last)) known[fits[0] + i] ??= line; });
+	}
+	return `${Array.from(known, (line) => line ?? "\u0000").join("\n")}\n`;
+}
+
+async function computeLocalizedEditDiffs(filePath: string, operations: Array<{ oldText: string; newText: string }>, cwd: string, savedPatch?: string): Promise<LocalizedEditDiff[] | null> {
 	if (!filePath || operations.length === 0) return null;
 	try {
-		const rawContent = await readFileAsync(resolve(cwd, filePath), "utf8");
+		const rawContent = savedPatch === undefined ? await readFileAsync(resolve(cwd, filePath), "utf8") : oldContentFromPatch(savedPatch, operations);
 		const normalizedContent = normalizeToLf(stripBomText(rawContent));
 		const normalizedOps = operations.map((edit) => ({ oldText: normalizeToLf(edit.oldText), newText: normalizeToLf(edit.newText) }));
 		const baseContent = normalizedOps.some((edit) => findEditMatch(normalizedContent, edit.oldText).usedFuzzyMatch)
@@ -5590,7 +5652,9 @@ async function computeLocalizedEditDiffs(filePath: string, operations: Array<{ o
 			const oldStartLine = lineNumberAtIndex(baseContent, match.matchIndex);
 			const newStartLine = oldStartLine + lineDelta;
 			const diff = offsetParsedDiff(parseDiff(oldChunk, match.newText), oldStartLine - 1, newStartLine - 1);
-			localized[match.editIndex] = { diff, line: getFirstChangedNewLine(diff) };
+			const saved: SavedEditPreview = { oldLine: oldStartLine, newLine: newStartLine };
+			if (oldChunk !== normalizedOps[match.editIndex].oldText) saved.oldText = oldChunk;
+			localized[match.editIndex] = { diff, line: getFirstChangedNewLine(diff), saved };
 			lineDelta += countLineBreaks(match.newText) - countLineBreaks(oldChunk);
 		}
 		return localized.every(Boolean) ? (localized as LocalizedEditDiff[]) : null;
@@ -7686,6 +7750,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const editTool = createEditTool(cwd);
+	// The live preview and execute() share one look at the file, taken before the edit runs: what the row shows live is
+	// then exactly what is saved with the result, and so what it shows again after a resume.
+	const localizeEditOnce = (toolCallId: string, filePath: string, operations: Array<{ oldText: string; newText: string }>) => {
+		let localized = EDIT_LOCALIZED.get(toolCallId);
+		if (!localized) EDIT_LOCALIZED.set(toolCallId, localized = computeLocalizedEditDiffs(filePath, operations, cwd));
+		return localized;
+	};
 	pi.registerTool({
 		name: "edit",
 		label: "edit",
@@ -7696,11 +7767,14 @@ export default function (pi: ExtensionAPI) {
 		async execute(toolCallId, params, signal, onUpdate, _ctx) {
 			const fp = params.path ?? (params as any).file_path ?? "";
 			const operations = getEditOperations(params);
-			const localizedDiffs = operations.length === 1 ? await computeLocalizedEditDiffs(fp, operations, cwd) : null;
+			const localizedDiffs = await localizeEditOnce(toolCallId, fp, operations);
+			EDIT_LOCALIZED.delete(toolCallId);
 			const result = await editTool.execute(toolCallId, params, signal, onUpdate);
 			if (operations.length === 0) return result;
 			const { diffs, summary, totalLines, totalHunks } = summarizeEditOperations(operations);
 			const baseDetails = (((result as any).details ?? {}) as Record<string, unknown>);
+			// null: the edits could not be located, and the row showed (and keeps showing) the diff without file line numbers.
+			const preview = localizedDiffs?.map((entry) => entry.saved) ?? null;
 			if (operations.length === 1) {
 				const localized = localizedDiffs?.[0];
 				const editLine = localized?.line ?? (typeof baseDetails.firstChangedLine === "number" ? baseDetails.firstChangedLine : 0);
@@ -7713,6 +7787,7 @@ export default function (pi: ExtensionAPI) {
 					hunks: countDiffHunks(diff),
 					added: diff?.added ?? 0,
 					removed: diff?.removed ?? 0,
+					preview,
 				};
 				return result;
 			}
@@ -7725,6 +7800,7 @@ export default function (pi: ExtensionAPI) {
 				hunks: totalHunks,
 				totalAdded: diffs.reduce((sum, diff) => sum + diff.added, 0),
 				totalRemoved: diffs.reduce((sum, diff) => sum + diff.removed, 0),
+				preview,
 			};
 			return result;
 		},
@@ -7735,7 +7811,9 @@ export default function (pi: ExtensionAPI) {
 			const summary = stableCallSummary(ctx, "_callSummary", () => shouldRevealCallArgs(ctx) && operations.length > 1 ? `${sp(fp)} ${theme.fg("muted", `(${operations.length} edits)`)}` : sp(fp), revealSummary);
 			syncToolCallStatus(ctx);
 			const hdr = toolHeader("Edit", summary, theme, ` ${toolStatusDot(ctx, theme)}`, liveLineCountTrailing(ctx, theme));
-			if (!(ctx.argsComplete && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
+			// History replay never sets argsComplete; a finished edit is drawn from its result instead.
+			const finished = ctx.state._editResult as Record<string, unknown> | undefined;
+			if (!((ctx.argsComplete || finished) && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
 			const diffWidth = contextDiffWidth(ctx, 3);
 			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, key, operations);
@@ -7744,7 +7822,13 @@ export default function (pi: ExtensionAPI) {
 				ctx.state._ptBody = theme.fg("muted", "(rendering…)");
 				ctx.state._ptDisplay = indentBranchBlock(withBranch(ctx.state._ptBody, theme, false, true));
 				const lg = lang(fp);
-				void computeLocalizedEditDiffs(fp, operations, cwd)
+				// Located once per row: expanding or resizing must not look in the file again, it no longer holds oldText.
+				ctx.state._editLocalized ??= !finished
+					? localizeEditOnce(ctx.toolCallId, fp, operations)
+					: "preview" in finished
+						? Promise.resolve(restoreLocalizedEditDiffs(finished.preview, operations))
+						: computeLocalizedEditDiffs(fp, operations, cwd, typeof finished.patch === "string" ? finished.patch : "");
+				void (ctx.state._editLocalized as Promise<LocalizedEditDiff[] | null>)
 					.then((localizedDiffs) => {
 						if (ctx.state._pk !== key) return;
 						const diffs = localizedDiffs?.map((entry) => entry.diff) ?? fallbackDiffs;
@@ -7913,6 +7997,7 @@ export default function (pi: ExtensionAPI) {
 		clearAllBashDurationContexts();
 		clearRtkRewriteState();
 		WRITE_EXISTED_BEFORE.clear();
+		EDIT_LOCALIZED.clear();
 		clearHighlightCache();
 		invalidateThemePaletteCache();
 		bumpToolBranchVisualEpoch();
