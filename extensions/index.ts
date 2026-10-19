@@ -3813,6 +3813,9 @@ class ToolText extends Text {
 	private toolCachedLines?: string[];
 	private observedWidth?: number;
 	private pendingObservedWidth?: number;
+	getObservedWidth(): number | undefined {
+		return this.observedWidth;
+	}
 	private widthObserver?: (width: number) => void;
 	private widthObserverScheduled = false;
 
@@ -4784,6 +4787,19 @@ function branchDiffWidth(componentWidth?: number, chromeWidth = 2): number {
 
 function contextDiffWidth(ctx: any, chromeWidth = 2): number {
 	return branchDiffWidth(ctx.state?._diffComponentWidth, chromeWidth);
+}
+
+// Diff previews are laid out for the row's real width, which is only known after the
+// row's text component has rendered once. Starting the async Shiki render before that
+// used the termW() guess and rendered every diff a second time once the real width
+// arrived (on resume: every edit/write row, twice). Wait for the width instead; the
+// width observer invalidates the row as soon as it is known.
+function diffWidthReady(ctx: any): boolean {
+	if (typeof ctx.state?._diffComponentWidth === "number") return true;
+	const seen = ctx.lastComponent instanceof ToolText ? ctx.lastComponent.getObservedWidth() : undefined;
+	if (seen === undefined || !ctx.state) return false;
+	ctx.state._diffComponentWidth = seen;
+	return true;
 }
 
 function adaptiveWrapRows(tw?: number): number {
@@ -6556,6 +6572,9 @@ function renderApplyPatchCall(args: any, theme: Theme, ctx: any, sp: (path: stri
 	}
 	ctx.state._openAiPatchFiles = preview.changes.map((change) => change.displayPath);
 
+	if (!diffWidthReady(ctx)) {
+		return makeResponsiveDiffText(ctx, ctx.lastComponent, `${hdr}\n${withBranch(theme.fg("muted", "(rendering…)"), theme, false, true)}`);
+	}
 	const diffWidth = contextDiffWidth(ctx);
 	const key = `apply-preview:${ctx.state._applyPatchMetaKey ?? hashText(patchText)}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 	if (ctx.state._applyPatchPreviewKey !== key) {
@@ -7772,6 +7791,10 @@ export default function (pi: ExtensionAPI) {
 			if (d?._type === "diff") {
 				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
 				const hunks = d.diff?.lines?.filter((l: any) => l.type === "sep").length + (d.diff?.lines?.length ? 1 : 0);
+				if (!diffWidthReady(ctx)) {
+					const pendingSummary = diffSummaryWithMeta(d.diff.added, d.diff.removed, hunks, "");
+					return makeResponsiveDiffText(ctx, ctx.lastComponent, withFinalBranchBlock(`${pendingSummary}\n${theme.fg("muted", "rendering diff…")}`, theme));
+				}
 				const diffWidth = contextDiffWidth(ctx);
 				const mode = shouldUseSplit(d.diff, diffWidth, previewLines) ? "split" : "unified";
 				const richSummary = diffSummaryWithMeta(d.diff.added, d.diff.removed, hunks, mode);
@@ -7802,6 +7825,9 @@ export default function (pi: ExtensionAPI) {
 				const syntheticDiff = getCachedParsedDiff(ctx, `nf-diff:${d.filePath}:${contentHash}`, "", content);
 				const richSummary = diffSummaryWithMeta(syntheticDiff.added, 0, 1, "new file");
 				const previewLines = ctx.expanded ? MAX_RENDER_LINES : diffCollapsedLimit();
+				if (!diffWidthReady(ctx)) {
+					return makeResponsiveDiffText(ctx, ctx.lastComponent, withFinalBranchBlock(`${richSummary}\n${theme.fg("muted", "rendering diff…")}`, theme));
+				}
 				const diffWidth = contextDiffWidth(ctx);
 				const pk = `nf:${d.filePath}:${contentHash}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 				if (ctx.state._nfk !== pk) {
@@ -7891,6 +7917,10 @@ export default function (pi: ExtensionAPI) {
 			// History replay never sets argsComplete; a finished edit is drawn from its result instead.
 			const finished = ctx.state._editResult as Record<string, unknown> | undefined;
 			if (!((ctx.argsComplete || finished) && operations.length > 0)) return makeText(ctx.lastComponent, hdr);
+			if (!diffWidthReady(ctx)) {
+				const pending = liveBranchDisplay(ctx.state, theme) ?? indentBranchBlock(withBranch(theme.fg("muted", "(rendering…)"), theme, false, true));
+				return makeResponsiveDiffText(ctx, ctx.lastComponent, `${hdr}\n${pending}`);
+			}
 			const diffWidth = contextDiffWidth(ctx, 3);
 			const key = `edit:${fp}:${hashText(operations.map((edit) => `${edit.oldText}\u0000${edit.newText}`).join("\u0001"))}:${diffWidth}:${ctx.expanded ? 1 : 0}`;
 			const { diffs: fallbackDiffs, summary: editSummary } = getCachedEditOperationSummary(ctx, key, operations);
