@@ -73,7 +73,6 @@ function themeAdaptiveEnabled(): boolean {
 const _DEFAULT_CLAUDE_ORANGE = "\x1b[38;2;215;119;87m";
 const _DEFAULT_STATUS_DIM = "\x1b[38;2;153;153;153m";
 
-let _themeColorsCacheTheme: unknown = null;
 let _themeColorsLastAdaptive: boolean | null = null;
 let _themeColorsLastVerbKey: string | null = null;
 let _themeColorsLastStatusKey: string | null = null;
@@ -105,7 +104,6 @@ function applyThemeColors(theme: any): void {
 		_themeColorsLastAdaptive = adaptive;
 		_themeColorsLastVerbKey = verbColor;
 		_themeColorsLastStatusKey = statusColor;
-		_themeColorsCacheTheme = null;
 		if (!adaptive) {
 			CLAUDE_ORANGE = _DEFAULT_CLAUDE_ORANGE;
 			STATUS_DIM = _DEFAULT_STATUS_DIM;
@@ -113,9 +111,9 @@ function applyThemeColors(theme: any): void {
 	}
 
 	if (!theme || !adaptive) return;
-	if (_themeColorsCacheTheme === theme) return;
-	_themeColorsCacheTheme = theme;
-
+	// ctx.ui.theme is Pi's global theme Proxy: the same object before and after
+	// /theme or a light/dark switch, so an identity cache never refreshed the
+	// spinner colors. Resolving is two map lookups per tick; just do it.
 	const verb = resolveThemeColor(theme, verbColor, "accent");
 	if (verb) CLAUDE_ORANGE = verb;
 	const status = resolveThemeColor(theme, statusColor, "muted");
@@ -792,8 +790,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		// Re-derive colors on every tick so /cc-spinner verb/status changes
 		// take effect within ~250 ms without waiting for the next pi event.
-		// applyThemeColors is identity-cached on (theme, verbKey, statusKey) so
-		// this is cheap when nothing changed.
+		// applyThemeColors only re-resolves two theme colors, so this is cheap.
 		applyThemeColors(activeCtx.ui?.theme);
 		const nextMessage = buildWorkingMessage();
 		if (!force && nextMessage === lastWorkingMessage) return;
