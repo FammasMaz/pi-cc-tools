@@ -3,6 +3,19 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.89 — 2026-10-19
+
+### Fixed
+
+- **Direct MCP tools show what they did** - `mcp__<server>__<tool>` rows showed only `MCP status` until expanded. They now show `server:tool` and the main argument (for example `MCP subagents:Agent Debug NaN`), and grouped headers list the tool names (`Agent, Ctx Reduce`) instead of `Mcp Subagents Agent`.
+- **Running tool rows no longer draw their header twice** - the first pending blink invalidated the row while Pi was still building it, which left the call line in the row twice until the next redraw (until the result arrived on expanded rows). Affected every tool, not only MCP.
+- **Theme switches repaint everything** - after `/theme` or a light/dark switch, diff previews kept the old diff palette, rows inside tool groups kept the old colors, and the spinner verb/status kept the old theme until restart. All three now follow the new theme.
+- **MCP output uses the same dim color as other tools** - MCP running previews and expanded output were drawn in `toolOutput`, brighter than read, bash, grep and other tools.
+
+### Performance
+
+- **Each diff preview renders once** - since 1.0.80 edit, write and apply_patch rows started their Shiki render at a guessed width and rendered again once the real row width was known. On resume every diff row paid twice. Rows now wait for their width: half the diff renders, and the first frame of a 60-row tool history dropped from about 37 ms to 8 ms in the benchmark.
+
 ## 1.0.88 — 2026-10-19
 
 ### Added
