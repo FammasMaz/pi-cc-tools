@@ -615,7 +615,7 @@ function getGroupedToolName(tools: any[]): string | undefined {
 
 function getToolGroupLabel(tools: any[]): string {
 	const sameName = getGroupedToolName(tools);
-	return sameName ? humanizeToolName(sameName) : "Multiple Tools";
+	return sameName ? toolDisplayName(sameName) : "Multiple Tools";
 }
 
 function getToolGroupOverallStatus(tools: any[]): ToolStatus {
@@ -683,7 +683,7 @@ function formatToolNameList(tools: any[]): string {
 		counts.set(name, (counts.get(name) ?? 0) + 1);
 	}
 	return [...counts.entries()]
-		.map(([name, count]) => `${humanizeToolName(name)}${count > 1 ? `×${count}` : ""}`)
+		.map(([name, count]) => `${toolDisplayName(name)}${count > 1 ? `×${count}` : ""}`)
 		.join(", ");
 }
 
@@ -763,6 +763,7 @@ function getToolArgSummary(tool: any): string {
 	if (name === "grep") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "find") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "ls") return shortPath(process.cwd(), args.path ?? ".");
+	if (parseNamespacedMcpToolName(name)) return summarizeDirectMcpArgs(args);
 	return summarizeText(getStringArg(args, "path", "file_path", "url", "query", "name", "subject", "tool", "description", "prompt") || name, 72);
 }
 
@@ -773,7 +774,7 @@ function getToolCallLine(tool: any): string {
 		return line.replaceAll(WRAP_MARK, "").replaceAll(CLIP_MARK, "");
 	}
 	const summary = getToolArgSummary(tool);
-	const label = humanizeToolName(getToolName(tool));
+	const label = toolDisplayName(getToolName(tool));
 	return `${label}${summary ? ` ${summary}` : ""}`;
 }
 
@@ -6013,6 +6014,18 @@ function isMcpToolName(name: string): boolean {
 	return name === "mcp" || /^mcp[_:-]/i.test(name) || /[_:-]mcp[_:-]/i.test(name);
 }
 
+// Direct MCP tools are registered as `mcp__<server>__<tool>`; their args are the
+// tool's own args, not the gateway's `{ tool, server, ... }`.
+function parseNamespacedMcpToolName(name: string): { server: string; tool: string } | undefined {
+	const match = /^mcp__(.+?)__(.+)$/.exec(name);
+	return match ? { server: match[1], tool: match[2] } : undefined;
+}
+
+function toolDisplayName(name: string): string {
+	const direct = parseNamespacedMcpToolName(name);
+	return humanizeToolName(direct ? direct.tool : name);
+}
+
 function shouldUseGenericToolRenderer(name: unknown): boolean {
 	return typeof name === "string" && name.length > 0 && !CORE_TOOL_OVERRIDES.has(name);
 }
@@ -6603,7 +6616,37 @@ function renderApplyPatchResult(result: any, isPartial: boolean, theme: Theme, c
 	return makeText(ctx.lastComponent, withBranch(`${theme.fg("success", "Applied")} ${meta.changeCount} files ${summary}${meta.totalLines ? ` ${theme.fg("muted", `(${meta.totalLines} diff lines)`)}` : ""}`, theme));
 }
 
-function summarizeMcpToolCall(args: any, theme: Theme): string {
+const DIRECT_MCP_SUMMARY_KEYS = [
+	"description", "subject", "title", "query", "path", "file_path", "url", "command", "name",
+	"agent_id", "agentId", "taskId", "task_id", "threadId", "drop", "target", "message", "prompt", "task",
+] as const;
+
+function summarizeArgValue(value: unknown): string {
+	if (typeof value === "string") return value.trim();
+	if (typeof value === "number" || typeof value === "boolean") return String(value);
+	if (Array.isArray(value) && value.every((item) => typeof item === "string" || typeof item === "number")) return value.join(", ");
+	return "";
+}
+
+function summarizeDirectMcpArgs(args: any): string {
+	if (!args || typeof args !== "object") return "";
+	for (const key of DIRECT_MCP_SUMMARY_KEYS) {
+		const value = summarizeArgValue(args[key]);
+		if (value) return summarizeText(value, 72);
+	}
+	for (const [key, raw] of Object.entries(args)) {
+		const value = summarizeArgValue(raw);
+		if (value) return summarizeText(`${key}: ${value}`, 72);
+	}
+	return "";
+}
+
+function summarizeMcpToolCall(name: string, args: any, theme: Theme): string {
+	const direct = parseNamespacedMcpToolName(name);
+	if (direct) {
+		const detail = summarizeDirectMcpArgs(args);
+		return `${direct.server}:${direct.tool}${detail ? ` ${theme.fg("muted", detail)}` : ""}`;
+	}
 	const tool = getStringArg(args, "tool");
 	if (tool) return args?.server ? `${args.server}:${tool}` : tool;
 	const connect = getStringArg(args, "connect");
@@ -6614,7 +6657,7 @@ function summarizeMcpToolCall(args: any, theme: Theme): string {
 }
 
 function summarizeGenericToolCall(name: string, args: any, theme: Theme, sp: (path: string) => string): string {
-	if (isMcpToolName(name)) return summarizeMcpToolCall(args, theme);
+	if (isMcpToolName(name)) return summarizeMcpToolCall(name, args, theme);
 	return summarizeOpenAiToolCall(name, args, theme, sp);
 }
 
