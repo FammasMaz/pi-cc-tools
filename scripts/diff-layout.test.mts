@@ -35,10 +35,12 @@ function setLayout(layout?: string) {
 }
 
 let calls = 0;
-async function renderEdit(width: number): Promise<string[]> {
+async function renderEdit(width: number, change = { oldText: "const row30 = 30;", newText: "const row30 = 3000;" }): Promise<string[]> {
 	const path = join(cwd, `file${calls}.ts`);
-	writeFileSync(path, `${Array.from({ length: 60 }, (_, i) => `const row${i} = ${i};`).join("\n")}\n`);
-	const args = { path, edits: [{ oldText: "const row30 = 30;", newText: "const row30 = 3000;" }] };
+	const rows = Array.from({ length: 60 }, (_, i) => `const row${i} = ${i};`);
+	rows[30] = change.oldText;
+	writeFileSync(path, `${rows.join("\n")}\n`);
+	const args = { path, edits: [change] };
 	const row = new ToolExecutionComponent("edit", `call-${calls++}`, args, { showImages: false }, edit, { requestRender() {} } as any, cwd) as any;
 	row.setArgsComplete();
 	for (let previous = "", same = 0, i = 0; i < 400; i++) {
@@ -93,4 +95,19 @@ test("an unknown value falls back to auto", async () => {
 	setLayout("sideways");
 	assert.ok(isUnified(await renderEdit(120)));
 	assert.ok(isSplit(await renderEdit(200)));
+});
+
+test("split wraps long lines in full instead of cutting them off (#34)", async () => {
+	setLayout("split");
+	const oldText = "const message = 'the quick brown fox jumps over the lazy dog and keeps running across the field until the end';";
+	const newText = oldText.replace("lazy dog", "sleepy cat");
+	for (const width of [80, 100]) {
+		const lines = await renderEdit(width, { oldText, newText });
+		const body = lines.filter((line) => line.includes("│▌"));
+		assert.ok(body.length > 1, `${width}: the changed line wraps onto continuation rows`);
+		assert.ok(!body.some((line) => line.includes("›")), `${width}: nothing is cut off`);
+		const [left, right] = [0, 1].map((side) => body.map((line) => line.split("│▌")[side].replace(/^(?:.*▌)?[^│]*│ /, "").trimEnd()).join(""));
+		assert.match(left.replace(/\s+/g, ""), /lazydogandkeepsrunningacrossthefielduntiltheend';$/);
+		assert.match(right.replace(/\s+/g, ""), /sleepycatandkeepsrunningacrossthefielduntiltheend';$/);
+	}
 });

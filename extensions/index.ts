@@ -4238,6 +4238,7 @@ const WORD_DIFF_MIN_SIM = 0.15;
 const MAX_WRAP_ROWS_WIDE = 3;
 const MAX_WRAP_ROWS_MED = 2;
 const MAX_WRAP_ROWS_NARROW = 1;
+const FORCED_SPLIT_WRAP_ROWS = 8;
 
 let D_RST = "\x1b[0m";
 const D_BOLD = "\x1b[1m";
@@ -5416,6 +5417,13 @@ async function renderSplit(
 	const nw = Math.max(2, String(maxLineNumber(diff.lines)).length);
 	const gw = nw + 5;
 	const cw = Math.max(12, half - gw);
+	// Auto only picks split when lines fit, so the usual wrap cap rarely bites. A forced
+	// split ("diffLayout": "split") halves the code width for every diff, and that cap
+	// (one row below 120 columns) cut long lines off instead of wrapping them. Wrap
+	// forced-split lines in full, with a cap only against minified one-liners.
+	const splitWrapRows = diffLayout() === "split"
+		? Math.max(adaptiveWrapRows(), FORCED_SPLIT_WRAP_ROWS)
+		: adaptiveWrapRows();
 	const canHL = diff.chars <= MAX_HL_CHARS && vis.length * 2 <= MAX_RENDER_LINES * 2;
 
 	const leftSrc: string[] = [];
@@ -5465,7 +5473,7 @@ async function renderSplit(
 		else body = `${BG_BASE}${D_DIM}${hl}`;
 		const gutter = `${border}${gBg}${lnum(num, nw, numFg)}${sFg}${D_BOLD}${sign} ${D_RST}${FG_RULE}│${D_RST} `;
 		const contGutter = `${border}${gBg}${" ".repeat(nw + 2)}${D_RST}${FG_RULE}│${D_RST} `;
-		return { gutter, contGutter, bodyRows: wrapAnsi(tabs(body), cw, adaptiveWrapRows(), cBg) };
+		return { gutter, contGutter, bodyRows: wrapAnsi(tabs(body), cw, splitWrapRows, cBg) };
 	}
 
 	const out: string[] = [];
