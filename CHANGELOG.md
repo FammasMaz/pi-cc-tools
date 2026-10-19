@@ -3,6 +3,16 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.88 — 2026-10-19
+
+### Added
+
+- **`diffLayout` setting** ([#34](https://github.com/FammasMaz/pi-cc-tools/issues/34)) - `"auto"` (default) keeps the current behavior and uses split view only when it fits without heavy wrapping. `"split"` always shows side-by-side diffs when both code columns fit, and `"unified"` always stacks them. Applies to `edit`, `write` and `apply_patch` previews.
+
+### Fixed
+
+- **Finished edits keep their diff after resume, expand and resize** (Jerry, [#37](https://github.com/FammasMaz/pi-cc-tools/pull/37), fixes [#35](https://github.com/FammasMaz/pi-cc-tools/issues/35)) - edits are located once before they run and their start lines are saved in the result details, so a resumed session redraws the same diff at the same line numbers instead of only the stats line, and expanding or resizing no longer drops back to line 1. Sessions saved before this change are located from the patch Pi already stores with each edit result.
+
 ## 1.0.87 — 2026-10-19
 
 ### Fixed
