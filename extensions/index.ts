@@ -89,6 +89,8 @@ const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
 const TOOL_RENDER_CACHE = Symbol.for("pi-claude-style-tools:tool-render-cache");
 const COMPONENT_PARENT = Symbol.for("pi-claude-style-tools:component-parent");
 const PARENT_TRACKING_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-parent-tracking");
+const TOOL_UPDATE_DISPLAY_ACTIVE = Symbol("pi-claude-style-tools:update-display-active");
+const TOOL_UPDATE_DISPLAY_RERUN = Symbol("pi-claude-style-tools:update-display-rerun");
 const TOOL_CACHE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-cache-invalidation");
 const TOOL_MOUSE_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool-fullscreen-mouse");
 const FULLSCREEN_HOVER_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-fullscreen-hover");
@@ -2995,7 +2997,7 @@ function patchToolRenderCacheInvalidation(): void {
 	for (const method of methods) {
 		const original = proto[method];
 		if (typeof original !== "function") continue;
-		proto[method] = function patchedToolMutation(...args: any[]) {
+		const run = function patchedToolMutation(this: any, ...args: any[]) {
 			clearToolRenderCache(this);
 			if (method === "updateDisplay" || method === "updateResult" || method === "invalidate") {
 				syncLiveToolRenderState(this);
@@ -3003,6 +3005,28 @@ function patchToolRenderCacheInvalidation(): void {
 			const result = original.apply(this, args);
 			clearToolRenderCache(this);
 			return result;
+		};
+		proto[method] = method !== "updateDisplay" ? run : function patchedToolUpdateDisplay(this: any, ...args: any[]) {
+			// A renderer can invalidate its own row while updateDisplay is building it
+			// (the first pending blink registration does). Pi's updateDisplay clears the
+			// content box and re-adds regions, so a nested pass leaves the call/result
+			// regions twice in the box until the next redraw. Defer it to one rerun.
+			if (this[TOOL_UPDATE_DISPLAY_ACTIVE]) {
+				this[TOOL_UPDATE_DISPLAY_RERUN] = true;
+				return undefined;
+			}
+			this[TOOL_UPDATE_DISPLAY_ACTIVE] = true;
+			try {
+				let result = run.apply(this, args);
+				if (this[TOOL_UPDATE_DISPLAY_RERUN]) {
+					this[TOOL_UPDATE_DISPLAY_RERUN] = false;
+					result = run.apply(this, args);
+				}
+				return result;
+			} finally {
+				this[TOOL_UPDATE_DISPLAY_ACTIVE] = false;
+				this[TOOL_UPDATE_DISPLAY_RERUN] = false;
+			}
 		};
 	}
 
