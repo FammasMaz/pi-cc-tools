@@ -32,6 +32,8 @@
     "extensions/spinner.ts",
     "extensions/settings-path.ts",
     "extensions/bash-command.ts",
+    "extensions/theme-colors.ts",
+    "extensions/terminal-theme.ts",
     "config/config.example.json",
     "README.md",
     "CHANGELOG.md"

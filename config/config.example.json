@@ -17,6 +17,6 @@
   "diffCollapsedLines": 24,
   "showTruncationHints": false,
   "themeAdaptive": true,
-  "diffTheme": "github-dark",
+  "terminalTheme": false,
   "diffColors": {}
 }

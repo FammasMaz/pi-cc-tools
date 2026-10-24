@@ -3,6 +3,21 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Added
+
+- **Follow the terminal's colors** - `/cc-theme terminal on` (setting `terminalTheme`) switches pi to its built-in `system` theme, which takes every color from the palette Ghostty, Rex, or any other terminal reports, and keeps it on at every start. `/cc-theme terminal off` restores the previous theme. Terminals do not announce switches between two themes of the same kind (dark to dark), so the extension also asks the terminal for its color scheme when its window regains focus, and pi re-reads the palette.
+
+### Fixed
+
+- **Diffs use the theme's colors** - diff code was highlighted with GitHub's palette (`github-dark` / `github-light`) whatever the pi theme, so it never matched Markdown code blocks or the terminal. Diffs now use the theme's `syntax*` colors, and diff rows tint the terminal background toward the theme's own `toolDiffAdded` / `toolDiffRemoved` instead of mixing in fixed green and pink. Needs pi 1.4 or newer; older versions keep the GitHub palettes.
+- **Connectors and outlines follow the theme's tint** - branch connectors were a fixed neutral rgb(72) and box outlines rgb(136) on every theme, which looked heavy on light themes and gray on tinted ones. The default now blends the terminal background toward its text color to the same contrast (2:1 and 5.1:1), so dark terminals look as before. An explicit `/cc-tools branch <0-255>` still sets an exact gray.
+- **Light and dark agree with pi** - light/dark choices (diff palette, chrome) now come from pi's `theme.appearance` instead of a separate brightness guess, so they can no longer disagree with pi's own UI.
+- **Light themes no longer gray out syntax colors** - the contrast fix for bundled Shiki themes replaced every color above a fixed brightness with gray on light themes. It now only applies to the bundled themes.
+- **`diffColors.shikiTheme` is kept on theme switches** - a light/dark switch overwrote it with `github-dark` / `github-light`.
+- **Transparent tool backgrounds on pi 1.4** - pi 1.4 renamed the theme's background table, so `toolBackground` overrides were silently skipped.
+
 ## 1.0.90 — 2026-10-19
 
 ### Fixed

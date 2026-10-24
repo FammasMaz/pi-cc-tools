@@ -71,6 +71,25 @@ import {
 	getLastBashOutputLine,
 } from "./bash-command";
 import { getUserSettingsPath } from "./settings-path";
+import {
+	blendForContrast,
+	mixRgb as mixThemeRgb,
+	rgbBgAnsi,
+	rgbFgAnsi,
+	rgbToHex,
+	shikiThemeFromPiTheme,
+	terminalDefaultColors,
+	themeAppearance,
+	themeTokenRgb,
+	type ShikiThemeRegistration,
+} from "./theme-colors";
+import {
+	activeThemeName,
+	requestTerminalColorScheme,
+	startFocusResync,
+	SYSTEM_THEME_NAME,
+	systemThemeAvailable,
+} from "./terminal-theme";
 
 const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
@@ -138,8 +157,17 @@ interface SettingsFile {
 	 */
 	themeAdaptive?: boolean;
 	/**
+	 * When true, pi uses its built-in `system` theme, which takes every color
+	 * from the terminal's own palette (Ghostty, Rex, ...), and re-reads that
+	 * palette when the terminal regains focus so same-kind theme switches
+	 * (dark to dark) are picked up too. Toggle with `/cc-theme terminal`.
+	 */
+	terminalTheme?: boolean;
+	/** Pi theme that was active before `terminalTheme` was turned on; restored when it is turned off. */
+	terminalThemePrevious?: string;
+	/**
 	 * Theme color key used for the spinner verb (e.g. "Cooking…"). Defaults
-	 * to "accent". Useful when the active theme's accent is overloaded for
+	 * to "borderAccent". Useful when the active theme's accent is overloaded for
 	 * borders, headings, or bash mode and the verb should pop differently.
 	 * Valid keys are any of the pi theme `ThemeColor` names (e.g. accent,
 	 * borderAccent, success, warning, mdHeading, thinkingMedium, bashMode).
@@ -157,9 +185,13 @@ interface SettingsFile {
 	 * renders expanded, like stock pi.
 	 */
 	thinkingMode?: "live" | "full";
-	/** Gray level 0–255 for ├ └ │ when branch color mode is `fixed`. */
+	/** Exact gray level 0–255 for ├ └ │ in `fixed` mode. Unset: a fixed-contrast blend of the terminal background and text. */
 	toolBranchRgbGray?: number;
-	/** `fixed` (default): rgb gray 72, theme-independent. `theme`: dim → muted → borderMuted. */
+	/**
+	 * `fixed` (default): the terminal background blended toward its text color
+	 * to a fixed 2:1 contrast (rgb 72 on a #161616 terminal), or exactly
+	 * `toolBranchRgbGray` when set. `theme`: the theme's dim → muted → borderMuted color.
+	 */
 	toolBranchColorMode?: "theme" | "fixed";
 }
 
@@ -233,7 +265,10 @@ function syncToolBackgroundMode(): void {
 
 function setThemeBg(theme: unknown, key: string, value: string): void {
 	const themeAny = theme as any;
-	if (themeAny.bgColors instanceof Map) {
+	// pi >= 1.4 keeps background escapes in `bgAnsi`; older versions in `bgColors`.
+	if (themeAny.bgAnsi instanceof Map) {
+		themeAny.bgAnsi.set(key, value);
+	} else if (themeAny.bgColors instanceof Map) {
 		themeAny.bgColors.set(key, value);
 	} else if (themeAny.bgColors && typeof themeAny.bgColors === "object") {
 		themeAny.bgColors[key] = value;
@@ -4203,8 +4238,11 @@ function currentThemePaletteFingerprint(): string | undefined {
 
 /** Resolved-color fingerprint so palette re-derives when the active theme file changes under the same name/object. */
 function themePaletteFingerprint(theme: any): string {
-	const keys = ["success", "error", "borderMuted", "accent", "muted", "toolDiffAdded", "toolDiffRemoved"] as const;
-	return keys.map((k) => safeFgAnsi(theme, k) ?? "").join("\u001f");
+	const keys = ["success", "error", "borderMuted", "accent", "muted", "toolDiffAdded", "toolDiffRemoved", "syntaxKeyword", "syntaxString"] as const;
+	// Tokens set to "" follow the terminal's default colors, which can change under the same theme.
+	const defaults = terminalDefaultColors(theme);
+	const terminal = defaults ? `${rgbToHex(defaults.background)}${rgbToHex(defaults.foreground)}` : "";
+	return [...keys.map((k) => safeFgAnsi(theme, k) ?? ""), themeAppearance(theme) ?? "", terminal].join("\u001f");
 }
 
 function invalidateThemePaletteCache(): void {
@@ -4218,7 +4256,67 @@ function themeAdaptiveEnabled(): boolean {
 	return settings.themeAdaptive !== false;
 }
 
-let DIFF_THEME: BundledTheme = (process.env.DIFF_THEME as BundledTheme | undefined) ?? "github-dark";
+// ---------------------------------------------------------------------------
+// terminalTheme: pi follows the terminal's own palette (Ghostty, Rex, ...).
+// ---------------------------------------------------------------------------
+
+function terminalThemeEnabled(): boolean {
+	return readSettings().terminalTheme === true;
+}
+
+/** Pi's saved `theme` setting (may be a "light/dark" pair), from pi's own settings file. */
+function readPiThemeSetting(): string | undefined {
+	const agentDir = process.env.PI_CODING_AGENT_DIR || `${process.env.HOME ?? ""}/.pi/agent`;
+	try {
+		const raw = JSON.parse(readFileSync(`${agentDir}/settings.json`, "utf8"));
+		return typeof raw?.theme === "string" && raw.theme ? raw.theme : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Switch pi to its terminal-palette theme and keep it in sync. Returns false if unavailable. */
+function applyTerminalTheme(ctx: any, options: { announce: boolean }): boolean {
+	if (!ctx?.hasUI) return false;
+	if (!systemThemeAvailable(ctx.ui)) {
+		ctx.ui.notify("Terminal colors need pi's built-in `system` theme (pi 1.4 or newer).", "error");
+		return false;
+	}
+	const current = activeThemeName(ctx.ui);
+	if (current !== SYSTEM_THEME_NAME) {
+		// Remember what to go back to; a "light/dark" pair is kept as the pair.
+		const previous = readPiThemeSetting() ?? current;
+		if (previous && previous !== SYSTEM_THEME_NAME) writeSettingsKey("terminalThemePrevious", previous);
+		const result = ctx.ui.setTheme(SYSTEM_THEME_NAME);
+		if (!result?.success) {
+			ctx.ui.notify(`Could not switch to the terminal theme: ${result?.error ?? "unknown error"}`, "error");
+			return false;
+		}
+		if (options.announce) {
+			ctx.ui.notify(`Theme follows the terminal's colors (was "${previous ?? current}"). /cc-theme terminal off to switch back.`, "info");
+		}
+	}
+	startFocusResync(ctx.ui, terminalThemeEnabled);
+	return true;
+}
+
+/** Turn terminalTheme off and restore the theme that was active before it. */
+function restorePreviousTheme(ctx: any): string | undefined {
+	const previous = readSettings().terminalThemePrevious;
+	writeSettingsKey("terminalThemePrevious", undefined);
+	if (!ctx?.hasUI || !previous || activeThemeName(ctx.ui) !== SYSTEM_THEME_NAME) return undefined;
+	let name = previous;
+	if (previous.includes("/")) {
+		// ctx.ui.setTheme takes one theme name; pick the pair member for the current appearance.
+		const [light, dark] = previous.split("/");
+		name = themeAppearance(ctx.ui.theme) === "light" ? light : dark;
+	}
+	const result = ctx.ui.setTheme(name);
+	return result?.success ? name : undefined;
+}
+
+/** Shiki theme for diff previews: a bundled theme name, or one generated from the pi theme. */
+let DIFF_THEME: BundledTheme | ShikiThemeRegistration = (process.env.DIFF_THEME as BundledTheme | undefined) ?? "github-dark";
 /** True when the active pi theme has a light panel background (edit/write diff chrome). */
 let _diffOnLightBg = false;
 let codeToAnsiLoader: Promise<any> | null = null;
@@ -4260,8 +4358,40 @@ let FG_DEL = "\x1b[38;2;200;100;100m";
 let FG_DIM = "\x1b[38;2;80;80;80m";
 let FG_LNUM = "\x1b[38;2;100;100;100m";
 let FG_RULE = "\x1b[38;2;50;50;50m";
-// Tool branch connectors (├ └ │). Default fixed gray 72 — independent of pi theme.
+// Tool branch connectors (├ └ │). The default ("fixed" mode without an explicit gray) blends the
+// terminal's background toward its text color until it has the contrast rgb 72 has on a #161616
+// terminal (2.0:1), so connectors keep that weight on light and tinted themes and take on the
+// theme's tint. Outline chrome (user box, code fences, thinking rule) does the same at the
+// contrast of rgb 136 (5.1:1). Gray 72 / +64 is the fallback when pi does not expose concrete
+// theme colors (pi < 1.4) or themeAdaptive is off.
 const DEFAULT_TOOL_BRANCH_GRAY = 72;
+const BRANCH_CHROME_CONTRAST = 2.0;
+const OUTLINE_CHROME_CONTRAST = 5.1;
+
+// Branch connectors resolve their color on every rendered row, so keep the solved blends.
+const _chromeBlendCache = new Map<string, string>();
+
+/** Terminal background blended toward its text color to `contrast`, or null without concrete colors. */
+function themeChromeBlend(theme: any, contrast: number): string | null {
+	if (!theme || !themeAdaptiveEnabled()) return null;
+	const defaults = terminalDefaultColors(theme);
+	if (!defaults) return null;
+	const { background: bg, foreground: fg } = defaults;
+	const mode = typeof theme.getColorMode === "function" ? theme.getColorMode() : "";
+	const key = `${contrast}|${bg.r},${bg.g},${bg.b}|${fg.r},${fg.g},${fg.b}|${mode}`;
+	let ansi = _chromeBlendCache.get(key);
+	if (!ansi) {
+		if (_chromeBlendCache.size > 32) _chromeBlendCache.clear();
+		ansi = rgbFgAnsi(theme, blendForContrast(bg, fg, contrast));
+		_chromeBlendCache.set(key, ansi);
+	}
+	return ansi;
+}
+
+function hasExplicitToolBranchGray(): boolean {
+	const raw = readSettings().toolBranchRgbGray;
+	return typeof raw === "number" && Number.isFinite(raw);
+}
 
 function toolBranchRgbAnsi(gray: number): string {
 	const g = Math.max(0, Math.min(255, Math.round(gray)));
@@ -4275,11 +4405,17 @@ function ansiRgbBrightenedBy(ansi: string, delta: number): string | null {
 	return `\x1b[38;2;${bump(rgb.r)};${bump(rgb.g)};${bump(rgb.b)}m`;
 }
 
-/** Outline chrome always brighter than branch; never falls back to identical branch ANSI. */
+/** Outline chrome always stands out more than the branch; never falls back to identical branch ANSI. */
 function outlineChromeAnsiFromBranch(theme?: any): string {
 	const t = theme ?? _toolBranchThemeHint;
+	if (toolBranchColorModeFixed() && !hasExplicitToolBranchGray()) {
+		const blend = themeChromeBlend(t, OUTLINE_CHROME_CONTRAST);
+		if (blend) return blend;
+	}
 	const branch = currentToolBranchAnsi(t);
-	const fromBranch = ansiRgbBrightenedBy(branch, OUTLINE_CHROME_BRIGHTEN);
+	// Toward the text color: brighter on dark themes, darker on light ones.
+	const towardText = t && isLightThemeBackground(t) ? -OUTLINE_CHROME_BRIGHTEN : OUTLINE_CHROME_BRIGHTEN;
+	const fromBranch = ansiRgbBrightenedBy(branch, towardText);
 	if (fromBranch) return fromBranch;
 	let gray = DEFAULT_TOOL_BRANCH_GRAY;
 	if (toolBranchColorModeFixed()) {
@@ -4302,8 +4438,8 @@ function toolBranchColorModeFixed(): boolean {
 }
 
 function toolBranchRenderCacheKey(): string {
-	if (toolBranchColorModeFixed()) return `fixed:${getConfiguredToolBranchGray()}`;
-	return `theme:${stripAnsi(TOOL_RULE)}`;
+	// The escape itself, not stripAnsi(TOOL_RULE) (which is always ""), so a new color is a new key.
+	return `${toolBranchColorModeFixed() ? "fixed" : "theme"}:${TOOL_RULE}`;
 }
 
 let _toolBranchVisualEpoch = 0;
@@ -4343,6 +4479,10 @@ let _toolBranchThemeHint: any;
 function currentToolBranchAnsi(theme?: any): string {
 	const t = theme ?? _toolBranchThemeHint;
 	if (toolBranchColorModeFixed()) {
+		if (!hasExplicitToolBranchGray()) {
+			const blend = themeChromeBlend(t, BRANCH_CHROME_CONTRAST);
+			if (blend) return blend;
+		}
 		return toolBranchRgbAnsi(getConfiguredToolBranchGray());
 	}
 	const chrome = t ? resolveThemeChromeFg(t) : null;
@@ -4492,6 +4632,10 @@ const FALLBACK_BASE_BG_DARK = { r: 32, g: 35, b: 42 };
 const FALLBACK_BASE_BG_LIGHT = { r: 232, g: 233, b: 236 };
 
 function isLightThemeBackground(theme: any): boolean {
+	// pi >= 1.4 decides light/dark itself (from the terminal's colors for the system theme);
+	// use the same answer so diffs, chrome, and pi's own UI never disagree.
+	const appearance = themeAppearance(theme);
+	if (appearance) return appearance === "light";
 	const panel =
 		themeBgRgb(theme, "toolSuccessBg") ||
 		themeBgRgb(theme, "userMessageBg") ||
@@ -4511,10 +4655,18 @@ function isLightThemeBackground(theme: any): boolean {
 function syncDiffShikiTheme(theme: any): void {
 	if (process.env.DIFF_THEME) return;
 	const config = loadDiffConfig();
-	if (config.diffTheme) return;
+	if (config.diffTheme || config.diffColors?.shikiTheme) return;
 	_diffOnLightBg = isLightThemeBackground(theme);
-	DIFF_THEME = (_diffOnLightBg ? "github-light" : "github-dark") as BundledTheme;
-	clearHighlightCache();
+	// Highlight diffs with the theme's own syntax colors (the ones pi uses for Markdown code
+	// blocks). GitHub's palette is the fallback for pi versions without concrete theme colors.
+	const fromTheme = themeAdaptiveEnabled() ? shikiThemeFromPiTheme(theme) : null;
+	const next = fromTheme ?? ((_diffOnLightBg ? "github-light" : "github-dark") as BundledTheme);
+	if (diffThemeName(next) !== diffThemeName(DIFF_THEME)) clearHighlightCache();
+	DIFF_THEME = next;
+}
+
+function diffThemeName(theme: BundledTheme | ShikiThemeRegistration): string {
+	return typeof theme === "string" ? theme : theme.name;
 }
 const UNIVERSAL_DIFF_ADD_FG = { r: 110, g: 210, b: 130 };
 const UNIVERSAL_DIFF_DEL_FG = { r: 225, g: 110, b: 110 };
@@ -4535,17 +4687,65 @@ function rgbToBgAnsi(c: { r: number; g: number; b: number }): string {
 	return `\x1b[48;2;${Math.round(c.r)};${Math.round(c.g)};${Math.round(c.b)}m`;
 }
 
+// Diff row tints: how far each background moves from the surface toward the theme's diff color.
+// Light themes need less, because the same share of a mid-tone color reads stronger on white.
+const DIFF_TINT = {
+	dark: { line: { add: 0.2, del: 0.17 }, word: { add: 0.36, del: 0.32 }, gutter: { add: 0.12, del: 0.1 } },
+	light: { line: { add: 0.16, del: 0.13 }, word: { add: 0.3, del: 0.26 }, gutter: { add: 0.1, del: 0.08 } },
+} as const;
+
+/** The color a diff row is drawn on: the terminal background, or pi's tool panel in `default` tool style. */
+function diffSurfaceRgb(theme: any): Rgb | null {
+	if (toolBackgroundMode === "default") {
+		const panel = themeTokenRgb(theme, "toolSuccessBg");
+		if (panel) return panel;
+	}
+	return terminalDefaultColors(theme)?.background ?? null;
+}
+
+/**
+ * Diff colors straight from the theme: text in `toolDiffAdded` / `toolDiffRemoved`, and
+ * backgrounds that tint the row's real surface toward those same colors. Returns false on pi
+ * versions without concrete theme colors.
+ */
+function deriveDiffPaletteFromThemeColors(theme: any): boolean {
+	const add = themeTokenRgb(theme, "toolDiffAdded");
+	const del = themeTokenRgb(theme, "toolDiffRemoved");
+	const surface = diffSurfaceRgb(theme);
+	if (!add || !del || !surface) return false;
+	const tint = DIFF_TINT[isLightThemeBackground(theme) ? "light" : "dark"];
+	const bg = (color: Rgb, amount: number) => rgbBgAnsi(theme, mixThemeRgb(surface, color, amount));
+	FG_ADD = rgbFgAnsi(theme, add);
+	FG_DEL = rgbFgAnsi(theme, del);
+	BG_ADD = bg(add, tint.line.add);
+	BG_DEL = bg(del, tint.line.del);
+	BG_ADD_W = bg(add, tint.word.add);
+	BG_DEL_W = bg(del, tint.word.del);
+	BG_GUTTER_ADD = bg(add, tint.gutter.add);
+	BG_GUTTER_DEL = bg(del, tint.gutter.del);
+	return true;
+}
+
 function autoDeriveBgFromTheme(theme: any): void {
 	// Diff palette derivation.
 	//
 	// `toolDiffAdded` / `toolDiffRemoved` from the active pi theme give us the
-	// fg accents. The base background is taken from `toolSuccessBg` (close to
-	// the panel color the row will sit on) so the tinted backgrounds blend in
-	// instead of forcing a hardcoded dark hue. Falls back to the universal
-	// dark palette when the theme is unavailable or themeAdaptive=false.
+	// fg accents. On pi >= 1.4 the backgrounds tint the row's real surface toward
+	// those colors (deriveDiffPaletteFromThemeColors). Older pi versions only
+	// expose ANSI escapes, so the base is taken from `toolSuccessBg` and mixed
+	// with fixed tint targets. Falls back to the universal dark palette when the
+	// theme is unavailable or themeAdaptive=false.
 	const useTheme = themeAdaptiveEnabled() && theme;
 	const onLight = useTheme && isLightThemeBackground(theme);
 	_diffOnLightBg = !!onLight;
+	if (useTheme && deriveDiffPaletteFromThemeColors(theme)) {
+		BG_EMPTY = TRANSPARENT_BG;
+		BG_BASE = TRANSPARENT_BG;
+		D_RST = TRANSPARENT_RESET;
+		DIVIDER = `${FG_RULE}│${D_RST}`;
+		DEFAULT_DIFF_COLORS = { fgAdd: FG_ADD, fgDel: FG_DEL, fgCtx: FG_DIM };
+		return;
+	}
 	const addFgRgb = (useTheme && themeFgRgb(theme, "toolDiffAdded")) || UNIVERSAL_DIFF_ADD_FG;
 	const delFgRgb = (useTheme && themeFgRgb(theme, "toolDiffRemoved")) || UNIVERSAL_DIFF_DEL_FG;
 	const base =
@@ -4634,7 +4834,12 @@ function applyThemePaletteIfNeeded(theme: any): void {
 	}
 	const paletteChanged =
 		_themePaletteCacheName !== themeName || _themePaletteCacheFingerprint !== fingerprint;
-	if (paletteChanged) bumpToolBranchVisualEpoch();
+	if (paletteChanged) {
+		bumpToolBranchVisualEpoch();
+		// A new theme object (e.g. the system theme rebuilt after a terminal theme change)
+		// comes with pi's own tool backgrounds; re-apply the configured tool style to it.
+		applyToolBackgroundMode(theme);
+	}
 	_themePaletteCacheTheme = theme;
 	_themePaletteCacheName = themeName;
 	_themePaletteCacheFingerprint = fingerprint;
@@ -5103,7 +5308,7 @@ function lang(filePath: string): BundledLanguage | undefined {
 	return EXT_LANG[extname(filePath).slice(1).toLowerCase()];
 }
 
-async function codeToAnsiLazy(code: string, language: BundledLanguage, theme: BundledTheme): Promise<string> {
+async function codeToAnsiLazy(code: string, language: BundledLanguage, theme: BundledTheme | ShikiThemeRegistration): Promise<string> {
 	if (!codeToAnsiLoader) {
 		// Self-healing: a failed import (missing dep, transient error) must not leave a
 		// permanently-rejected promise that later becomes an unhandled rejection. Reset
@@ -5140,11 +5345,15 @@ function touchCache(key: string, value: string[]): string[] {
 async function hlBlock(code: string, language: BundledLanguage | undefined): Promise<string[]> {
 	if (!code) return [""];
 	if (!language || code.length > MAX_HL_CHARS) return code.split("\n");
-	const key = `${DIFF_THEME}\0${language}\0${code}`;
+	const diffTheme = DIFF_THEME;
+	const key = `${diffThemeName(diffTheme)}\0${language}\0${code}`;
 	const hit = hlCache.get(key);
 	if (hit) return touchCache(key, hit);
 	try {
-		const ansi = normalizeShikiContrast(await codeToAnsiLazy(code, language, DIFF_THEME));
+		const raw = await codeToAnsiLazy(code, language, diffTheme as any);
+		// Themes generated from pi already meet pi's contrast rules for this background;
+		// only bundled themes need their too-dark / too-light colors muted.
+		const ansi = typeof diffTheme === "string" ? normalizeShikiContrast(raw) : raw;
 		const out = (ansi.endsWith("\n") ? ansi.slice(0, -1) : ansi).split("\n");
 		return touchCache(key, out);
 	} catch {
@@ -7086,9 +7295,11 @@ export default function (pi: ExtensionAPI) {
 		const chromeHint = branchMode === "theme" && theme
 			? (resolveThemeChromeFg(theme) ? " (attenuated on light themes)" : " (fallback gray if theme keys missing)")
 			: "";
-		const branchLine = branchMode === "fixed"
-			? `Branch color: fixed rgb(${branchGray})`
-			: `Branch color: theme${chromeHint}`;
+		const branchLine = branchMode === "theme"
+			? `Branch color: theme${chromeHint}`
+			: hasExplicitToolBranchGray() || !themeChromeBlend(theme, BRANCH_CHROME_CONTRAST)
+				? `Branch color: fixed rgb(${branchGray})`
+				: "Branch color: fixed 2:1 contrast on the terminal background (rgb 72 on near-black)";
 		ctx.ui.notify([
 			`Tool style: ${toolBackgroundMode}`,
 			`Tool grouping: ${toolGroupingEnabled() ? "on" : "off"}`,
@@ -7178,7 +7389,7 @@ export default function (pi: ExtensionAPI) {
 					writeSettingsKey("toolBranchRgbGray", undefined);
 					writeSettingsKey("toolBranchColorMode", undefined);
 					if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
-					if (ctx.hasUI) ctx.ui.notify(`Branch color → fixed rgb(${DEFAULT_TOOL_BRANCH_GRAY}) (default)`, "info");
+					if (ctx.hasUI) ctx.ui.notify("Branch color → default (fixed contrast on the terminal background)", "info");
 					return;
 				}
 				if (arg === "theme") {
@@ -7190,7 +7401,9 @@ export default function (pi: ExtensionAPI) {
 				if (arg === "fixed") {
 					writeSettingsKey("toolBranchColorMode", "fixed");
 					if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
-					if (ctx.hasUI) ctx.ui.notify(`Branch color → fixed rgb(${getConfiguredToolBranchGray()})`, "info");
+					if (ctx.hasUI) ctx.ui.notify(hasExplicitToolBranchGray()
+						? `Branch color → fixed rgb(${getConfiguredToolBranchGray()})`
+						: "Branch color → fixed contrast on the terminal background", "info");
 					return;
 				}
 				const gray = Number.parseInt(arg, 10);
@@ -7255,11 +7468,66 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// /cc-theme command — toggle pi-theme-adaptive coloring at runtime.
-	const THEME_MODES = ["on", "off", "toggle", "status"] as const;
+	// /cc-theme command — toggle pi-theme-adaptive coloring at runtime, and
+	// /cc-theme terminal — make pi's theme follow the terminal's palette.
+	const THEME_MODES = ["on", "off", "toggle", "status", "terminal"] as const;
+	const TERMINAL_MODES = ["on", "off", "toggle", "status"] as const;
+	const handleTerminalTheme = (arg: string, ctx: any): void => {
+		const current = terminalThemeEnabled();
+		if (!arg || arg === "status") {
+			if (!ctx.hasUI) return;
+			const name = activeThemeName(ctx.ui) ?? "unknown";
+			const previous = readSettings().terminalThemePrevious;
+			ctx.ui.notify([
+				`Terminal colors: ${current ? "on" : "off"} (pi theme "${name}")`,
+				current && previous ? `  /cc-theme terminal off restores "${previous}"` : "",
+				current && name !== SYSTEM_THEME_NAME ? "  pi is not using the system theme right now; /cc-theme terminal on switches it back" : "",
+			].filter(Boolean).join("\n"), "info");
+			return;
+		}
+		let next: boolean;
+		if (arg === "on") next = true;
+		else if (arg === "off") next = false;
+		else if (arg === "toggle") next = !current;
+		else {
+			if (ctx.hasUI) ctx.ui.notify(`Usage: /cc-theme terminal ${TERMINAL_MODES.join("|")}`, "error");
+			return;
+		}
+		if (next) {
+			writeSettingsKey("terminalTheme", true);
+			if (!applyTerminalTheme(ctx, { announce: false })) {
+				writeSettingsKey("terminalTheme", undefined);
+				return;
+			}
+			requestTerminalColorScheme();
+			if (ctx.hasUI) ctx.ui.notify("Terminal colors: on — pi's theme now follows the terminal (Ghostty, Rex, ...)", "info");
+		} else {
+			writeSettingsKey("terminalTheme", undefined);
+			const restored = restorePreviousTheme(ctx);
+			if (ctx.hasUI) {
+				ctx.ui.notify(restored
+					? `Terminal colors: off — restored theme "${restored}"`
+					: "Terminal colors: off — pick a theme with /settings", "info");
+			}
+		}
+	};
 	pi.registerCommand("cc-theme", {
-		description: "Toggle whether tool borders / branch rules / diff colors follow the active pi theme",
+		description: "Follow the terminal's colors (terminal on|off), or toggle whether tool chrome / diff colors follow the pi theme",
 		getArgumentCompletions(prefix) {
+			if (prefix.startsWith("terminal ")) {
+				const second = prefix.slice("terminal ".length);
+				return TERMINAL_MODES
+					.filter((m) => m.startsWith(second))
+					.map((m) => ({
+						value: `terminal ${m}`,
+						label: m,
+						description:
+							m === "on" ? "Use pi's system theme, built from the terminal's palette, and re-read it on focus"
+							: m === "off" ? "Go back to the theme you had before"
+							: m === "toggle" ? "Flip between on and off"
+							: "Show whether pi follows the terminal's colors",
+					}));
+			}
 			return THEME_MODES
 				.filter((m) => m.startsWith(prefix))
 				.map((m) => ({
@@ -7269,11 +7537,16 @@ export default function (pi: ExtensionAPI) {
 						m === "on" ? "Derive borders, branch rules, dim text and diff tints from the active pi theme (default)"
 						: m === "off" ? "Keep the fixed Claude-style palette regardless of theme"
 						: m === "toggle" ? "Flip between on and off"
+						: m === "terminal" ? "Make pi's theme follow the terminal's colors (Ghostty, Rex, ...)"
 						: "Show the current setting and a preview of the derived colors",
 				}));
 		},
 		async handler(args, ctx) {
 			const raw = args.trim().toLowerCase();
+			if (raw === "terminal" || raw.startsWith("terminal ")) {
+				handleTerminalTheme(raw.slice("terminal".length).trim(), ctx);
+				return;
+			}
 			const current = themeAdaptiveEnabled();
 
 			if (!raw || raw === "status") {
@@ -7281,6 +7554,7 @@ export default function (pi: ExtensionAPI) {
 				const theme = ctx.ui.theme as any;
 				const themeName = theme?.name ?? "unknown";
 				const state = current ? "on" : "off";
+				const terminalLine = `terminal colors: ${terminalThemeEnabled() ? "on" : "off"} (/cc-theme terminal on|off)`;
 				if (raw === "status" && current) {
 					const settings = readSettings();
 					const verbKey = settings.spinnerVerbColor || "borderAccent";
@@ -7298,9 +7572,9 @@ export default function (pi: ExtensionAPI) {
 						`spinner verb: ${verbAnsi ? `${verbAnsi}Cooking…\x1b[39m` : "(unchanged)"} (key: ${verbKey})`,
 						`spinner stat: ${statusAnsi ? `${statusAnsi}(thinking · ↓ 10 tokens · 2s)\x1b[39m` : "(unchanged)"} (key: ${statusKey})`,
 					].join("\n  ");
-					ctx.ui.notify(`Theme adaptive: ${state} (theme "${themeName}")\n  ${preview}`, "info");
+					ctx.ui.notify(`Theme adaptive: ${state} (theme "${themeName}")\n  ${terminalLine}\n  ${preview}`, "info");
 				} else {
-					ctx.ui.notify(`Theme adaptive: ${state} (theme "${themeName}")`, "info");
+					ctx.ui.notify(`Theme adaptive: ${state} (theme "${themeName}")\n  ${terminalLine}`, "info");
 				}
 				return;
 			}
@@ -7434,6 +7708,8 @@ export default function (pi: ExtensionAPI) {
 		clearRtkRewriteState();
 		if (!ctx.hasUI) return;
 		patchUiNotifications(ctx.ui);
+		// terminalTheme: switch to (and stay on) the theme built from the terminal's palette.
+		if (terminalThemeEnabled()) applyTerminalTheme(ctx, { announce: true });
 		// Session switch (/resume, /new) can leave tool chrome from the previous
 		// theme; rebind from ctx.ui.theme (other extensions may setTheme in the
 		// same tick — deferred passes pick up the final theme without coupling).
