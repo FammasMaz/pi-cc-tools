@@ -95,13 +95,11 @@ const RESET = "\x1b[0m";
 const TRANSPARENT_BG = "\x1b[49m";
 const TRANSPARENT_RESET = `${RESET}${TRANSPARENT_BG}`;
 
-// User/code box borders and thinking/thought text: branch color + OUTLINE_CHROME_BRIGHTEN.
-// Branch ├└│ stay at `currentToolBranchAnsi` (see syncOutlineChromeFromBranch).
+// User/code box borders and thinking/thought text use the outline chrome color, branch
+// connectors ├└│ the fainter branch color (see chromeAnsi / syncOutlineChromeFromBranch).
 let BORDER_COLOR = "\x1b[38;5;238m";
 let CODE_BLOCK_LANG_FG = "\x1b[38;2;95;95;95m";
 const CHROME_ITALIC = "\x1b[3m";
-/** Lift outline chrome above branch connectors so boxes and thought read brighter. */
-const OUTLINE_CHROME_BRIGHTEN = 64;
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const ANSI_PRESENT_RE = /\x1b\[[0-9;]*m/;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
@@ -157,10 +155,11 @@ interface SettingsFile {
 	 */
 	themeAdaptive?: boolean;
 	/**
-	 * When true, pi uses its built-in `system` theme, which takes every color
-	 * from the terminal's own palette (Ghostty, Rex, ...), and re-reads that
-	 * palette when the terminal regains focus so same-kind theme switches
-	 * (dark to dark) are picked up too. Toggle with `/cc-theme terminal`.
+	 * On by default (pi >= 1.4): pi uses its built-in `system` theme, which takes
+	 * every color from the terminal's own palette (Ghostty, Rex, ...), and
+	 * re-reads that palette when the terminal regains focus so same-kind theme
+	 * switches (dark to dark) are picked up too. Set to false, or run
+	 * `/cc-theme terminal off`, to keep the theme chosen in pi's /settings.
 	 */
 	terminalTheme?: boolean;
 	/** Pi theme that was active before `terminalTheme` was turned on; restored when it is turned off. */
@@ -185,14 +184,6 @@ interface SettingsFile {
 	 * renders expanded, like stock pi.
 	 */
 	thinkingMode?: "live" | "full";
-	/** Exact gray level 0–255 for ├ └ │ in `fixed` mode. Unset: a fixed-contrast blend of the terminal background and text. */
-	toolBranchRgbGray?: number;
-	/**
-	 * `fixed` (default): the terminal background blended toward its text color
-	 * to a fixed 2:1 contrast (rgb 72 on a #161616 terminal), or exactly
-	 * `toolBranchRgbGray` when set. `theme`: the theme's dim → muted → borderMuted color.
-	 */
-	toolBranchColorMode?: "theme" | "fixed";
 }
 
 let _settingsCache: { value: SettingsFile; timestamp: number } | null = null;
@@ -1615,7 +1606,7 @@ const TOOL_EXECUTION_PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-tool
 
 // Rendered-output cache for assistant/user/custom message components.
 // Keyed by (width, branch visual epoch, tool background mode). The epoch changes on
-// theme / /cc-tools branch / /cc-theme rebinds; the mode is included because subagent
+// theme and /cc-theme rebinds; the mode is included because subagent
 // (custom-message) framing follows `toolBackgroundMode` via frameToolLikeLines. This avoids
 // re-running the per-line ANSI stripping (applyTerminalCopyZones, normalizeLeadingCheckGlyph,
 // border boxing) on every scroll/expand re-render — the dominant CPU cost on long chats,
@@ -4260,8 +4251,14 @@ function themeAdaptiveEnabled(): boolean {
 // terminalTheme: pi follows the terminal's own palette (Ghostty, Rex, ...).
 // ---------------------------------------------------------------------------
 
+/** On by default; `terminalTheme: false` (or `/cc-theme terminal off`) turns it off. */
 function terminalThemeEnabled(): boolean {
-	return readSettings().terminalTheme === true;
+	return readSettings().terminalTheme !== false;
+}
+
+/** `pi --use-theme <name>` picks the theme for this run. */
+function themeChosenOnCommandLine(): boolean {
+	return process.argv.some((arg) => arg === "--use-theme" || arg.startsWith("--use-theme="));
 }
 
 /** Pi's saved `theme` setting (may be a "light/dark" pair), from pi's own settings file. */
@@ -4275,11 +4272,16 @@ function readPiThemeSetting(): string | undefined {
 	}
 }
 
-/** Switch pi to its terminal-palette theme and keep it in sync. Returns false if unavailable. */
-function applyTerminalTheme(ctx: any, options: { announce: boolean }): boolean {
+/**
+ * Switch pi to its terminal-palette theme and keep it in sync. Returns false if unavailable.
+ * `reportUnavailable` is off for the default-on startup path, so older pi versions stay quiet.
+ */
+function applyTerminalTheme(ctx: any, options: { announce: boolean; reportUnavailable: boolean }): boolean {
 	if (!ctx?.hasUI) return false;
 	if (!systemThemeAvailable(ctx.ui)) {
-		ctx.ui.notify("Terminal colors need pi's built-in `system` theme (pi 1.4 or newer).", "error");
+		if (options.reportUnavailable) {
+			ctx.ui.notify("Terminal colors need pi's built-in `system` theme (pi 1.4 or newer).", "error");
+		}
 		return false;
 	}
 	const current = activeThemeName(ctx.ui);
@@ -4293,7 +4295,14 @@ function applyTerminalTheme(ctx: any, options: { announce: boolean }): boolean {
 			return false;
 		}
 		if (options.announce) {
-			ctx.ui.notify(`Theme follows the terminal's colors (was "${previous ?? current}"). /cc-theme terminal off to switch back.`, "info");
+			// Pi renders a resumed session's transcript right after session_start; post the
+			// notice on the next tick so it lands below that history instead of above it.
+			const message = `Theme follows the terminal's colors (was "${previous ?? current}"). /cc-theme terminal off switches back and keeps it.`;
+			unrefTimer(setTimeout(() => {
+				try {
+					ctx.ui.notify(message, "info");
+				} catch { /* session replaced in the meantime */ }
+			}, 0));
 		}
 	}
 	startFocusResync(ctx.ui, terminalThemeEnabled);
@@ -4358,88 +4367,53 @@ let FG_DEL = "\x1b[38;2;200;100;100m";
 let FG_DIM = "\x1b[38;2;80;80;80m";
 let FG_LNUM = "\x1b[38;2;100;100;100m";
 let FG_RULE = "\x1b[38;2;50;50;50m";
-// Tool branch connectors (├ └ │). The default ("fixed" mode without an explicit gray) blends the
-// terminal's background toward its text color until it has the contrast rgb 72 has on a #161616
-// terminal (2.0:1), so connectors keep that weight on light and tinted themes and take on the
-// theme's tint. Outline chrome (user box, code fences, thinking rule) does the same at the
-// contrast of rgb 136 (5.1:1). Gray 72 / +64 is the fallback when pi does not expose concrete
-// theme colors (pi < 1.4) or themeAdaptive is off.
-const DEFAULT_TOOL_BRANCH_GRAY = 72;
-const BRANCH_CHROME_CONTRAST = 2.0;
-const OUTLINE_CHROME_CONTRAST = 5.1;
-
-// Branch connectors resolve their color on every rendered row, so keep the solved blends.
-const _chromeBlendCache = new Map<string, string>();
-
-/** Terminal background blended toward its text color to `contrast`, or null without concrete colors. */
-function themeChromeBlend(theme: any, contrast: number): string | null {
-	if (!theme || !themeAdaptiveEnabled()) return null;
-	const defaults = terminalDefaultColors(theme);
-	if (!defaults) return null;
-	const { background: bg, foreground: fg } = defaults;
-	const mode = typeof theme.getColorMode === "function" ? theme.getColorMode() : "";
-	const key = `${contrast}|${bg.r},${bg.g},${bg.b}|${fg.r},${fg.g},${fg.b}|${mode}`;
-	let ansi = _chromeBlendCache.get(key);
-	if (!ansi) {
-		if (_chromeBlendCache.size > 32) _chromeBlendCache.clear();
-		ansi = rgbFgAnsi(theme, blendForContrast(bg, fg, contrast));
-		_chromeBlendCache.set(key, ansi);
-	}
-	return ansi;
-}
-
-function hasExplicitToolBranchGray(): boolean {
-	const raw = readSettings().toolBranchRgbGray;
-	return typeof raw === "number" && Number.isFinite(raw);
-}
+// Branch connectors (├ └ │) and outline chrome (user box, code fences, thinking rule) are neutral
+// marks drawn at a fixed contrast against the terminal background: the background blended toward
+// the terminal's text color until it reaches 2:1 for connectors (rgb 72 on a #161616 terminal) and
+// 5.1:1 for outlines (rgb ~136). That keeps connectors faint but visible on dark, light, and tinted
+// themes alike, with nothing to configure. When pi does not report the terminal's colors (pi < 1.4),
+// the same contrasts are taken against plain black or white, per the theme's appearance.
+type ChromeKind = "branch" | "outline";
+const CHROME_CONTRAST: Record<ChromeKind, number> = { branch: 2.0, outline: 5.1 };
+const DARK_FALLBACK_GRAY: Record<ChromeKind, number> = { branch: 72, outline: 136 };
+const WHITE_RGB = { r: 255, g: 255, b: 255 };
+const BLACK_RGB = { r: 0, g: 0, b: 0 };
 
 function toolBranchRgbAnsi(gray: number): string {
 	const g = Math.max(0, Math.min(255, Math.round(gray)));
 	return `\x1b[38;2;${g};${g};${g}m`;
 }
 
-function ansiRgbBrightenedBy(ansi: string, delta: number): string | null {
-	const rgb = parseAnsiRgb(ansi);
-	if (!rgb) return null;
-	const bump = (c: number) => Math.max(0, Math.min(255, Math.round(c + delta)));
-	return `\x1b[38;2;${bump(rgb.r)};${bump(rgb.g)};${bump(rgb.b)}m`;
-}
+// Connectors resolve their color on every rendered row, so keep the solved blends.
+const _chromeAnsiCache = new Map<string, string>();
 
-/** Outline chrome always stands out more than the branch; never falls back to identical branch ANSI. */
-function outlineChromeAnsiFromBranch(theme?: any): string {
-	const t = theme ?? _toolBranchThemeHint;
-	if (toolBranchColorModeFixed() && !hasExplicitToolBranchGray()) {
-		const blend = themeChromeBlend(t, OUTLINE_CHROME_CONTRAST);
-		if (blend) return blend;
+/** Chrome color for `kind` on the current terminal background. */
+function chromeAnsi(theme: any, kind: ChromeKind): string {
+	const defaults = theme ? terminalDefaultColors(theme) : null;
+	const light = !defaults && !!theme && isLightThemeBackground(theme);
+	const mode = typeof theme?.getColorMode === "function" ? theme.getColorMode() : "truecolor";
+	const key = defaults
+		? `${kind}|${rgbToHex(defaults.background)}|${rgbToHex(defaults.foreground)}|${mode}`
+		: `${kind}|${light ? "light" : "dark"}|${mode}`;
+	let ansi = _chromeAnsiCache.get(key);
+	if (!ansi) {
+		const contrast = CHROME_CONTRAST[kind];
+		const gray = DARK_FALLBACK_GRAY[kind];
+		const rgb = defaults
+			? blendForContrast(defaults.background, defaults.foreground, contrast)
+			: light
+				? blendForContrast(WHITE_RGB, BLACK_RGB, contrast)
+				: { r: gray, g: gray, b: gray };
+		if (_chromeAnsiCache.size > 32) _chromeAnsiCache.clear();
+		ansi = rgbFgAnsi(theme, rgb);
+		_chromeAnsiCache.set(key, ansi);
 	}
-	const branch = currentToolBranchAnsi(t);
-	// Toward the text color: brighter on dark themes, darker on light ones.
-	const towardText = t && isLightThemeBackground(t) ? -OUTLINE_CHROME_BRIGHTEN : OUTLINE_CHROME_BRIGHTEN;
-	const fromBranch = ansiRgbBrightenedBy(branch, towardText);
-	if (fromBranch) return fromBranch;
-	let gray = DEFAULT_TOOL_BRANCH_GRAY;
-	if (toolBranchColorModeFixed()) {
-		gray = getConfiguredToolBranchGray();
-	} else if (t) {
-		const hint = safeFgAnsi(t, "dim") ?? safeFgAnsi(t, "muted") ?? safeFgAnsi(t, "borderMuted");
-		const rgb = hint ? parseAnsiRgb(hint) : null;
-		if (rgb) gray = Math.round((rgb.r + rgb.g + rgb.b) / 3);
-	}
-	return toolBranchRgbAnsi(Math.min(255, gray + OUTLINE_CHROME_BRIGHTEN));
-}
-
-function getConfiguredToolBranchGray(): number {
-	const raw = readSettings().toolBranchRgbGray;
-	return typeof raw === "number" && Number.isFinite(raw) ? Math.max(0, Math.min(255, Math.round(raw))) : DEFAULT_TOOL_BRANCH_GRAY;
-}
-
-function toolBranchColorModeFixed(): boolean {
-	return readSettings().toolBranchColorMode !== "theme";
+	return ansi;
 }
 
 function toolBranchRenderCacheKey(): string {
 	// The escape itself, not stripAnsi(TOOL_RULE) (which is always ""), so a new color is a new key.
-	return `${toolBranchColorModeFixed() ? "fixed" : "theme"}:${TOOL_RULE}`;
+	return TOOL_RULE;
 }
 
 let _toolBranchVisualEpoch = 0;
@@ -4448,51 +4422,17 @@ function bumpToolBranchVisualEpoch(): void {
 	_toolBranchVisualEpoch++;
 }
 
-/** On light panels, theme dim/muted can be nearly white — pull chrome toward mid-gray. */
-function attenuateChromeAnsi(ansi: string, theme: any): string {
-	const rgb = parseAnsiRgb(ansi);
-	if (!rgb) return ansi;
-	if (!isLightThemeBackground(theme)) return ansi;
-	const lum = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
-	// Already quiet enough on light backgrounds.
-	if (lum <= 145) return ansi;
-	const target = 118;
-	const t = Math.min(1, (lum - 130) / 110);
-	const mix = (c: number) => Math.round(c + (target - c) * t);
-	return `\x1b[38;2;${mix(rgb.r)};${mix(rgb.g)};${mix(rgb.b)}m`;
-}
-
-/** Shared outline chrome: user box, tool rules, code fences, branch connectors. */
-function resolveThemeChromeFg(theme: any): string | null {
-	if (!theme || !themeAdaptiveEnabled()) return null;
-	const dim = safeFgAnsi(theme, "dim");
-	const muted = safeFgAnsi(theme, "muted");
-	const borderMuted = safeFgAnsi(theme, "borderMuted");
-	const thinking = safeFgAnsi(theme, "thinkingText");
-	const raw = dim ?? muted ?? borderMuted ?? thinking;
-	return raw ? attenuateChromeAnsi(raw, theme) : null;
-}
-
-/** Resolve ├ └ │ color from settings + theme on every use (not a stale global). */
+/** Last theme seen, for call sites that draw connectors without a theme at hand. */
 let _toolBranchThemeHint: any;
 
+/** ├ └ │ color for the current terminal background (resolved on every use, not a stale global). */
 function currentToolBranchAnsi(theme?: any): string {
-	const t = theme ?? _toolBranchThemeHint;
-	if (toolBranchColorModeFixed()) {
-		if (!hasExplicitToolBranchGray()) {
-			const blend = themeChromeBlend(t, BRANCH_CHROME_CONTRAST);
-			if (blend) return blend;
-		}
-		return toolBranchRgbAnsi(getConfiguredToolBranchGray());
-	}
-	const chrome = t ? resolveThemeChromeFg(t) : null;
-	if (chrome) return chrome;
-	return toolBranchRgbAnsi(getConfiguredToolBranchGray());
+	return chromeAnsi(theme ?? _toolBranchThemeHint, "branch");
 }
 
-/** User box, code fences, thinking/thought: branch + OUTLINE_CHROME_BRIGHTEN (never same as branch). */
+/** User box, code fences, thinking/thought: the outline chrome color (stronger than connectors). */
 function syncOutlineChromeFromBranch(theme?: any): void {
-	const outline = outlineChromeAnsiFromBranch(theme);
+	const outline = chromeAnsi(theme ?? _toolBranchThemeHint, "outline");
 	const prevBorder = BORDER_COLOR;
 	BORDER_COLOR = outline;
 	WORKED_LINE_FG = outline;
@@ -4556,7 +4496,7 @@ function refreshAllToolBranchVisuals(ctx: any): void {
 	invalidateThemePaletteCache();
 	applyToolBackgroundMode(ctx?.ui?.theme);
 	applyToolBranchColor(ctx?.ui?.theme);
-	bumpToolBranchVisualEpoch(); // always bust ToolText + container caches after /cc-tools branch
+	bumpToolBranchVisualEpoch(); // always bust ToolText + container caches
 	// Tool rows recompute branch markup on next render (liveBranchDisplay + cache bust).
 	if (ctx?.hasUI) {
 		try {
@@ -4597,7 +4537,7 @@ function scheduleDeferredChromeRebind(ctx: any, delayMs = 0): void {
 	unrefTimer(timer);
 }
 
-let TOOL_RULE = toolBranchRgbAnsi(DEFAULT_TOOL_BRANCH_GRAY);
+let TOOL_RULE = toolBranchRgbAnsi(DARK_FALLBACK_GRAY.branch);
 let FG_SAFE_MUTED = "\x1b[38;2;139;148;158m";
 let FG_STRIPE = "\x1b[38;2;40;40;40m";
 
@@ -4781,7 +4721,7 @@ const _claudeStyleDefaults = {
 	BORDER_COLOR: "\x1b[38;5;238m",
 	WORKED_LINE_FG: "\x1b[38;2;140;140;140m",
 	CODE_BLOCK_LANG_FG: "\x1b[38;2;95;95;95m",
-	TOOL_RULE: toolBranchRgbAnsi(DEFAULT_TOOL_BRANCH_GRAY),
+	TOOL_RULE: toolBranchRgbAnsi(DARK_FALLBACK_GRAY.branch),
 	FG_DIM: "\x1b[38;2;80;80;80m",
 	FG_LNUM: "\x1b[38;2;100;100;100m",
 	FG_RULE: "\x1b[38;2;50;50;50m",
@@ -7278,7 +7218,7 @@ export default function (pi: ExtensionAPI) {
 	// /cc-tools command — control tool chrome, grouping, and detail level.
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
 	const TOOL_BOOL_MODES = ["on", "off", "toggle", "status"] as const;
-	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "thinking", "branch", "status"] as const;
+	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "thinking", "status"] as const;
 	const booleanMode = (raw: string | undefined, current: boolean): boolean | "status" | undefined => {
 		const mode = raw || "toggle";
 		if (mode === "on") return true;
@@ -7289,24 +7229,11 @@ export default function (pi: ExtensionAPI) {
 	};
 	const notifyToolStatus = (ctx: any): void => {
 		if (!ctx.hasUI) return;
-		const branchMode = toolBranchColorModeFixed() ? "fixed" : "theme";
-		const branchGray = getConfiguredToolBranchGray();
-		const theme = ctx.ui?.theme;
-		const chromeHint = branchMode === "theme" && theme
-			? (resolveThemeChromeFg(theme) ? " (attenuated on light themes)" : " (fallback gray if theme keys missing)")
-			: "";
-		const branchLine = branchMode === "theme"
-			? `Branch color: theme${chromeHint}`
-			: hasExplicitToolBranchGray() || !themeChromeBlend(theme, BRANCH_CHROME_CONTRAST)
-				? `Branch color: fixed rgb(${branchGray})`
-				: "Branch color: fixed 2:1 contrast on the terminal background (rgb 72 on near-black)";
 		ctx.ui.notify([
 			`Tool style: ${toolBackgroundMode}`,
 			`Tool grouping: ${toolGroupingEnabled() ? "on" : "off"}`,
 			`Thinking: ${getThinkingMode()}`,
 			`Extra detail: ${extraToolOutputExpanded ? "on" : "off"} (${rawKeyHint("ctrl+shift+o", "toggle")})`,
-			branchLine,
-			`  /cc-tools branch <0-255> | theme | fixed | reset`,
 		].join("\n"), "info");
 	};
 	pi.registerCommand("cc-tools", {
@@ -7324,19 +7251,11 @@ export default function (pi: ExtensionAPI) {
 							m === "group" ? "Toggle grouped adjacent/concurrent tool rows"
 							: m === "thinking" ? "Thinking display: live (default) or full"
 							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
-							: m === "branch" ? "├ └ │ gray (0-255), theme, fixed, or reset"
 							: m === "status" ? "Show tool UI settings"
 							: m === "outlines" ? "Horizontal rules around each tool (default)"
 							: m === "transparent" ? "No borders or backgrounds"
 							: "Pi built-in tool backgrounds",
 					}));
-			}
-			if (first === "branch") {
-				const second = parts[1] ?? "";
-				const opts = ["theme", "fixed", "reset", "status"];
-				return opts
-					.filter((o) => o.startsWith(second))
-					.map((o) => ({ value: `branch ${o}`, label: o, description: "Branch connector color" }));
 			}
 			if (first === "thinking") {
 				const second = parts[1] ?? "";
@@ -7379,44 +7298,6 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			if (sub === "branch") {
-				const arg = parts[1] ?? "status";
-				if (arg === "status" || !arg) {
-					notifyToolStatus(ctx);
-					return;
-				}
-				if (arg === "reset") {
-					writeSettingsKey("toolBranchRgbGray", undefined);
-					writeSettingsKey("toolBranchColorMode", undefined);
-					if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
-					if (ctx.hasUI) ctx.ui.notify("Branch color → default (fixed contrast on the terminal background)", "info");
-					return;
-				}
-				if (arg === "theme") {
-					writeSettingsKey("toolBranchColorMode", "theme");
-					if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
-					if (ctx.hasUI) ctx.ui.notify("Branch color → follow pi theme (dim/muted)", "info");
-					return;
-				}
-				if (arg === "fixed") {
-					writeSettingsKey("toolBranchColorMode", "fixed");
-					if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
-					if (ctx.hasUI) ctx.ui.notify(hasExplicitToolBranchGray()
-						? `Branch color → fixed rgb(${getConfiguredToolBranchGray()})`
-						: "Branch color → fixed contrast on the terminal background", "info");
-					return;
-				}
-				const gray = Number.parseInt(arg, 10);
-				if (!Number.isFinite(gray) || gray < 0 || gray > 255) {
-					if (ctx.hasUI) ctx.ui.notify("Usage: /cc-tools branch <0-255> | theme | fixed | reset", "error");
-					return;
-				}
-				writeSettingsKey("toolBranchRgbGray", gray);
-				writeSettingsKey("toolBranchColorMode", "fixed");
-				if (ctx.hasUI) refreshAllToolBranchVisuals(ctx);
-				if (ctx.hasUI) ctx.ui.notify(`Branch color → fixed rgb(${gray})`, "info");
-				return;
-			}
 
 			if (sub === "thinking") {
 				const arg = (parts[1] ?? "status").toLowerCase();
@@ -7478,8 +7359,9 @@ export default function (pi: ExtensionAPI) {
 			if (!ctx.hasUI) return;
 			const name = activeThemeName(ctx.ui) ?? "unknown";
 			const previous = readSettings().terminalThemePrevious;
+			const isDefault = readSettings().terminalTheme === undefined;
 			ctx.ui.notify([
-				`Terminal colors: ${current ? "on" : "off"} (pi theme "${name}")`,
+				`Terminal colors: ${current ? "on" : "off"}${isDefault ? " (default)" : ""} (pi theme "${name}")`,
 				current && previous ? `  /cc-theme terminal off restores "${previous}"` : "",
 				current && name !== SYSTEM_THEME_NAME ? "  pi is not using the system theme right now; /cc-theme terminal on switches it back" : "",
 			].filter(Boolean).join("\n"), "info");
@@ -7494,15 +7376,17 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (next) {
+			const prior = readSettings().terminalTheme;
 			writeSettingsKey("terminalTheme", true);
-			if (!applyTerminalTheme(ctx, { announce: false })) {
-				writeSettingsKey("terminalTheme", undefined);
+			if (!applyTerminalTheme(ctx, { announce: false, reportUnavailable: true })) {
+				writeSettingsKey("terminalTheme", prior);
 				return;
 			}
 			requestTerminalColorScheme();
 			if (ctx.hasUI) ctx.ui.notify("Terminal colors: on — pi's theme now follows the terminal (Ghostty, Rex, ...)", "info");
 		} else {
-			writeSettingsKey("terminalTheme", undefined);
+			// Explicit false: unset means on (the default).
+			writeSettingsKey("terminalTheme", false);
 			const restored = restorePreviousTheme(ctx);
 			if (ctx.hasUI) {
 				ctx.ui.notify(restored
@@ -7561,11 +7445,10 @@ export default function (pi: ExtensionAPI) {
 					const statusKey = settings.spinnerStatusColor || "muted";
 					const verbAnsi = safeFgAnsi(theme, verbKey) ?? safeFgAnsi(theme, "accent");
 					const statusAnsi = safeFgAnsi(theme, statusKey) ?? safeFgAnsi(theme, "muted");
-					const chromePreview = resolveThemeChromeFg(theme);
 					// Print a short preview of what we derived.
 					const preview = [
-						`chrome      : ${chromePreview ? `${chromePreview}─┌ User ├─\x1b[39m` : "(unchanged)"}`,
-						`  (user box, tool rules, branches)`, 
+						`outlines    : ${chromeAnsi(theme, "outline")}╭─ User ──\x1b[39m (user box, code fences)`,
+						`connectors  : ${chromeAnsi(theme, "branch")}├ └ │\x1b[39m (faint, fixed contrast on the terminal background)`,
 						`muted text  : ${safeFgAnsi(theme, "muted") ? `${safeFgAnsi(theme, "muted")}example dim text\x1b[39m` : "(unchanged)"}`,
 						`diff add    : ${safeFgAnsi(theme, "toolDiffAdded") ? `${safeFgAnsi(theme, "toolDiffAdded")}+ added line\x1b[39m` : "(unchanged)"}`,
 						`diff del    : ${safeFgAnsi(theme, "toolDiffRemoved") ? `${safeFgAnsi(theme, "toolDiffRemoved")}- removed line\x1b[39m` : "(unchanged)"}`,
@@ -7708,8 +7591,11 @@ export default function (pi: ExtensionAPI) {
 		clearRtkRewriteState();
 		if (!ctx.hasUI) return;
 		patchUiNotifications(ctx.ui);
-		// terminalTheme: switch to (and stay on) the theme built from the terminal's palette.
-		if (terminalThemeEnabled()) applyTerminalTheme(ctx, { announce: true });
+		// terminalTheme (on by default): switch to, and stay on, the theme built from the
+		// terminal's palette. `pi --use-theme <name>` still wins for that run.
+		if (terminalThemeEnabled() && !(themeChosenOnCommandLine() && activeThemeName(ctx.ui) !== SYSTEM_THEME_NAME)) {
+			applyTerminalTheme(ctx, { announce: true, reportUnavailable: readSettings().terminalTheme === true });
+		}
 		// Session switch (/resume, /new) can leave tool chrome from the previous
 		// theme; rebind from ctx.ui.theme (other extensions may setTheme in the
 		// same tick — deferred passes pick up the final theme without coupling).

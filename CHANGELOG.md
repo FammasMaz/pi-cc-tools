@@ -3,6 +3,13 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.92 — 2026-10-24
+
+### Changed
+
+- **Terminal colors are on by default** - on pi 1.4 or newer, pi now follows the terminal's palette (Ghostty, Rex, ...) without `/cc-theme terminal on`. The first start switches to pi's `system` theme, saves the theme you had as `terminalThemePrevious`, and says so; `/cc-theme terminal off` (or `"terminalTheme": false`) restores that theme and keeps it. `pi --use-theme <name>` still wins for that run, and older pi versions are left alone.
+- **Branch connectors have one rule and no settings** - `├ └ │` are always a faint mark at a fixed 2:1 contrast against the terminal background, which keeps them visible on dark, light, and tinted themes. The `/cc-tools branch` command and the `toolBranchColorMode` / `toolBranchRgbGray` settings are removed; existing values are ignored. On pi before 1.4 the contrast is taken against black or white (rgb 72 on dark themes, as before).
+
 ## 1.0.91 — 2026-10-24
 
 ### Added

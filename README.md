@@ -28,8 +28,9 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Subagent completion notifications** restyled to match the same Claude-style tool rows
 - **RTK rewrite integration** that folds rewrite notices into the bash tool row with a muted `(RTK)` badge and expanded-only rewrite details
 - **Transparent tool backgrounds** in `transparent` or `border` mode
-- **Terminal colors** — `/cc-theme terminal on` makes pi's theme follow the terminal's own palette (Ghostty, Rex, kitty, WezTerm, …), including switches between two dark or two light themes
-- **Theme-adaptive palette** — borders, branch connectors, dim text, spinner accent, diff highlighting, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
+- **Terminal colors** (default, pi 1.4+) — pi's theme follows the terminal's own palette (Ghostty, Rex, kitty, WezTerm, …), including switches between two dark or two light themes; `/cc-theme terminal off` keeps a theme of your choice
+- **Theme-adaptive palette** — dim text, spinner accent, diff highlighting, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
+- **Faint branch connectors** — `├ └ │` keep the same faint contrast on every terminal background, dark or light
 - **Transparent edit/write diffs** tinted with the theme's own diff colors
 - **Grouped consecutive tool calls** with single-row summaries for repeated targets and per-tool glance rows for mixed work (set `groupToolCalls: false` to disable)
 - **Extra detail toggle** with `Ctrl+Shift+O`, increasing expanded preview caps without making the default view heavy
@@ -59,7 +60,7 @@ Set in `.pi/settings.json` or the active Pi agent settings file (`$PI_CODING_AGE
   "diffCollapsedLines": 24,
   "diffLayout": "auto",
   "themeAdaptive": true,
-  "terminalTheme": false
+  "terminalTheme": true
 }
 ```
 
@@ -71,8 +72,6 @@ When `themeAdaptive` is `true` (default), the following colors are derived from 
 
 | Element | Derived from |
 |---------|--------------|
-| Branch connectors (`├`, `└`, `│`) | terminal background blended toward its text color to a 2:1 contrast (rgb 72 on a near-black terminal); `/cc-tools branch theme` uses `dim` → `muted` → `borderMuted` instead, `/cc-tools branch <0-255>` an exact gray |
-| User box, tool rules, code fences, thinking rule | the same blend at a 5.1:1 contrast (rgb ~136 on a near-black terminal) |
 | "✻ Turn took Ns" line (final message only, with session total + turn count) | `muted` |
 | Expanded thinking-block text and `∴` marker | `muted` |
 | Diff add/remove accents | `toolDiffAdded` / `toolDiffRemoved` |
@@ -82,7 +81,9 @@ When `themeAdaptive` is `true` (default), the following colors are derived from 
 | Spinner verb text (`Working…`) | `borderAccent` (fallback: `accent`) |
 | Spinner status text | `muted` |
 
-These need pi 1.4 or newer, which exposes the theme's concrete colors. On older pi versions branch connectors stay rgb 72, diffs use `github-dark` / `github-light`, and diff tints are mixed against `toolSuccessBg`.
+These need pi 1.4 or newer, which exposes the theme's concrete colors. On older pi versions diffs use `github-dark` / `github-light`, and diff tints are mixed against `toolSuccessBg`.
+
+Branch connectors (`├`, `└`, `│`) and outlines (user box, tool rules, code fences, thinking rule) are neutral marks with nothing to configure. They blend the terminal's background toward its text color until they reach a fixed contrast: 2:1 for connectors (rgb 72 on a near-black terminal) and 5.1:1 for outlines (rgb ~136), so connectors stay faint but visible on dark, light, and tinted themes alike. On pi versions before 1.4, which don't report the terminal's colors, the same contrasts are taken against black or white.
 
 User-supplied `diffTheme` presets and `diffColors` overrides always win over theme-derived defaults. File-type icons (e.g. `ts`, `py`, `rs`) keep their language-identity colors and are not theme-derived.
 
@@ -92,13 +93,13 @@ On `/resume`, `/new`, or `/fork`, tool chrome is rebound from the **current** pi
 
 ### Terminal colors (Ghostty, Rex, …)
 
-`/cc-theme terminal on` switches pi to its built-in `system` theme, which builds every pi color from the palette the terminal reports, and keeps it there on every start. The theme you had before is saved as `terminalThemePrevious`; `/cc-theme terminal off` restores it.
+On by default: at startup the extension switches pi to its built-in `system` theme, which builds every pi color from the palette the terminal reports, and keeps it there on every start. The theme you had before is saved as `terminalThemePrevious`; `/cc-theme terminal off` (or `"terminalTheme": false`) restores it and keeps it. `pi --use-theme <name>` still picks the theme for that run, and on pi versions without the `system` theme (before 1.4) nothing changes.
 
 Pi already rebuilds the `system` theme when the terminal switches between light and dark. Terminals send no notification when you switch between two themes of the same kind, for example from one dark Rex theme to another, so this extension also asks the terminal for its color scheme whenever the terminal window regains focus (you went to the terminal's settings and came back). Pi then re-reads the palette and repaints only if the colors changed. The query is answered by Ghostty, Rex, and other terminals that support color scheme reports; in regular (non-fullscreen) mode the extension turns on focus reporting itself and keeps the focus events out of the editor.
 
 ```text
 /cc-theme terminal on       # follow the terminal's colors
-/cc-theme terminal off      # go back to the previous theme
+/cc-theme terminal off      # go back to the previous theme and keep it
 /cc-theme terminal status   # show the current state
 ```
 

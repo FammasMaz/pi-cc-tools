@@ -17,6 +17,6 @@
   "diffCollapsedLines": 24,
   "showTruncationHints": false,
   "themeAdaptive": true,
-  "terminalTheme": false,
+  "terminalTheme": true,
   "diffColors": {}
 }
