@@ -80,6 +80,10 @@ test("a group of calls reads as one sentence, with the calls behind ctrl+o", () 
 	group.setExpanded(true);
 	const expanded = visible(group.render(100));
 	assert.ok(expanded.some((line) => /npm test/.test(line)), `expanded shows each call: ${expanded.join(" / ")}`);
+	// Children hang under the sentence's first letter; each child's └ under the child's label.
+	const child = expanded.findIndex((line) => /● Read a\.ts/.test(line));
+	assert.equal(expanded[child].search(/[├└]/), expanded[0].indexOf("Read"), expanded.join(" / "));
+	assert.equal(expanded[child + 1].indexOf("└"), expanded[child].indexOf("Read a.ts"), expanded.join(" / "));
 });
 
 test("a tool without its own summary shows its argument, not its name twice", () => {
@@ -95,7 +99,7 @@ test("edit rows start in the same column as every other row", async () => {
 	const readLine = visible(finishedRow("read", { path: "s.py" }, "a = 1").render(100))[0];
 	assert.equal(editLines[0].indexOf("●"), readLine.indexOf("●"), `${JSON.stringify(editLines.slice(0, 3))} vs ${JSON.stringify(readLine)}`);
 	const branch = editLines.find((line) => /[├└]/.test(line)) ?? "";
-	assert.equal(branch.search(/[├└]/), readLine.indexOf("●"), "connectors sit under the dot");
+	assert.equal(branch.search(/[├└]/), readLine.indexOf("Read"), "connectors hang under the label's first letter");
 });
 
 test("a past prompt is one line marked ❯", () => {
@@ -130,7 +134,7 @@ test("pi-subagents' Agent rows, notices and widget use tool-row markers", () => 
 		status: "completed", toolUses: 2, tokens: "12.3k tokens", durationMs: 5200,
 	}, undefined).render(100));
 	assert.match(done[0], /^ ● Agent Check the tests \(Explore\)/);
-	assert.match(done[1], /^ └ Done · 2 tool uses · 12\.3k tokens · 5s/);
+	assert.match(done[1], /^ {3}└ Done · 2 tool uses · 12\.3k tokens · 5s/);
 
 	const notice = new CustomMessageComponent({
 		role: "custom", customType: "subagent-notification", display: true, content: "done",
@@ -138,8 +142,8 @@ test("pi-subagents' Agent rows, notices and widget use tool-row markers", () => 
 	} as any, () => undefined) as any;
 	const noticeLines = visible(notice.render(80));
 	assert.ok(noticeLines.includes(" ● Agent Check the tests completed"), noticeLines.join(" / "));
-	assert.ok(noticeLines.includes(" ├ 1 tool use · 28.5k tokens · 5s"));
-	assert.ok(noticeLines.includes(" └ Both tests pass."));
+	assert.ok(noticeLines.includes("   ├ 1 tool use · 28.5k tokens · 5s"), noticeLines.join(" / "));
+	assert.ok(noticeLines.includes("   └ Both tests pass."));
 
 	// The live widget, as pi-subagents draws it.
 	let factory: any;
@@ -159,6 +163,42 @@ test("pi-subagents' Agent rows, notices and widget use tool-row markers", () => 
 	}));
 	const widget = visible(factory({}, t).render(80));
 	assert.match(widget[0], /^ [●•· ] Agents$/);
-	assert.match(widget[1], /^ └ [●•· ] Agent {2}Check$/);
-	assert.equal(widget[2], "     running command…");
+	assert.match(widget[1], /^ {3}└ [●•· ] Agent {2}Check$/);
+	assert.equal(widget[2], "       running command…");
+});
+
+test("the status line under a command is dim, as in pi-polish; errors stay red", () => {
+	const dim = themes.theme.getFgAnsi("dim");
+	const error = themes.theme.getFgAnsi("error");
+	const statusOf = (row: any) => row.render(100).find((line: string) => /[├└]/.test(plain(line))) ?? "";
+	const grep = statusOf(finishedRow("grep", { pattern: "foo" }, "a.ts:1: foo\nb.ts:2: foo"));
+	assert.ok(grep.includes(`${dim}2 matches`), JSON.stringify(grep));
+	const bash = statusOf(finishedRow("bash", { command: "ls" }, "a\nb"));
+	assert.ok(bash.includes(`${dim}Done`), JSON.stringify(bash));
+	const failed = new ToolExecutionComponent("read", "read-err", { path: "missing.ts" }, { showImages: false }, tools.get("read"), ui, cwd) as any;
+	failed.setArgsComplete();
+	failed.updateResult({ content: [{ type: "text", text: "ENOENT: no such file" }], isError: true }, false);
+	const errorLine = statusOf(failed);
+	assert.ok(errorLine.includes(error) && !errorLine.includes(`${dim}ENOENT`), JSON.stringify(errorLine));
+});
+
+test("a running command's source keeps its color; only status lines are dim", async () => {
+	const fire = async (event: string) => {
+		for (const handler of handlers.get(event) ?? []) await handler({}, { ui: {}, hasUI: false });
+	};
+	const accent = themes.theme.getFgAnsi("accent");
+	const dim = themes.theme.getFgAnsi("dim");
+	await fire("agent_start");
+	try {
+		const row = new ToolExecutionComponent("bash", "bash-running", { command: "for f in *.py; do\n  echo $f\ndone" }, { showImages: false }, tools.get("bash"), ui, cwd) as any;
+		row.setArgsComplete();
+		row.markExecutionStarted();
+		const lines = row.render(100);
+		// The command preview under the header (the header's own summary is the first line).
+		const source = lines.find((line: string) => /[├└│]/.test(plain(line)) && plain(line).includes("for f in")) ?? "";
+		assert.ok(source, `command preview shown: ${JSON.stringify(lines.map(plain))}`);
+		assert.ok(source.includes(`${accent}for f in`) && !source.includes(`${dim}for f in`), JSON.stringify(source));
+	} finally {
+		await fire("agent_end");
+	}
 });

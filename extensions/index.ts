@@ -795,6 +795,17 @@ function stripLeadingToolStatus(line: string): string {
 	);
 }
 
+/** Remove up to `count` leading spaces, keeping any escape codes in front of them. */
+function trimAnsiLeftBy(text: string, count: number): string {
+	let current = text;
+	for (let i = 0; i < count; i++) {
+		const next = current.replace(/^((?:\x1b\[[0-9;]*m)*) /, "$1");
+		if (next === current) break;
+		current = next;
+	}
+	return current;
+}
+
 function trimAnsiLeft(text: string): string {
 	let current = text;
 	while (true) {
@@ -898,9 +909,14 @@ function getCollapsedToolEntryLine(entry: CollapsedToolEntry, width: number, gro
 }
 
 function getExpandedToolGroupLines(tool: any, width: number, groupedLabel?: string): string[] {
-	const lines = stripToolChrome(tool.render(Math.max(1, width)))
-		.map((line) => removeGroupedToolPrefix(line, groupedLabel))
-		.map((line) => tintGroupedToolLine(line, groupedLabel));
+	const rendered = stripToolChrome(tool.render(Math.max(1, width)));
+	// The child row's own padding is its first line's leading spaces. The header loses its
+	// marker and padding; the lines below lose only the padding, so the child's └ and the
+	// output under it keep their indent.
+	const childPad = /^ */.exec(stripAnsi(rendered[0] ?? ""))?.[0].length ?? 0;
+	const lines = rendered.map((line, index) =>
+		index === 0 ? tintGroupedToolLine(removeGroupedToolPrefix(line, groupedLabel), groupedLabel) : trimAnsiLeftBy(line, childPad),
+	);
 	return lines.length > 0 ? lines : [`${FG_DIM}${String(tool?.toolName ?? "tool")}${TRANSPARENT_RESET}`];
 }
 
@@ -908,13 +924,13 @@ function branchPrefix(index: number, total: number, theme?: Theme): string {
 	// Bare tee/corner only — no horizontal ─ arm.
 	const branch = index === total - 1 ? "└" : "├";
 	const rule = currentToolBranchAnsi(theme);
-	return ` ${rule}${branch}${TRANSPARENT_RESET} `;
+	return ` ${BRANCH_INDENT}${rule}${branch}${TRANSPARENT_RESET} `;
 }
 
 function branchContinuation(index: number, total: number, theme?: Theme): string {
 	const rule = currentToolBranchAnsi(theme);
 	// Match lead width of ` X ` (3 cols of structure + spaces handled outside).
-	return index === total - 1 ? "   " : ` ${rule}│${TRANSPARENT_RESET} `;
+	return index === total - 1 ? `   ${BRANCH_INDENT}` : ` ${BRANCH_INDENT}${rule}│${TRANSPARENT_RESET} `;
 }
 
 function formatBranchedToolLines(
@@ -938,8 +954,8 @@ function formatBranchedToolLines(
 		// Always strip any leftover status marker from the child call line before
 		// re-prefixing. Agent breathe used · which the old stripper missed, so the
 		// title walked sideways as size changed inside groups.
-		const body = lineIndex === 0 ? removeGroupedToolPrefix(line) : trimAnsiLeft(line);
-		const prefix = lineIndex === 0 ? `${branchPrefix(index, total)}${light} ` : `${branchContinuation(index, total)}  `;
+		const body = lineIndex === 0 ? removeGroupedToolPrefix(line) : line;
+		const prefix = lineIndex === 0 ? `${branchPrefix(index, total)}${light} ` : `${branchContinuation(index, total)}`;
 		output.push(clampLineWidth(`${prefix}${body}`, width));
 	}
 	return output;
@@ -1200,12 +1216,13 @@ class ToolGroupComponent extends Container {
 					const activeLine = stripAnsi(getCompactToolLine(active, Math.max(1, safeWidth - 3), undefined, false))
 						.trim()
 						.replace(/\s+\(\d+ lines?\)$/, "");
-					header.push(clampLineWidth(` ${currentToolBranchAnsi()}└${TRANSPARENT_RESET} ${FG_DIM}${activeLine}${TRANSPARENT_RESET}`, safeWidth));
+					const dim = safeFgAnsi(getGlobalPiTheme(), "dim") ?? FG_DIM;
+					header.push(clampLineWidth(` ${BRANCH_INDENT}${currentToolBranchAnsi()}└${TRANSPARENT_RESET} ${dim}${activeLine}${TRANSPARENT_RESET}`, safeWidth));
 				}
 			}
 			recordLines(header, undefined);
 			lines.push(...header);
-			const childWidth = Math.max(1, safeWidth - 6);
+			const childWidth = Math.max(1, safeWidth - 6 - BRANCH_INDENT.length);
 			if (this.expanded) {
 				for (let index = 0; index < total; index++) {
 					const tool = this.tools[index];
@@ -1439,7 +1456,7 @@ function formatTodoOverlayLines(lines: string[], width: number): string[] {
 		const withoutTodoHash = line.replace(/#(?=[A-Za-z0-9_-]+)/, "");
 		const bare = withoutTodoHash.replace(/([├└])─/, "$1");
 		const colored = bare.replace(/[├└]/, (branch) => `${currentToolBranchAnsi()}${branch}${TRANSPARENT_RESET}`);
-		return clampLineWidth(` ${colored}`, width);
+		return clampLineWidth(` ${BRANCH_INDENT}${colored}`, width);
 	});
 }
 
@@ -2671,7 +2688,7 @@ function renderSubagentNotificationLines(details: any, expanded: boolean, width:
 		const header = ` ${dot} ${theme.fg("toolTitle", theme.bold("Agent"))} ${theme.fg("accent", String(agent.description ?? "agent"))} ${theme.fg(failed ? "error" : "muted", statusLabel)}`;
 		const body: string[] = [];
 		const stats = agentStatsText(agent);
-		if (stats) body.push(theme.fg("muted", stats));
+		if (stats) body.push(theme.fg("dim", stats));
 		const preview = String(agent.resultPreview ?? "").trim();
 		if (preview) {
 			const previewLines = preview.split("\n");
@@ -2682,7 +2699,7 @@ function renderSubagentNotificationLines(details: any, expanded: boolean, width:
 			body.push(theme.fg("muted", `transcript: ${agent.outputFile}`));
 		}
 		const lines = [header];
-		body.forEach((line, index) => lines.push(` ${branchGlyph(index === body.length - 1 ? "└" : "├")} ${line}`));
+		body.forEach((line, index) => lines.push(` ${BRANCH_INDENT}${branchGlyph(index === body.length - 1 ? "└" : "├")} ${line}`));
 		blocks.push(lines.map((line) => clampLineWidth(line, width)));
 	}
 	return blocks.flatMap((block, index) => (index === 0 ? block : ["", ...block]));
@@ -2712,12 +2729,13 @@ function restyleAgentWidgetLines(lines: string[], width: number): string[] {
 			// The running spinner becomes the breathing dot running agent rows use.
 			rest = rest.replace(AGENT_WIDGET_SPINNER_RE, () => paintAgentBreatheDot(TOOL_STATUS_SUCCESS));
 			rest = normalizeLeadingCheckGlyph(rest);
-			return clampLineWidth(` ${branchGlyph(item[2] as "├" | "└")} ${rest}`, width);
+			return clampLineWidth(` ${BRANCH_INDENT}${branchGlyph(item[2] as "├" | "└")} ${rest}`, width);
 		}
 		const activity = AGENT_WIDGET_ACTIVITY_RE.exec(line);
 		if (activity) {
 			const bar = activity[2] === "│" ? branchGlyph("│") : " ";
-			return clampLineWidth(` ${bar}   ${FG_DIM}${stripAnsi(activity[5])}${TRANSPARENT_RESET}`, width);
+			const dim = safeFgAnsi(getGlobalPiTheme(), "dim") ?? FG_DIM;
+			return clampLineWidth(` ${BRANCH_INDENT}${bar}   ${dim}${stripAnsi(activity[5])}${TRANSPARENT_RESET}`, width);
 		}
 		return line;
 	});
@@ -3810,36 +3828,75 @@ function toolStatusDot(ctx: any, theme: Theme): string {
 // Branch connector — visual tree from header to output
 // ---------------------------------------------------------------------------
 
+// Connectors hang under the first letter of the tool's label, two columns in from its ●
+// (`● Edit stats.py` / `  └ +1 -1 at line 4`), like Claude Code and pi-polish.
+const BRANCH_INDENT = "  ";
+
 function branchIndent(text: string, continued = false, theme?: Theme): string {
 	const rule = currentToolBranchAnsi(theme);
 	// Align under bare `├ `/`└ ` (│ + one space, or two spaces when closed).
 	const prefix = continued ? `${rule}│${TRANSPARENT_RESET} ` : "  ";
-	return `${prefix}${WRAP_MARK}${text}`;
+	return `${BRANCH_INDENT}${prefix}${WRAP_MARK}${text}`;
 }
 
 function branchLead(text: string, continued = false, theme?: Theme): string {
 	const rule = currentToolBranchAnsi(theme);
 	// Bare tee/corner only — no horizontal ─ arm.
-	return `${rule}${continued ? "├" : "└"}${TRANSPARENT_RESET} ${WRAP_MARK}${text}`;
+	return `${BRANCH_INDENT}${rule}${continued ? "├" : "└"}${TRANSPARENT_RESET} ${WRAP_MARK}${text}`;
 }
 
-function withBranch(content: string, theme: Theme, _isError = false, continued = false): string {
+// SGR parameters that set a foreground color: 30–37, 39, 90–97, 38;5;n, 38;2;r;g;b.
+function stripForegroundAnsi(text: string): string {
+	return text.replace(/\x1b\[([0-9;]*)m/g, (match, paramsText: string) => {
+		if (paramsText === "") return match;
+		const params = paramsText.split(";");
+		const kept: string[] = [];
+		for (let i = 0; i < params.length; i++) {
+			const code = Number(params[i] || "0");
+			if (code === 38) {
+				const mode = Number(params[i + 1] || "0");
+				i += mode === 2 ? 4 : mode === 5 ? 2 : 1;
+				continue;
+			}
+			if ((code >= 30 && code <= 37) || code === 39 || (code >= 90 && code <= 97)) continue;
+			kept.push(params[i]);
+		}
+		return kept.length === 0 ? "" : `\x1b[${kept.join(";")}m`;
+	});
+}
+
+/**
+ * The status line under a tool's label ("Done (3 lines)", "2 matches", "+1 -1 at line 4")
+ * in the theme's dim color, as pi-polish draws it. Errors keep their red.
+ */
+function toneStatusLine(text: string, theme?: Theme): string {
+	const t = (theme ?? getGlobalPiTheme()) as any;
+	const dim = safeFgAnsi(t, "dim");
+	if (!dim || !text.trim()) return text;
+	const error = safeFgAnsi(t, "error");
+	if ((error && text.includes(error)) || text.includes(TOOL_STATUS_ERROR)) return text;
+	const body = stripForegroundAnsi(text).replace(/\x1b\[0?m/g, (reset) => `${reset}${dim}`);
+	return `${dim}${body}\x1b[39m`;
+}
+
+/** `tone`: the first line is a status line (dim); pass false when it is content (a command, a path). */
+function withBranch(content: string, theme: Theme, _isError = false, continued = false, tone = true): string {
 	if (!content || !content.trim()) return "";
 	const lines = content.split("\n");
-	const first = lines[0] ?? "";
+	const first = tone ? toneStatusLine(lines[0] ?? "", theme) : lines[0] ?? "";
 	if (lines.length === 1) return branchLead(first, continued, theme);
 	const rest = lines.slice(1).map((line) => branchIndent(line, continued, theme));
 	return `${branchLead(first, continued, theme)}\n${rest.join("\n")}`;
 }
 
-function withClippedBranch(content: string, theme: Theme, continued = false): string {
-	return withBranch(content, theme, false, continued).replaceAll(WRAP_MARK, CLIP_MARK);
+function withClippedBranch(content: string, theme: Theme, continued = false, tone = true): string {
+	return withBranch(content, theme, false, continued, tone).replaceAll(WRAP_MARK, CLIP_MARK);
 }
 
-function withFinalBranchBlock(content: string, theme: Theme, isError = false): string {
+function withFinalBranchBlock(content: string, theme: Theme, isError = false, tone = true): string {
 	if (!content || !content.trim()) return "";
 	const lines = content.split("\n");
-	const first = lines[0] ?? "";
+	const first = tone ? toneStatusLine(lines[0] ?? "", theme) : lines[0] ?? "";
 	if (lines.length === 1) return branchLead(first, false, theme);
 	const middle = lines.slice(1, -1).map((line) => branchIndent(line, true, theme));
 	const last = lines[lines.length - 1] ?? "";
@@ -4259,7 +4316,8 @@ function renderBashCommandBlock(
 		lines.push(`... ${presentation.sourceLines.length - sourceLimit} more command lines`);
 	}
 	const body = lines.map((line) => theme.fg("accent", line || " ")).join("\n");
-	return expanded ? withBranch(body, theme, false, true) : withClippedBranch(body, theme, true);
+	// The command itself, not a status line: keep its color.
+	return expanded ? withBranch(body, theme, false, true, false) : withClippedBranch(body, theme, true, false);
 }
 
 function liveToolPreviewEnabled(): boolean {
@@ -5220,7 +5278,7 @@ function termW(): number {
 	return Math.max(40, Math.min(raw - 4, MAX_TERM_WIDTH));
 }
 
-function branchDiffWidth(componentWidth?: number, chromeWidth = 2): number {
+function branchDiffWidth(componentWidth?: number, chromeWidth = 2 + BRANCH_INDENT.length): number {
 	const width = typeof componentWidth === "number" && Number.isFinite(componentWidth)
 		? Math.floor(componentWidth)
 		: termW();
@@ -5230,7 +5288,7 @@ function branchDiffWidth(componentWidth?: number, chromeWidth = 2): number {
 // Diff preview cache keys also carry _toolBranchVisualEpoch, which applyThemePaletteIfNeeded
 // bumps when the theme palette changes: otherwise rows rendered before a /theme or light/dark
 // switch kept the old diff backgrounds and stat colors while new rows used the new ones.
-function contextDiffWidth(ctx: any, chromeWidth = 2): number {
+function contextDiffWidth(ctx: any, chromeWidth = 2 + BRANCH_INDENT.length): number {
 	return branchDiffWidth(ctx.state?._diffComponentWidth, chromeWidth);
 }
 
@@ -5390,26 +5448,12 @@ function stripes(width: number): string {
 	return BG_BASE + FG_STRIPE + "╱".repeat(width) + D_RST;
 }
 
-function renderDiffStatBar(added: number, removed: number, width = termW()): string {
-	const total = added + removed;
-	if (total === 0 || width < 20) return "";
-	const slots = Math.max(8, Math.min(20, Math.floor(width / 14)));
-	let addSlots = Math.max(0, Math.min(slots, Math.round((added / total) * slots)));
-	if (added > 0 && addSlots === 0) addSlots = 1;
-	if (removed > 0 && addSlots >= slots) addSlots = slots - 1;
-	const removeSlots = Math.max(0, slots - addSlots);
-	const addBar = addSlots > 0 ? `${FG_ADD}${"━".repeat(addSlots)}${D_RST}` : "";
-	const removeBar = removeSlots > 0 ? `${FG_DEL}${"━".repeat(removeSlots)}${D_RST}` : "";
-	return `${FG_DIM}[${D_RST}${addBar}${removeBar}${FG_DIM}]${D_RST}`;
-}
-
 function summarizeDiff(added: number, removed: number): string {
 	const parts: string[] = [];
 	if (added > 0) parts.push(`${FG_ADD}+${added}${D_RST}`);
 	if (removed > 0) parts.push(`${FG_DEL}-${removed}${D_RST}`);
 	if (!parts.length) return `${FG_DIM}no changes${D_RST}`;
-	const bar = renderDiffStatBar(added, removed);
-	return bar ? `${parts.join(" ")} ${bar}` : parts.join(" ");
+	return parts.join(" ");
 }
 
 function diffSummaryWithMeta(added: number, removed: number, hunks: number, mode: string): string {
@@ -7570,7 +7614,8 @@ function renderBashFileEditResult(edit: BashFileEdit, records: BashFileEditRecor
 		const block = bashFileEditDiffBlock(record, index, theme, ctx);
 		return records!.length > 1 ? `${theme.fg("accent", sp(resolveBashEditPath(ctx.cwd ?? process.cwd(), edit, record.path)))}\n${block}` : block;
 	});
-	return makeResponsiveDiffText(ctx, ctx.lastComponent, withFinalBranchBlock(blocks.join("\n"), theme));
+	// With several files the first line is a path, not a status line.
+	return makeResponsiveDiffText(ctx, ctx.lastComponent, withFinalBranchBlock(blocks.join("\n"), theme, false, records.length === 1));
 }
 
 // ===========================================================================
@@ -8075,6 +8120,11 @@ export default function (pi: ExtensionAPI) {
 			const details = result.details as ReadToolDetails | undefined;
 			const content = result.content.find((block: any) => block?.type === "text");
 			if (content?.type !== "text") return makeText(ctx.lastComponent, withBranch(theme.fg("error", "No text content"), theme));
+			// A failed read (missing file, permission) said "1 lines loaded"; show the error instead.
+			if (ctx.isError) {
+				const message = content.text.trim().split("\n");
+				return makeText(ctx.lastComponent, withBranch(theme.fg("error", expanded ? message.join("\n") : message[0] ?? "Error"), theme));
+			}
 			const lines = content.text.split("\n");
 			let text = theme.fg("muted", `${lines.length} lines loaded`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " (truncated)");

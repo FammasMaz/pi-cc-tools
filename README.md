@@ -19,7 +19,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Claude-style OpenAI tool rendering** for `apply_patch` plus common Pi/OpenAI-style tools like `webfetch`, `web_search`, `fetch_content`, task tools, and context tools
 - **`apply_patch` diff previews** that render parsed file patches in the call phase, similar to `edit`/`write`
 - **Adaptive edit/write diffs** with split or unified layouts, syntax highlighting, and inline word-level emphasis
-- **Diff stat bar** with colored add/remove summary and hunk metadata
+- **Diff summary** under each edit: added/removed line counts and hunk metadata, in the same quiet color as every other status line
 - **Progressive collapsed diff hints** that shorten on narrow terminals
 - **Live-only thinking** (default) — only the actively-streaming thinking renders expanded; finished thinking collapses to a one-line `Thought for Xs` row (`/cc-tools thinking full` restores always-expanded, `Ctrl+O` still expands anything)
 - **MCP-aware rendering** with hidden, summary, and preview modes
@@ -31,7 +31,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Transparent tool backgrounds** in `transparent` or `border` mode
 - **Terminal colors** (default, pi 1.4+) — pi's theme follows the terminal's own palette (Ghostty, Rex, kitty, WezTerm, …), including switches between two dark or two light themes; `/cc-theme terminal off` keeps a theme of your choice
 - **Theme-adaptive palette** — dim text, spinner accent, diff highlighting, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
-- **Faint branch connectors** — `├ └ │` keep the same faint contrast on every terminal background, dark or light
+- **Faint branch connectors** — `├ └ │` hang under the first letter of the tool name, keep the same faint contrast on every terminal background, and the status line after them (`Done`, `2 matches`, `+1 -1`) is drawn in the theme's dim color, as in pi-polish
 - **Transparent edit/write diffs** tinted with the theme's own diff colors
 - **Grouped consecutive tool calls** read as one sentence: `Read 2 files, ran 1 shell command`, or while they run `Reading 2 files, running 1 shell command… · 3s` with the call in progress underneath. `Ctrl+O` shows every call (set `groupToolCalls: false` to disable)
 - **Activity status line** — while a tool runs, the working line says what it is doing (`Running npm test…`, `Reading stats.py…`, `Searching for TODO…`); the playful verbs stay for the time the model is thinking

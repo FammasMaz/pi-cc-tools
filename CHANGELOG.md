@@ -3,6 +3,17 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Changed
+
+- **Connectors hang under the tool name** - `├ └ │` start under the first letter of the label (`● Edit stats.py` / `  └ +1 -1 at line 4`) instead of under the `●`, in tool rows, expanded groups, subagent notices and the Agents widget. Expanded groups keep each call's own indentation, so output sits after its `└`.
+- **Status lines are dim** - the line under a command (`Done (3 lines)`, `2 matches`, `+1 -1 • 1 hunk at line 4`) is drawn in the theme's `dim` color, as pi-polish does; errors stay red. The colored `[━━━━]` bar is gone from diff summaries, since it carries nothing in one color.
+
+### Fixed
+
+- **A failed read said "1 lines loaded"**; it now shows the error.
+
 ## 1.0.93 — 2026-10-25
 
 ### Added
