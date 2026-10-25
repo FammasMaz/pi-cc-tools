@@ -7,6 +7,7 @@
 
 ### Changed
 
+- **The working line's token count climbs as the model writes**, like pi-polish: `↓ N tokens` now includes thinking and tool-call arguments while they stream (it only counted visible text, so it sat near zero while the model thought), each finished message adds the provider's real output-token count, and the count keeps going across the turns of one request instead of starting over after every tool call.
 - **Running bash commands no longer repeat their script under the row** by default. Set `bashCommandPreviewLines` (for example to `8`) to bring the preview back, for running and failed commands; `Ctrl+O` still shows the whole command.
 
 ## 1.0.94 — 2026-10-25

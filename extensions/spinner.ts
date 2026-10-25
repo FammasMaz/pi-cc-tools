@@ -545,22 +545,26 @@ function formatCount(value: number): string {
 	return new Intl.NumberFormat("en-US").format(value);
 }
 
-function estimateResponseLength(message: any): number {
-	if (!Array.isArray(message?.content)) return 0;
-	return message.content.reduce((sum: number, block: any) =>
-		sum + (block?.type === "text" && typeof block.text === "string" ? block.text.length : 0), 0);
-}
-
-function textBlockLengths(message: any): number[] {
-	if (!Array.isArray(message?.content)) return [];
-	const lengths: number[] = [];
-	for (let i = 0; i < message.content.length; i++) {
-		const block = message.content[i];
-		if (block?.type === "text" && typeof block.text === "string") {
-			lengths[i] = block.text.length;
+/** Characters the model produced in one content block: text, thinking, or tool-call arguments. */
+function contentBlockLength(block: any): number {
+	if (block?.type === "text" && typeof block.text === "string") return block.text.length;
+	if (block?.type === "thinking" && typeof block.thinking === "string") return block.thinking.length;
+	if (block?.type === "toolCall") {
+		try {
+			return JSON.stringify(block.arguments ?? {}).length;
+		} catch {
+			return 0;
 		}
 	}
-	return lengths;
+	return 0;
+}
+
+/** Output tokens of a finished assistant message: the provider's count, or an estimate (chars / 4). */
+function messageOutputTokens(message: any): number {
+	const reported = message?.usage?.output;
+	if (typeof reported === "number" && Number.isFinite(reported) && reported > 0) return reported;
+	if (!Array.isArray(message?.content)) return 0;
+	return Math.round(message.content.reduce((sum: number, block: any) => sum + contentBlockLength(block), 0) / 4);
 }
 
 function statusText(text: string): string {
@@ -776,8 +780,12 @@ export default function (pi: ExtensionAPI) {
 	let completionTimer: ReturnType<typeof setTimeout> | null = null;
 	let thoughtStatusTimer: ReturnType<typeof setTimeout> | null = null;
 	let currentVerb = "";
-	let responseLength = 0;
-	let responseTextBlockLengths: number[] = [];
+	// Output tokens for the whole run, like pi-polish: finished messages add their real
+	// usage.output; the message still streaming adds an estimate (chars / 4) of its text,
+	// thinking and tool-call arguments, so the count climbs as the model writes.
+	let runOutputTokens = 0;
+	let streamedChars = 0;
+	let streamedBlockLengths: number[] = [];
 	let thinkingStatus: "thinking" | number /* duration ms */ | null = null;
 	let thinkingStartTime = 0;
 	let thoughtForSetAt = 0;
@@ -803,7 +811,7 @@ export default function (pi: ExtensionAPI) {
 
 	function buildWorkingMessage(): string {
 		const elapsed = Date.now() - (agentStartTime || turnStartTime);
-		const tokenCount = Math.max(0, Math.round(responseLength / 4));
+		const tokenCount = outputTokenCount();
 		const statusParts: string[] = [];
 
 		if (thinkingStatus === "thinking") {
@@ -832,15 +840,27 @@ export default function (pi: ExtensionAPI) {
 		return message;
 	}
 
-	function setResponseTextBlockLength(index: number, length: number): void {
-		const previous = responseTextBlockLengths[index] ?? 0;
-		responseTextBlockLengths[index] = Math.max(0, length);
-		responseLength = Math.max(0, responseLength + responseTextBlockLengths[index] - previous);
+	function setStreamedBlockLength(index: number, length: number): void {
+		const previous = streamedBlockLengths[index] ?? 0;
+		streamedBlockLengths[index] = Math.max(0, length);
+		streamedChars = Math.max(0, streamedChars + streamedBlockLengths[index] - previous);
 	}
 
-	function resetResponseTracking(message?: any): void {
-		responseTextBlockLengths = message ? textBlockLengths(message) : [];
-		responseLength = message ? estimateResponseLength(message) : 0;
+	function resetStreamed(): void {
+		streamedBlockLengths = [];
+		streamedChars = 0;
+	}
+
+	function outputTokenCount(): number {
+		return runOutputTokens + Math.round(streamedChars / 4);
+	}
+
+	/** Start of a top-level request (not steering or follow-ups inside it). */
+	function beginRun(now = Date.now()): void {
+		if (agentStartTime) return;
+		agentStartTime = now;
+		runOutputTokens = 0;
+		resetStreamed();
 	}
 
 	function syncWorkingMessage(force = false): void {
@@ -877,7 +897,7 @@ export default function (pi: ExtensionAPI) {
 
 	function getWorkingMessageIntervalMs(): number {
 		const elapsed = Date.now() - (agentStartTime || turnStartTime);
-		const tokenCount = Math.max(0, Math.round(responseLength / 4));
+		const tokenCount = outputTokenCount();
 		// Keep ticking once per second even when idle so /cc-spinner changes
 		// take effect within ~1s and elapsed-time crossover into the timer-on
 		// state still fires close to 30s. syncWorkingMessage short-circuits
@@ -964,7 +984,8 @@ export default function (pi: ExtensionAPI) {
 		turnStartTime = 0;
 		thinkingStatus = null;
 		thoughtForSetAt = 0;
-		resetResponseTracking();
+		runOutputTokens = 0;
+		resetStreamed();
 		restoreDefaultWorkingMessage();
 	}
 
@@ -1008,12 +1029,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async () => {
 		// Start once per top-level request. Steering/follow-up messages while the
-		// agent is active must not reset the timer.
-		if (!agentStartTime) agentStartTime = Date.now();
+		// agent is active must not reset the timer or the token count.
+		beginRun();
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
-		if (!agentStartTime) agentStartTime = Date.now();
+		beginRun();
 		herdrMarkWorking(ctx);
 	});
 
@@ -1023,9 +1044,9 @@ export default function (pi: ExtensionAPI) {
 		activeCtx = ctx;
 		applyThemeColors(ctx.ui?.theme);
 		turnStartTime = Date.now();
-		if (!agentStartTime) agentStartTime = turnStartTime;
+		beginRun(turnStartTime);
 		currentVerb = pickVerb();
-		resetResponseTracking();
+		resetStreamed();
 		clearCompletionTimer();
 		if (typeof thinkingStatus !== "number" || Date.now() - thoughtForSetAt >= THOUGHT_DISPLAY_MS) {
 			thinkingStatus = null;
@@ -1044,21 +1065,19 @@ export default function (pi: ExtensionAPI) {
 		applyThemeColors(ctx.ui?.theme);
 		const evt = event.assistantMessageEvent;
 		let statusChanged = false;
-		const previousTokenCount = Math.max(0, Math.round(responseLength / 4));
+		const previousTokenCount = outputTokenCount();
 
 		if (evt.type === "start") {
-			resetResponseTracking();
-		} else if (evt.type === "text_start") {
-			setResponseTextBlockLength(evt.contentIndex, 0);
-		} else if (evt.type === "text_delta") {
-			const previous = responseTextBlockLengths[evt.contentIndex] ?? 0;
-			setResponseTextBlockLength(evt.contentIndex, previous + (typeof evt.delta === "string" ? evt.delta.length : 0));
-		} else if (evt.type === "text_end") {
-			setResponseTextBlockLength(evt.contentIndex, typeof evt.content === "string" ? evt.content.length : 0);
-		} else if (evt.type === "done") {
-			resetResponseTracking(evt.message);
-		} else if (evt.type === "error") {
-			resetResponseTracking(evt.error);
+			resetStreamed();
+		} else if (evt.type === "text_start" || evt.type === "thinking_start" || evt.type === "toolcall_start") {
+			setStreamedBlockLength(evt.contentIndex, 0);
+		} else if (evt.type === "text_delta" || evt.type === "thinking_delta" || evt.type === "toolcall_delta") {
+			const previous = streamedBlockLengths[evt.contentIndex] ?? 0;
+			setStreamedBlockLength(evt.contentIndex, previous + (typeof evt.delta === "string" ? evt.delta.length : 0));
+		} else if (evt.type === "text_end" || evt.type === "thinking_end") {
+			setStreamedBlockLength(evt.contentIndex, typeof evt.content === "string" ? evt.content.length : 0);
+		} else if (evt.type === "toolcall_end") {
+			setStreamedBlockLength(evt.contentIndex, contentBlockLength({ type: "toolCall", arguments: evt.toolCall?.arguments }));
 		}
 
 		if (evt.type === "thinking_start") {
@@ -1081,10 +1100,18 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const nextTokenCount = Math.max(0, Math.round(responseLength / 4));
+		const nextTokenCount = outputTokenCount();
 		if (previousTokenCount === 0 && nextTokenCount > 0) {
 			rescheduleRefreshLoop();
 		}
+	});
+
+	// A finished message swaps its estimate for the provider's real output-token count.
+	pi.on("message_end", async (event: any) => {
+		if (event?.message?.role !== "assistant") return;
+		runOutputTokens += messageOutputTokens(event.message);
+		resetStreamed();
+		if (turnActive) syncWorkingMessage();
 	});
 
 	pi.on("tool_execution_start", async (event: any, ctx) => {
@@ -1135,8 +1162,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		responseLength = 0;
-		responseTextBlockLengths = [];
+		resetStreamed();
 	});
 
 	pi.on("agent_end", async () => {

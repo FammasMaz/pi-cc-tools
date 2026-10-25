@@ -120,7 +120,7 @@ The selection is persisted to the active Pi agent settings file and applied to t
 
 #### Repaint the spinner with `/cc-spinner`
 
-While a tool runs, the verb names what it is doing (`Running npm test…`); otherwise it is a playful verb. The spinner glyph itself is still colored by pi's loader using `accent`, while the verb text (e.g. `Cooking…`) follows `borderAccent` by default so it stays lively without being the exact same color as the glyph. The status suffix (e.g. `(thinking · ↓ 10 tokens · 2s)`) follows `muted`. Use `/cc-spinner` to bind either text element to any other theme color key:
+While a tool runs, the verb names what it is doing (`Running npm test…`); otherwise it is a playful verb. The spinner glyph itself is still colored by pi's loader using `accent`, while the verb text (e.g. `Cooking…`) follows `borderAccent` by default so it stays lively without being the exact same color as the glyph. The status suffix (e.g. `(thinking · ↓ 331 tokens · 6s)`) follows `muted`; its token count covers everything the model has written for the current request, thinking and tool calls included, and climbs as it streams. Use `/cc-spinner` to bind either text element to any other theme color key:
 
 ```text
 /cc-spinner preview          # list every common theme key with a colored sample
