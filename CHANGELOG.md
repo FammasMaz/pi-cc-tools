@@ -3,6 +3,13 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Fixed
+
+- **Click to expand was unreliable in fullscreen.** While the transcript followed its end, a row opened by a click slid up and away from the mouse, so the next click landed on whatever moved under it; a row whose header had scrolled off the top seemed to ignore clicks (its new lines opened out of view); and the second click of a double-click undid the first. Clicked rows now stay where they are and open downward, the view scrolls just enough to show what opened (never past the row's header), the transcript keeps following its end if it is still at the bottom, and a double-click toggles once. Pi's own click handler on tool results goes through the same path.
+- **A wrapped last line continued under a `│`** (`└ Could not find …` / `│ newlines.`); it now continues under blank space.
+
 ## 1.0.98 — 2026-10-25
 
 ### Changed

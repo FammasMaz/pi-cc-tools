@@ -52,6 +52,7 @@ interface TuiMouseEvent {
 	y: number;
 	width: number;
 	height: number;
+	clickCount?: number;
 }
 interface TuiMouseEventResult {
 	handled?: boolean;
@@ -1136,7 +1137,7 @@ class ToolGroupComponent extends Container {
 			const targets = target.component
 				? Array.isArray(target.component) ? target.component : [target.component]
 				: this.tools;
-			return toggleGroupedTools(this, targets);
+			return toggleGroupedTools(this, targets, event);
 		}
 		return undefined;
 	}
@@ -1612,13 +1613,110 @@ function rememberMouseLayout(component: object, width: number, children: MouseLa
 	(component as { mouseLayout?: { width: number; children: MouseLayoutEntry[] } }).mouseLayout = { width, children };
 }
 
+/**
+ * A single left click. The second click of a double-click is left to pi (word selection):
+ * pi reports it as another click, and toggling on it undid the first one.
+ */
 function isPrimaryClick(event: TuiMouseEvent): boolean {
-	return event.type === "click" && event.button === "left";
+	return event.type === "click" && event.button === "left" && (event.clickCount ?? 1) === 1;
 }
 
-function toggleExpandedComponent(component: any): boolean {
+/**
+ * The fullscreen transcript follows its end: while you are at the bottom, anything that grows
+ * keeps the bottom pinned, so a row expanded by a click slid up and away from the mouse (and
+ * the next click hit whatever moved under it). Before expanding, stop following, so the row
+ * stays put and the new lines open below it. Once the new height is laid out (patched
+ * ScrollView.updateLayout below), scroll down just enough to show them, never past the row's
+ * header. Collapsing needs nothing: the position is kept, and the transcript follows its end
+ * again once it is back at the bottom.
+ */
+interface PendingReveal {
+	view: any;
+	/** Row top in transcript content lines, when known. */
+	top?: number;
+	component: any;
+	width: number;
+	until: number;
+}
+let pendingReveal: PendingReveal | undefined;
+const SCROLL_VIEW_PATCH_FLAG = Symbol.for("pi-claude-style-tools:scroll-view-reveal");
+
+/** Screen rect of a scroll view in the TUI's last layout. */
+function scrollViewRect(tui: any, view: any): { y: number; height: number } | undefined {
+	const visit = (box: any): any => {
+		if (!box) return undefined;
+		if (box.scrollView === view) return box.rect;
+		for (const child of box.children ?? []) {
+			const found = visit(child);
+			if (found) return found;
+		}
+		return undefined;
+	};
+	return visit(tui?.currentLayout?.root);
+}
+
+function keepClickedRowInPlace(ui: any, expanding: boolean, component?: any, event?: TuiMouseEvent): void {
+	if (!expanding) return;
+	try {
+		const tui = typeof ui?.getPrimaryScrollView === "function" ? ui : mouseDispatchTui;
+		const view = tui?.getPrimaryScrollView?.();
+		if (!view || typeof view.scrollTo !== "function") return;
+		if (view.isFollowingEnd === true) view.scrollTo(view.scrollTop, { disableFollow: true });
+		const screenY = (event as any)?.screenY;
+		const rect = scrollViewRect(tui, view);
+		pendingReveal = {
+			view,
+			top: component && event && typeof screenY === "number" && rect ? view.scrollTop + (screenY - event.y - rect.y) : undefined,
+			component,
+			width: event?.width ?? 0,
+			until: Date.now() + 1000,
+		};
+	} catch { /* regular (non-fullscreen) mode has no scroll view */ }
+}
+
+/**
+ * Scroll position that shows a just-expanded row: unchanged if it fits below, otherwise down
+ * just enough to show its end, but never past its header.
+ */
+export function revealScrollTop(rowTop: number, rowHeight: number, scrollTop: number, viewportHeight: number): number {
+	if (rowHeight <= 0 || viewportHeight <= 0) return scrollTop;
+	const overflow = rowTop + rowHeight - (scrollTop + viewportHeight);
+	if (overflow <= 0) return scrollTop;
+	return Math.max(scrollTop, Math.min(scrollTop + overflow, rowTop));
+}
+
+function patchScrollViewReveal(): void {
+	const proto = (PiTui as any).ScrollView?.prototype;
+	if (!proto || proto[SCROLL_VIEW_PATCH_FLAG] || typeof proto.updateLayout !== "function") return;
+	const original = proto.updateLayout;
+	proto.updateLayout = function patchedUpdateLayout(this: any, ...args: any[]) {
+		const result = original.apply(this, args);
+		const reveal = pendingReveal;
+		if (!reveal || reveal.view !== this) return result;
+		pendingReveal = undefined;
+		if (Date.now() > reveal.until) return result;
+		try {
+			const viewport = this.viewportHeight;
+			if (reveal.top !== undefined && reveal.component && reveal.width > 0) {
+				const height = reveal.component.render(reveal.width)?.length ?? 0;
+				const target = revealScrollTop(reveal.top, height, this.scrollTop, viewport);
+				if (target !== this.scrollTop) this.scrollTo(target);
+			}
+			// Still at the bottom (the row fit, or did not grow): keep following the end, so
+			// new output keeps scrolling in and no "jump to latest" prompt appears.
+			const maxScrollTop = Math.max(0, (this.contentHeight ?? 0) - viewport);
+			if (this.scrollTop >= maxScrollTop && this.isFollowingEnd !== true) this.scrollTo(maxScrollTop);
+		} catch { /* layout changed under us */ }
+		return result;
+	};
+	proto[SCROLL_VIEW_PATCH_FLAG] = true;
+}
+
+function toggleExpandedComponent(component: any, event?: TuiMouseEvent): boolean {
 	if (!component || typeof component.setExpanded !== "function") return false;
-	component.setExpanded(component.expanded !== true);
+	const expanding = component.expanded !== true;
+	keepClickedRowInPlace(component.ui, expanding, component, event);
+	component.setExpanded(expanding);
 	return true;
 }
 
@@ -1643,10 +1741,11 @@ function mouseLayoutTarget(
 	return layout.children.find((entry) => event.y >= entry.top && event.y < entry.top + entry.height);
 }
 
-function toggleGroupedTools(group: any, tools: any[]): { handled: true } | undefined {
+function toggleGroupedTools(group: any, tools: any[], event?: TuiMouseEvent): { handled: true } | undefined {
 	const targets = tools.filter((tool) => typeof tool?.setExpanded === "function");
 	if (targets.length === 0) return undefined;
 	const expanded = targets.some((tool) => tool.expanded !== true);
+	keepClickedRowInPlace(targets.find((tool) => tool?.ui)?.ui, expanded, group, event);
 	for (const tool of targets) tool.setExpanded(expanded);
 	if (Array.isArray(group?.tools)) group.expanded = group.tools.some((tool: any) => tool?.expanded === true);
 	group.invalidate?.();
@@ -1656,6 +1755,8 @@ function toggleGroupedTools(group: any, tools: any[]): { handled: true } | undef
 }
 
 let hoveredClickTarget: { owner: object; clear: () => void } | undefined;
+/** The fullscreen TUI dispatching the current mouse event (components like assistant messages have no `ui`). */
+let mouseDispatchTui: any;
 let hoverClaimedThisMove = false;
 
 function claimClickHover(owner: object, clear: () => void): void {
@@ -1671,6 +1772,7 @@ function patchFullscreenHoverExit(): void {
 	if (!proto || proto[FULLSCREEN_HOVER_PATCH_FLAG] || typeof proto.handleMouseEvent !== "function") return;
 	const originalHandleMouse = proto.handleMouseEvent;
 	proto.handleMouseEvent = function patchedFullscreenMouseEvent(raw: { button: number }) {
+		mouseDispatchTui = this;
 		const isMove = (raw.button & 35) === 35;
 		if (isMove) hoverClaimedThisMove = false;
 		const result = originalHandleMouse.call(this, raw);
@@ -3236,7 +3338,9 @@ function patchAssistantFullscreenMouse(): void {
 				? this.thinkingVisibilityOverrides
 				: new Map();
 			this.thinkingVisibilityOverrides = overrides;
-			overrides.set(0, hovered instanceof ThinkingParagraph);
+			const expanding = hovered instanceof ThinkingParagraph;
+			keepClickedRowInPlace(undefined, expanding, this, event);
+			overrides.set(0, expanding);
 			this.updateContent(this.lastMessage);
 			return { handled: true };
 		}
@@ -3271,7 +3375,28 @@ function patchToolFullscreenMouse(): void {
 		rendered[titleIndex] = brightenRenderedLine(rendered[titleIndex]);
 		return rendered;
 	};
+	// Pi wraps a row's result in a MouseRegion that flips `expanded` on every left click. Route
+	// that through the same toggle as the rest of the row: it ignored the second click of a
+	// double-click (undoing the first), and while the transcript followed its end the new lines
+	// opened out of view, so clicking a row could look like it did nothing.
+	const originalCreateResultRegion = proto.createResultRegion;
+	if (typeof originalCreateResultRegion === "function") {
+		proto.createResultRegion = function patchedCreateResultRegion(this: any, component: unknown) {
+			const region = originalCreateResultRegion.call(this, component);
+			if (region && typeof region.onMouse === "function") {
+				const tool = this;
+				region.onMouse = (event: TuiMouseEvent) => {
+					if (event.type !== "click" || event.button !== "left") return undefined;
+					if (!isPrimaryClick(event) || !tool.result) return undefined;
+					return toggleToolRowByClick(tool, tool[TOOL_MOUSE_EVENT_KEY] ?? event);
+				};
+			}
+			return region;
+		};
+	}
 	proto.handleMouse = function patchedToolHandleMouse(event: TuiMouseEvent) {
+		// The row-level event (the region below sees coordinates relative to itself).
+		this[TOOL_MOUSE_EVENT_KEY] = event;
 		if (event.type === "move") {
 			claimClickHover(this, () => { if (setToolHover(this, false)) requestComponentRender(this); });
 			return setToolHover(this, true) ? { handled: true, render: true } : undefined;
@@ -3282,15 +3407,19 @@ function patchToolFullscreenMouse(): void {
 		// reach here only when no nested region claimed the click, including the
 		// blank outline padding our container patch paints around the content.
 		if (!isPrimaryClick(event) || !this.result) return undefined;
-		const group = this[COMPONENT_PARENT];
-		if (group?.constructor?.name === "ToolGroupComponent") {
-			return toggleGroupedTools(group, [this]);
-		}
-		if (!toggleExpandedComponent(this)) return undefined;
-		requestComponentRender(this);
-		return { handled: true };
+		return toggleToolRowByClick(this, event);
 	};
 	proto[TOOL_MOUSE_PATCH_FLAG] = true;
+}
+
+const TOOL_MOUSE_EVENT_KEY = Symbol.for("pi-claude-style-tools:tool-mouse-event");
+
+function toggleToolRowByClick(tool: any, event: TuiMouseEvent): { handled: true } | undefined {
+	const group = tool[COMPONENT_PARENT];
+	if (group?.constructor?.name === "ToolGroupComponent") return toggleGroupedTools(group, [tool], event);
+	if (!toggleExpandedComponent(tool, event)) return undefined;
+	requestComponentRender(tool);
+	return { handled: true };
 }
 
 function patchToolExecutionBackgroundSync(): void {
@@ -4164,6 +4293,8 @@ function markedContinuationPrefix(prefix: string): string {
 	const branchMatch = /^(\s*)(│  |│ |├─ |└─ |├ |└ )/.exec(plain);
 	if (branchMatch) {
 		const indent = branchMatch[1];
+		// The last branch (└) has nothing below it: its wrapped lines continue under blank space.
+		if (branchMatch[2].startsWith("└")) return `${indent}${" ".repeat(visibleWidth(branchMatch[2]))}`;
 		// Keep the same structure width as the lead glyph so wraps stay aligned.
 		const pad = Math.max(0, visibleWidth(branchMatch[2]) - 1);
 		return `${indent}${currentToolBranchAnsi()}│${TRANSPARENT_RESET}${" ".repeat(pad)}`;
@@ -7648,6 +7779,7 @@ export default function (pi: ExtensionAPI) {
 	patchToolRenderCacheInvalidation();
 	patchReadImageExpansion();
 	patchFullscreenHoverExit();
+	patchScrollViewReveal();
 	patchToolFullscreenMouse();
 	patchContainerParentTracking();
 	patchGlobalToolBorders();
