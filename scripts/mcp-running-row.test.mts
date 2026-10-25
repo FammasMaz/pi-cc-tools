@@ -94,5 +94,6 @@ test("a group of direct MCP tools lists the tool names, not the mcp prefix", () 
 	const [group] = chat.children as any[];
 	assert.ok(Array.isArray(group?.tools), "the two rows are grouped");
 	const [header] = visible(group.render(110));
-	assert.match(header, /Multiple Tools: 2 done • Agent, Ctx Reduce/);
+	assert.match(header, /Called Agent, Ctx Reduce/);
+	assert.doesNotMatch(header, /mcp/i);
 });

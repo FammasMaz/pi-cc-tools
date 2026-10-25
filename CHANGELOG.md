@@ -3,6 +3,22 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Added
+
+- **Grouped tool calls read as one sentence** - a run of calls collapses to `Read 2 files, ran 1 shell command` instead of a header plus a row per call. While they run it says `Reading 2 files, running 1 shell command… · 3s` with the call in progress underneath; `Ctrl+O` still shows every call. Inspired by [pi-polish](https://github.com/Pringled/pi-extensions/tree/main/packages/pi-polish).
+- **The working line says what is happening** - while a tool runs it reads `Running npm test…`, `Reading stats.py…`, `Searching for TODO…` or `Waiting for agent: …`; the playful verbs remain while the model thinks.
+- **`❯` prompt markers** - past prompts are one line in the theme's prompt color starting with `❯`, instead of a box labelled `User`, and the input line gets the same `❯`.
+- **Shell file edits are drawn as edits** - bash calls that only change files (`sed -i`, `perl -pi`, `cat > file <<EOF`, `tee`, `echo … > file`) show as `Edit (sed) stats.py` or `Create (heredoc) notes.md` with a diff, taken from the file before and after the command. The command and what the model sees are unchanged; the diff is kept with the row, so it shows again after a resume. These rows are never folded into a group.
+- **[pi-subagents](https://github.com/tintinweb/pi-subagents) support** - `Agent` rows show the agent type, what a running agent is doing, and its tool uses, tokens and time when done. Completion notices and the live "Agents" widget use the same green dots, connectors and indentation as tool rows (they used pink markers, `└─` arms, and a column of their own).
+
+### Fixed
+
+- **Edit rows were indented one column further than every other row** on pi 1.4, along with their diff.
+- **Tools without a summary of their own repeated their name** (`Ctx Reduce Ctx Reduce`); they now show their main argument.
+- **Kotlin script files (`.kts`) were not syntax-highlighted** in diffs.
+
 ## 1.0.92 — 2026-10-24
 
 ### Changed

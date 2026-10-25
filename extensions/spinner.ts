@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import net from "node:net";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Loader } from "@earendil-works/pi-tui";
@@ -476,6 +476,61 @@ function pickVerb(): string {
 }
 
 /** Format elapsed ms as compact duration: 5s, 1m 23s, 1h 2m 3s */
+// What a running tool is doing, for the working line ("Running npm test…",
+// "Reading stats.py…"). Random verbs stay for the time the model is thinking.
+function clip(text: string, max: number): string {
+	const oneLine = text.split("\n")[0]?.trim() ?? "";
+	return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+}
+
+function humanizeToolName(name: string): string {
+	const direct = /^mcp__.+?__(.+)$/.exec(name);
+	return (direct ? direct[1] : name)
+		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+		.replace(/[_-]+/g, " ")
+		.replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+export function describeToolActivity(name: string, args: any): string {
+	const str = (...keys: string[]): string => {
+		for (const key of keys) {
+			const value = args?.[key];
+			if (typeof value === "string" && value.trim()) return value.trim();
+		}
+		return "";
+	};
+	const file = basename(str("path", "file_path"));
+	switch (name) {
+		case "bash": {
+			const command = clip(str("command"), 50);
+			return command ? `Running ${command}` : "Running a shell command";
+		}
+		case "read":
+			return file ? `Reading ${file}` : "Reading a file";
+		case "edit":
+			return file ? `Editing ${file}` : "Editing a file";
+		case "write":
+			return file ? `Writing ${file}` : "Writing a file";
+		case "grep":
+		case "find": {
+			const pattern = clip(str("pattern"), 40);
+			return pattern ? `Searching for ${pattern}` : "Searching";
+		}
+		case "ls":
+			return `Listing ${str("path") || "."}`;
+		case "Agent": {
+			const description = clip(str("description"), 50);
+			return description ? `Waiting for agent: ${description}` : "Waiting for an agent";
+		}
+		case "ask_user_question":
+		case "questionnaire":
+		case "question":
+			return "Waiting for your answer";
+		default:
+			return `Running ${humanizeToolName(name)}`;
+	}
+}
+
 function formatDuration(ms: number): string {
 	const totalSec = Math.floor(ms / 1000);
 	const h = Math.floor(totalSec / 3600);
@@ -730,6 +785,8 @@ export default function (pi: ExtensionAPI) {
 	let turnActive = false;
 	let lastWorkingMessage: string | null = null;
 	let activeCtx: { ui: any; hasUI: boolean } | null = null;
+	// Tools running right now, in start order; the latest one names the working line.
+	const runningTools = new Map<string, { name: string; args: unknown }>();
 	// Root interactive session only — nested/non-UI contexts must not fight
 	// herdr state authority for this pane.
 	let herdrRootSession = false;
@@ -763,7 +820,12 @@ export default function (pi: ExtensionAPI) {
 			statusParts.push(formatDuration(elapsed));
 		}
 
-		let message = `${CLAUDE_ORANGE}${currentVerb}…${RESET}`;
+		const running = [...runningTools.values()];
+		const latest = running[running.length - 1];
+		const verb = latest
+			? `${describeToolActivity(latest.name, latest.args)}${running.length > 1 ? ` (+${running.length - 1} more)` : ""}`
+			: currentVerb;
+		let message = `${CLAUDE_ORANGE}${verb}…${RESET}`;
 		if (statusParts.length > 0) {
 			message += statusText(` (${statusParts.join(" · ")})`);
 		}
@@ -1025,6 +1087,19 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	pi.on("tool_execution_start", async (event: any, ctx) => {
+		if (typeof event?.toolCallId !== "string") return;
+		activeCtx = ctx;
+		runningTools.set(event.toolCallId, { name: String(event.toolName ?? ""), args: event.args });
+		if (turnActive) syncWorkingMessage(true);
+	});
+
+	pi.on("tool_execution_end", async (event: any, ctx) => {
+		if (typeof event?.toolCallId !== "string" || !runningTools.delete(event.toolCallId)) return;
+		activeCtx = ctx;
+		if (turnActive) syncWorkingMessage(true);
+	});
+
 	pi.on("turn_end", async (_event, ctx) => {
 		turnActive = false;
 		activeCtx = ctx;
@@ -1067,6 +1142,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_end", async () => {
 		turnActive = false;
 		agentStartTime = 0;
+		runningTools.clear();
 		// Preserve the just-finished "Turn took …" line. Pi emits agent_end
 		// immediately after the final turn, so clearing here made the completion
 		// status disappear before users could see it.
@@ -1088,6 +1164,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		turnActive = false;
+		runningTools.clear();
 		clearDisplay();
 		herdrMarkIdle(undefined, true);
 		herdrRootSession = false;

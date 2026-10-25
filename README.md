@@ -25,14 +25,17 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **MCP-aware rendering** with hidden, summary, and preview modes
 - **Configurable output modes** for read, search, bash, and MCP results
 - **Live running previews** that show a few output lines for active tool calls (latest lines for bash), persisting until the next tool/text activity
-- **Subagent completion notifications** restyled to match the same Claude-style tool rows
+- **[pi-subagents](https://github.com/tintinweb/pi-subagents) support** — `Agent` rows show what a running agent is doing and its tool uses, tokens and time; completion notices and the live "Agents" widget use the same dots, connectors and indentation as tool rows
+- **Shell file edits drawn as edits** — a bash call that only changes files (`sed -i`, `perl -pi`, a heredoc, `echo … > file`) shows as `Edit (sed) path` or `Create (heredoc) path` with a diff of what changed. The command runs unchanged and the model sees the same output; only the row is drawn differently
 - **RTK rewrite integration** that folds rewrite notices into the bash tool row with a muted `(RTK)` badge and expanded-only rewrite details
 - **Transparent tool backgrounds** in `transparent` or `border` mode
 - **Terminal colors** (default, pi 1.4+) — pi's theme follows the terminal's own palette (Ghostty, Rex, kitty, WezTerm, …), including switches between two dark or two light themes; `/cc-theme terminal off` keeps a theme of your choice
 - **Theme-adaptive palette** — dim text, spinner accent, diff highlighting, and diff backgrounds automatically follow the active pi theme (set `themeAdaptive: false` to keep the fixed Claude-style palette)
 - **Faint branch connectors** — `├ └ │` keep the same faint contrast on every terminal background, dark or light
 - **Transparent edit/write diffs** tinted with the theme's own diff colors
-- **Grouped consecutive tool calls** with single-row summaries for repeated targets and per-tool glance rows for mixed work (set `groupToolCalls: false` to disable)
+- **Grouped consecutive tool calls** read as one sentence: `Read 2 files, ran 1 shell command`, or while they run `Reading 2 files, running 1 shell command… · 3s` with the call in progress underneath. `Ctrl+O` shows every call (set `groupToolCalls: false` to disable)
+- **Activity status line** — while a tool runs, the working line says what it is doing (`Running npm test…`, `Reading stats.py…`, `Searching for TODO…`); the playful verbs stay for the time the model is thinking
+- **`❯` prompt markers** — past prompts are one highlighted line starting with `❯`, and the input line gets the same marker, in the column where tool rows put their `●`
 - **Extra detail toggle** with `Ctrl+Shift+O`, increasing expanded preview caps without making the default view heavy
 - **Global border patch** for all tool rows, including unknown/custom tools
 
@@ -117,7 +120,7 @@ The selection is persisted to the active Pi agent settings file and applied to t
 
 #### Repaint the spinner with `/cc-spinner`
 
-The spinner glyph itself is still colored by pi's loader using `accent`, while the verb text (e.g. `Cooking…`) follows `borderAccent` by default so it stays lively without being the exact same color as the glyph. The status suffix (e.g. `(thinking · ↓ 10 tokens · 2s)`) follows `muted`. Use `/cc-spinner` to bind either text element to any other theme color key:
+While a tool runs, the verb names what it is doing (`Running npm test…`); otherwise it is a playful verb. The spinner glyph itself is still colored by pi's loader using `accent`, while the verb text (e.g. `Cooking…`) follows `borderAccent` by default so it stays lively without being the exact same color as the glyph. The status suffix (e.g. `(thinking · ↓ 10 tokens · 2s)`) follows `muted`. Use `/cc-spinner` to bind either text element to any other theme color key:
 
 ```text
 /cc-spinner preview          # list every common theme key with a colored sample
@@ -190,3 +193,4 @@ This project builds upon and was inspired by the excellent work of:
 - **[@heyhuynhgiabuu/pi-pretty](https://github.com/buddingnewinsights/pi-pretty)** by [huynhgiabuu](https://github.com/buddingnewinsights) — Pretty terminal output with syntax-highlighted file reads, colored bash output, and tree-view directory listings
 - **[@heyhuynhgiabuu/pi-diff](https://github.com/buddingnewinsights/pi-diff)** by [huynhgiabuu](https://github.com/buddingnewinsights) — Shiki-powered terminal diff renderer with word-level diffs in split and unified views
 - **[pi-tool-display](https://github.com/MasuRii/pi-tool-display)** by [MasuRii](https://github.com/MasuRii) — Compact tool call rendering, diff visualization, and output truncation
+- **[pi-polish](https://github.com/Pringled/pi-extensions/tree/main/packages/pi-polish)** by [Thomas van Dongen](https://github.com/Pringled) — Claude Code-style output for Pi; the one-sentence tool groups, the activity status line, and the `❯` prompt markers follow its design
