@@ -154,18 +154,23 @@ test("pi-subagents' Agent rows, notices and widget use tool-row markers", () => 
 	};
 	for (const handler of handlers.get("session_start") ?? []) handler({ reason: "startup" }, { hasUI: true, ui: sessionUi });
 	const t = themes.theme;
+	let frame = "⠹";
 	sessionUi.setWidget("agents", () => ({
 		render: () => [
 			t.fg("accent", "●") + " " + t.fg("accent", "Agents"),
-			t.fg("dim", "└─") + ` ${t.fg("accent", "⠹")} ${t.bold("Agent")}  ${t.fg("muted", "Check")}`,
+			t.fg("dim", "└─") + ` ${t.fg("accent", frame)} ${t.bold("Agent")}  ${t.fg("muted", "Check")}`,
 			"   " + t.fg("dim", "  ⎿  running command…"),
 		],
 		invalidate() {},
 	}));
-	const widget = visible(factory({}, t).render(80));
-	assert.match(widget[0], /^ [●•· ] Agents$/);
-	assert.match(widget[1], /^ {3}└ [●•· ] Agent {2}Check$/);
+	const component = factory({}, t);
+	const widget = visible(component.render(80));
+	assert.equal(widget[0], " ● Agents");
+	assert.equal(widget[1], "   └ ⠹ Agent  Check");
 	assert.equal(widget[2], "       running command…");
+	// pi-subagents' own spinner passes through, so it keeps animating on its timer.
+	frame = "⠼";
+	assert.equal(visible(component.render(80))[1], "   └ ⠼ Agent  Check");
 });
 
 test("the status line under a command is dim, as in pi-polish; errors stay red", () => {

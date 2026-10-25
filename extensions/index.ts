@@ -2710,25 +2710,21 @@ const ANSI_PREFIX = "((?:\\x1b\\[[0-9;]*m)*)";
 const AGENT_WIDGET_HEADING_RE = new RegExp(`^${ANSI_PREFIX}([●○])${ANSI_PREFIX}\\s+${ANSI_PREFIX}Agents`);
 const AGENT_WIDGET_ITEM_RE = new RegExp(`^${ANSI_PREFIX}([├└])─${ANSI_PREFIX} (.*)$`);
 const AGENT_WIDGET_ACTIVITY_RE = new RegExp(`^${ANSI_PREFIX}(│| )  ${ANSI_PREFIX}(?:${ANSI_PREFIX})?\\s*⎿\\s+(.*)$`);
-const AGENT_WIDGET_SPINNER_RE = new RegExp(`^${ANSI_PREFIX}[\\u2800-\\u28ff]${ANSI_PREFIX}`);
 
-/** pi-subagents' "Agents" widget lines, re-indented and re-marked to match tool rows. */
+/**
+ * pi-subagents' "Agents" widget lines, re-indented to match tool rows. Running agents keep
+ * pi-subagents' own spinner: it advances on pi-subagents' timer, which keeps running after the
+ * turn ends, while our tool-row animation only advances while a tool row is busy.
+ */
 function restyleAgentWidgetLines(lines: string[], width: number): string[] {
 	if (!Array.isArray(lines)) return lines;
 	return lines.map((line) => {
 		if (typeof line !== "string") return line;
 		const heading = AGENT_WIDGET_HEADING_RE.exec(line);
-		if (heading) {
-			const active = heading[2] === "●";
-			const dot = active ? paintAgentBreatheDot(TOOL_STATUS_SUCCESS) : paintStatusDot(TOOL_STATUS_SUCCESS);
-			return clampLineWidth(` ${dot} Agents`, width);
-		}
+		if (heading) return clampLineWidth(` ${paintStatusDot(TOOL_STATUS_SUCCESS)} Agents`, width);
 		const item = AGENT_WIDGET_ITEM_RE.exec(line);
 		if (item) {
-			let rest = item[4];
-			// The running spinner becomes the breathing dot running agent rows use.
-			rest = rest.replace(AGENT_WIDGET_SPINNER_RE, () => paintAgentBreatheDot(TOOL_STATUS_SUCCESS));
-			rest = normalizeLeadingCheckGlyph(rest);
+			const rest = normalizeLeadingCheckGlyph(item[4]);
 			return clampLineWidth(` ${BRANCH_INDENT}${branchGlyph(item[2] as "├" | "└")} ${rest}`, width);
 		}
 		const activity = AGENT_WIDGET_ACTIVITY_RE.exec(line);
