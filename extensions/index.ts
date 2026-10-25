@@ -4318,8 +4318,10 @@ function renderBashCommandBlock(
 	return expanded ? withBranch(body, theme, false, true, false) : withClippedBranch(body, theme, true, false);
 }
 
+// Off by default: a running row is its header, blinking dot and line count, like pi-polish.
+// `liveToolPreview: true` shows the latest output lines under it (and keeps bash's tail after).
 function liveToolPreviewEnabled(): boolean {
-	return readSettings().liveToolPreview !== false;
+	return readSettings().liveToolPreview === true;
 }
 
 function liveToolPreviewLimit(): number {

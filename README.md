@@ -24,7 +24,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Live-only thinking** (default) — only the actively-streaming thinking renders expanded; finished thinking collapses to a one-line `Thought for Xs` row (`/cc-tools thinking full` restores always-expanded, `Ctrl+O` still expands anything)
 - **MCP-aware rendering** with hidden, summary, and preview modes
 - **Configurable output modes** for read, search, bash, and MCP results
-- **Live running previews** that show a few output lines for active tool calls (latest lines for bash), persisting until the next tool/text activity
+- **Quiet running rows** — a running tool shows its header, a blinking dot and a line count; `liveToolPreview: true` adds a few live output lines (latest lines for bash), kept until the next tool/text activity
 - **[pi-subagents](https://github.com/tintinweb/pi-subagents) support** — `Agent` rows show what a running agent is doing and its tool uses, tokens and time; completion notices and the live "Agents" widget use the same dots, connectors and indentation as tool rows
 - **Shell file edits drawn as edits** — a bash call that only changes files (`sed -i`, `perl -pi`, a heredoc, `echo … > file`) shows as `Edit (sed) path` or `Create (heredoc) path` with a diff of what changed. The command runs unchanged and the model sees the same output; only the row is drawn differently
 - **RTK rewrite integration** that folds rewrite notices into the bash tool row with a muted `(RTK)` badge and expanded-only rewrite details
@@ -58,7 +58,7 @@ Set in `.pi/settings.json` or the active Pi agent settings file (`$PI_CODING_AGE
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
   "bashCommandPreviewLines": 0,
-  "liveToolPreview": true,
+  "liveToolPreview": false,
   "liveToolPreviewLines": 5,
   "diffCollapsedLines": 24,
   "diffLayout": "auto",
@@ -172,7 +172,7 @@ Use `/cc-tools` to control tool UI at runtime:
 | `thinkingMode` | `live` | `live` = only streaming thinking expands (finished collapse to `Thought for Xs`); `full` = always expanded |
 | `bashCollapsedLines` | `10` | Lines for collapsed bash output |
 | `bashCommandPreviewLines` | `0` | Script lines of a multi-line command shown under the row while bash runs or after it fails (for example `8`); `0` shows none. `Ctrl+O` always shows the whole command |
-| `liveToolPreview` | `true` | Show a small live output preview while tools are still running |
+| `liveToolPreview` | `false` | Show the latest output lines under a running tool (and keep bash's last lines once it finishes) |
 | `liveToolPreviewLines` | `5` | Lines shown in the collapsed live preview |
 | `diffCollapsedLines` | `24` | Diff lines before collapsing |
 | `diffLayout` | `"auto"` | `"auto"` uses split view only when it fits without heavy wrapping; `"split"` always uses split view when both columns fit; `"unified"` always stacks |

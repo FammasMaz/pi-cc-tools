@@ -12,7 +12,7 @@
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
   "bashCommandPreviewLines": 0,
-  "liveToolPreview": true,
+  "liveToolPreview": false,
   "liveToolPreviewLines": 5,
   "diffCollapsedLines": 24,
   "showTruncationHints": false,

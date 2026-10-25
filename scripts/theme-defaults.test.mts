@@ -169,3 +169,20 @@ test("a running bash command does not repeat its script under the row by default
 		for (const handler of handlers.get("agent_end") ?? []) await handler({}, { ui: {}, hasUI: false });
 	}
 });
+
+test("a running command shows no output lines under its row by default", async () => {
+	for (const handler of handlers.get("agent_start") ?? []) await handler({}, { ui: {}, hasUI: false });
+	try {
+		themes.setTheme("dark", false);
+		const row = new ToolExecutionComponent("bash", "bash-live", { command: "make" }, { showImages: false }, tools.get("bash"), { requestRender() {} } as any, agentDir) as any;
+		row.setArgsComplete();
+		row.markExecutionStarted();
+		row.updateResult({ content: [{ type: "text", text: "compiling a.c\ncompiling b.c\nlinking" }], isError: false }, true);
+		const lines = row.render(100).map((line: string) => line.replace(/\x1b\[[0-9;]*m/g, "")).filter((line: string) => line.trim());
+		assert.equal(lines.length, 1, `only the header: ${JSON.stringify(lines)}`);
+		assert.match(lines[0], /Bash make/);
+		assert.ok(!lines.some((line: string) => line.includes("linking")));
+	} finally {
+		for (const handler of handlers.get("agent_end") ?? []) await handler({}, { ui: {}, hasUI: false });
+	}
+});

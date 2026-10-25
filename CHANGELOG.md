@@ -5,8 +5,13 @@
 
 ## Unreleased
 
+### Changed
+
+- **Running tools no longer show their latest output lines** by default, so a running command is one row: its header, the blinking dot and a line count, as in pi-polish. `liveToolPreview: true` brings the live lines back (and the last lines bash keeps after it finishes).
+
 ### Fixed
 
+- **The working line ended a long command in `……`.**
 - **The spinner in pi-subagents' "Agents" panel froze** once the main turn ended while an agent kept running in the background. The panel uses pi-subagents' own spinner again (it was replaced with the tool-row breathing dot, which only animates while a tool row is busy), and the "Agents" heading dot no longer animates.
 
 ## 1.0.95 — 2026-10-25

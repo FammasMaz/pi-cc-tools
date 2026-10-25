@@ -92,3 +92,12 @@ test("a new request starts from zero", async () => {
 	await update({ type: "text_delta", contentIndex: 0, delta: "w".repeat(40) });
 	assert.equal(await shown(), 10);
 });
+
+test("a long running command is cut without a second ellipsis", async () => {
+	await fire("turn_start");
+	await fire("tool_execution_start", { toolCallId: "t1", toolName: "bash", args: { command: `echo ${"x".repeat(80)}` } });
+	const text = working.replace(/\x1b\[[0-9;]*m/g, "");
+	assert.match(text, /^Running echo x+…( \(|$)/, text);
+	assert.ok(!text.includes("……"), text);
+	await fire("tool_execution_end", { toolCallId: "t1" });
+});

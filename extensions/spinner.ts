@@ -478,9 +478,10 @@ function pickVerb(): string {
 /** Format elapsed ms as compact duration: 5s, 1m 23s, 1h 2m 3s */
 // What a running tool is doing, for the working line ("Running npm test…",
 // "Reading stats.py…"). Random verbs stay for the time the model is thinking.
+// No ellipsis of its own: the working line already ends in "…".
 function clip(text: string, max: number): string {
 	const oneLine = text.split("\n")[0]?.trim() ?? "";
-	return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
+	return oneLine.length > max ? oneLine.slice(0, max).trimEnd() : oneLine;
 }
 
 function humanizeToolName(name: string): string {
