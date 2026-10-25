@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Fixed
+
+- **A failed agent's row in the "Agents" panel kept pi-subagents' own `└─` in the first column** instead of hanging under "Agents" like the other rows. pi-subagents puts the start of the error in the row, and a multi-line error (for example a credentials failure) defeated the restyling. Line breaks are now folded into the row, and the `✗` / `■` status glyphs become the same red or dim `●` that tool rows use.
+
 ## 1.0.96 — 2026-10-25
 
 ### Changed

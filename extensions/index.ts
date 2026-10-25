@@ -2716,15 +2716,22 @@ const AGENT_WIDGET_ACTIVITY_RE = new RegExp(`^${ANSI_PREFIX}(│| )  ${ANSI_PREF
  * pi-subagents' own spinner: it advances on pi-subagents' timer, which keeps running after the
  * turn ends, while our tool-row animation only advances while a tool row is busy.
  */
+// A finished agent's status glyph (✓ done, ✗ error or aborted, ■ stopped) becomes the ● that
+// tool rows use, keeping pi-subagents' color for it (green, red, dim).
+const AGENT_WIDGET_STATUS_GLYPH_RE = /^((?:\x1b\[[0-9;]*m)*)[✓✔✗■]((?:\x1b\[[0-9;]*m)*)(?=\s)/;
+
 function restyleAgentWidgetLines(lines: string[], width: number): string[] {
 	if (!Array.isArray(lines)) return lines;
-	return lines.map((line) => {
-		if (typeof line !== "string") return line;
+	return lines.map((raw) => {
+		if (typeof raw !== "string") return raw;
+		// A widget line is one terminal row. pi-subagents puts the start of an agent's error
+		// in its row, and errors can span lines ("…exhausted for codex\n\nCredential issues").
+		const line = raw.includes("\n") ? raw.replace(/[ \t]*\r?\n[\s]*/g, " ") : raw;
 		const heading = AGENT_WIDGET_HEADING_RE.exec(line);
 		if (heading) return clampLineWidth(` ${paintStatusDot(TOOL_STATUS_SUCCESS)} Agents`, width);
 		const item = AGENT_WIDGET_ITEM_RE.exec(line);
 		if (item) {
-			const rest = normalizeLeadingCheckGlyph(item[4]);
+			const rest = item[4].replace(AGENT_WIDGET_STATUS_GLYPH_RE, `$1${STATUS_DOT_BOLD}●$2`);
 			return clampLineWidth(` ${BRANCH_INDENT}${branchGlyph(item[2] as "├" | "└")} ${rest}`, width);
 		}
 		const activity = AGENT_WIDGET_ACTIVITY_RE.exec(line);

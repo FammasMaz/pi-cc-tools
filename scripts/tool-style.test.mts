@@ -171,6 +171,22 @@ test("pi-subagents' Agent rows, notices and widget use tool-row markers", () => 
 	// pi-subagents' own spinner passes through, so it keeps animating on its timer.
 	frame = "⠼";
 	assert.equal(visible(component.render(80))[1], "   └ ⠼ Agent  Check");
+
+	// A failed agent, as pi-subagents draws it: the start of a multi-line error is in the row.
+	const error = "All 3 credential(s) exhausted for codex\n\nCredential issues (require attention)".slice(0, 60);
+	sessionUi.setWidget("agents", () => ({
+		render: () => [
+			t.fg("dim", "○") + " " + t.fg("dim", "Agents"),
+			t.fg("dim", "└─") + ` ${t.fg("error", "✗")} Explore  ${t.fg("dim", "Spinner test")} ${t.fg("dim", "·")} ${t.fg("dim", "2.9s")}${t.fg("error", ` error: ${error}`)}`,
+		],
+		invalidate() {},
+	}));
+	const failedRaw = factory({}, t).render(120);
+	const failed = visible(failedRaw);
+	assert.equal(failed.length, 2, JSON.stringify(failed));
+	assert.equal(failed[1], "   └ ● Explore  Spinner test · 2.9s error: All 3 credential(s) exhausted for codex Credential issues (");
+	assert.ok(failedRaw[1].includes(`${t.getFgAnsi("error")}\x1b[1m●`) || failedRaw[1].includes(`${t.getFgAnsi("error")}●`), JSON.stringify(failedRaw[1]));
+	assert.ok(!failedRaw[1].includes("\n"));
 });
 
 test("the status line under a command is dim, as in pi-polish; errors stay red", () => {
