@@ -224,3 +224,28 @@ test("a running command's source keeps its color; only status lines are dim", as
 		await fire("agent_end");
 	}
 });
+
+test("the ctrl+o hint is in parentheses, and never nested inside another pair", () => {
+	const [result] = visible(finishedRow("grep", { pattern: "foo" }, "a.ts:1: foo\nb.ts:2: foo").render(100)).slice(1);
+	assert.match(result, /^ {3}└ 2 matches \(ctrl\+o to toggle\)$/, result);
+
+	const chat = new Container();
+	chat.addChild(finishedRow("read", { path: "a.ts" }, "1"));
+	chat.addChild(finishedRow("bash", { command: "ls" }, "a"));
+	const [group] = chat.children as any[];
+	const [header] = visible(group.render(100));
+	assert.match(header, /^ ● Read 1 file, ran 1 shell command \(ctrl\+o to toggle\)$/, header);
+	group.setExpanded(true);
+	assert.match(visible(group.render(100))[0], /\(ctrl\+o to collapse • ctrl\+shift\+o more detail\)$/);
+
+	// Text already in parentheses gets the hint inline: "... (N more lines • ctrl+o …)".
+	const many = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
+	const read = finishedRow("read", { path: "big.ts" }, many);
+	read.setExpanded(true);
+	const lines = visible(read.render(100));
+	const more = lines.find((line) => /more lines/.test(line));
+	if (more) {
+		assert.match(more, /\.\.\. \(\d+ more lines • ctrl\+o to (toggle|collapse)[^()]*\)$/, more);
+		assert.ok(!/\(\(|\)\)/.test(more), more);
+	}
+});

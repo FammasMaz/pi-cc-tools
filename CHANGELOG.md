@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Changed
+
+- **The `ctrl+o` hint is in parentheses**, as in pi-polish: `└ 2 matches (ctrl+o to toggle)`, `● Read 2 files, ran 1 shell command (ctrl+o to toggle)`, `(ctrl+o to collapse • ctrl+shift+o more detail)` when expanded. Where the text is already in parentheses (`... (32 more lines • ctrl+o to toggle)`) the hint stays inside them.
+
 ## 1.0.97 — 2026-10-25
 
 ### Fixed

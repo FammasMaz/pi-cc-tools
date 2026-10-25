@@ -1562,19 +1562,32 @@ function configuredKeyHint(binding: Parameters<typeof keyText>[0], fallbackKey: 
 	return rawKeyHint(fallbackKey, description);
 }
 
-function expandHint(_theme: Theme, action: "expand" | "collapse" | "toggle" = "toggle"): string {
-	return ` • ${configuredKeyHint("app.tools.expand", "ctrl+o", `to ${action}`)}`;
+function deepExpandKeyHint(): string {
+	return rawKeyHint("ctrl+shift+o", extraToolOutputExpanded ? "less detail" : "more detail");
 }
 
+/** " • ctrl+shift+o more detail", for text that is already in parentheses. */
 function deepExpandHint(): string {
-	return ` • ${rawKeyHint("ctrl+shift+o", extraToolOutputExpanded ? "less detail" : "more detail")}`;
+	return ` • ${deepExpandKeyHint()}`;
 }
 
-function toolOutputDetailHint(theme: Theme, expanded: boolean, hasMore = false): string {
-	if (!expanded) return expandHint(theme, "toggle");
-	const parts = [expandHint(theme, "collapse")];
-	if (hasMore || extraToolOutputExpanded) parts.push(deepExpandHint());
-	return parts.join("");
+function detailHintParts(expanded: boolean, hasMore: boolean): string[] {
+	if (!expanded) return [configuredKeyHint("app.tools.expand", "ctrl+o", "to toggle")];
+	const parts = [configuredKeyHint("app.tools.expand", "ctrl+o", "to collapse")];
+	if (hasMore || extraToolOutputExpanded) parts.push(deepExpandKeyHint());
+	return parts;
+}
+
+/** " (ctrl+o to toggle)", or " (ctrl+o to collapse • ctrl+shift+o more detail)" when expanded. */
+function toolOutputDetailHint(_theme: Theme, expanded: boolean, hasMore = false): string {
+	const dim = safeFgAnsi(getGlobalPiTheme(), "dim") ?? FG_DIM;
+	const paren = (glyph: string) => `${dim}${glyph}\x1b[39m`;
+	return ` ${paren("(")}${detailHintParts(expanded, hasMore).join(paren(" • "))}${paren(")")}`;
+}
+
+/** " • ctrl+o to toggle", for text that is already in parentheses ("… (12 more lines • …)"). */
+function inlineDetailHint(expanded: boolean, hasMore = false): string {
+	return detailHintParts(expanded, hasMore).map((part) => ` • ${part}`).join("");
 }
 
 function clearStateKeys(state: Record<string, unknown> | undefined, ...keys: string[]): void {
@@ -4366,7 +4379,7 @@ function buildPreviewText(
 	}
 	const remaining = Math.max(0, totalLineCount - limit);
 	if (remaining > 0) {
-		text += `${text ? "\n" : ""}${theme.fg("muted", `... (${remaining} more lines${toolOutputDetailHint(theme, expanded, true)})`)}`;
+		text += `${text ? "\n" : ""}${theme.fg("muted", `... (${remaining} more lines${inlineDetailHint(expanded, true)})`)}`;
 	}
 	if (expanded && totalLineCount > maxLines) {
 		text += `\n${theme.fg("warning", `(display capped at ${maxLines} lines${deepExpandHint()})`)}`;
@@ -6693,7 +6706,7 @@ function runningPreviewBlock(
 	const previewTotal = options.tail && !expanded ? previewSource.length : totalLineCount;
 	let preview = buildPreviewText(previewSource, expanded, theme, limit, previewTotal, styleLine);
 	if (options.tail && !expanded && totalLineCount > previewSource.length) {
-		preview = `${theme.fg("muted", `... (${totalLineCount - previewSource.length} earlier lines${toolOutputDetailHint(theme, expanded, true)})`)}\n${preview}`;
+		preview = `${theme.fg("muted", `... (${totalLineCount - previewSource.length} earlier lines${inlineDetailHint(expanded, true)})`)}\n${preview}`;
 	}
 	return withBranch(preview, theme);
 }
