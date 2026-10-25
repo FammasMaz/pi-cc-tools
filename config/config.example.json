@@ -11,7 +11,7 @@
   "thinkingMode": "live",
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
-  "bashCommandPreviewLines": 8,
+  "bashCommandPreviewLines": 0,
   "liveToolPreview": true,
   "liveToolPreviewLines": 5,
   "diffCollapsedLines": 24,

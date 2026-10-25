@@ -153,3 +153,19 @@ test("branch connectors are a faint mark on dark and light themes", () => {
 		assert.ok(Math.abs(ratio - 2) < 0.05, `2:1 on white, got ${ratio.toFixed(2)}`);
 	}
 });
+
+test("a running bash command does not repeat its script under the row by default", async () => {
+	for (const handler of handlers.get("agent_start") ?? []) await handler({}, { ui: {}, hasUI: false });
+	try {
+		themes.setTheme("dark", false);
+		const command = "for f in *.py; do\n  echo $f\ndone";
+		const row = new ToolExecutionComponent("bash", "bash-default", { command }, { showImages: false }, tools.get("bash"), { requestRender() {} } as any, agentDir) as any;
+		row.setArgsComplete();
+		row.markExecutionStarted();
+		const lines = row.render(100).map((line: string) => line.replace(/\x1b\[[0-9;]*m/g, "")).filter((line: string) => line.trim());
+		assert.equal(lines.length, 1, `only the header: ${JSON.stringify(lines)}`);
+		assert.match(lines[0], /Bash for f in \*\.py; do/);
+	} finally {
+		for (const handler of handlers.get("agent_end") ?? []) await handler({}, { ui: {}, hasUI: false });
+	}
+});

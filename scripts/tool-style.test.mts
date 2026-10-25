@@ -15,7 +15,8 @@ process.env.COLORTERM = "truecolor";
 const agentDir = mkdtempSync(join(tmpdir(), "tool-style-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = agentDir;
-writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ terminalTheme: false }));
+// bashCommandPreviewLines is off by default (see theme-defaults.test.mts); on here to check its colors.
+writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ terminalTheme: false, bashCommandPreviewLines: 8 }));
 const cwd = mkdtempSync(join(tmpdir(), "tool-style-cwd-"));
 const previousCwd = process.cwd();
 process.chdir(cwd);

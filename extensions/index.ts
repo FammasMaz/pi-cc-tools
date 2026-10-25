@@ -4296,9 +4296,11 @@ function bashOutputMode(): "opencode" | "summary" | "preview" {
 	return getMode(readSettings().bashOutputMode, ["opencode", "summary", "preview"] as const, "opencode");
 }
 
+// Off by default: the header already names the command, and repeating a long script under
+// it while it runs made the transcript busy. Ctrl+O still shows the whole command.
 function bashCommandPreviewLimit(): number {
 	const value = readSettings().bashCommandPreviewLines;
-	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 8;
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
 }
 
 function renderBashCommandBlock(

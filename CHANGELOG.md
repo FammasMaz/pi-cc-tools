@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Changed
+
+- **Running bash commands no longer repeat their script under the row** by default. Set `bashCommandPreviewLines` (for example to `8`) to bring the preview back, for running and failed commands; `Ctrl+O` still shows the whole command.
+
 ## 1.0.94 — 2026-10-25
 
 ### Changed

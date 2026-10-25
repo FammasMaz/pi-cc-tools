@@ -57,7 +57,7 @@ Set in `.pi/settings.json` or the active Pi agent settings file (`$PI_CODING_AGE
   "thinkingMode": "live",
   "bashOutputMode": "opencode",
   "bashCollapsedLines": 10,
-  "bashCommandPreviewLines": 8,
+  "bashCommandPreviewLines": 0,
   "liveToolPreview": true,
   "liveToolPreviewLines": 5,
   "diffCollapsedLines": 24,
@@ -171,7 +171,7 @@ Use `/cc-tools` to control tool UI at runtime:
 | `groupToolCalls` | `true` | Group adjacent/concurrent calls, collapsing repeated targets into one row |
 | `thinkingMode` | `live` | `live` = only streaming thinking expands (finished collapse to `Thought for Xs`); `full` = always expanded |
 | `bashCollapsedLines` | `10` | Lines for collapsed bash output |
-| `bashCommandPreviewLines` | `8` | Verbatim script lines shown while bash runs or after failure; `0` disables them |
+| `bashCommandPreviewLines` | `0` | Script lines of a multi-line command shown under the row while bash runs or after it fails (for example `8`); `0` shows none. `Ctrl+O` always shows the whole command |
 | `liveToolPreview` | `true` | Show a small live output preview while tools are still running |
 | `liveToolPreviewLines` | `5` | Lines shown in the collapsed live preview |
 | `diffCollapsedLines` | `24` | Diff lines before collapsing |
