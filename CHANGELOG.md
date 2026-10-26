@@ -3,11 +3,15 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
-## Unreleased
+## 1.0.102 — 2026-10-26
 
 ### Fixed
 
 - **Diff previews measured lines in UTF-16 units, so CJK and emoji overflowed into the next column.** `wrapAnsi`/`fit` compared `text.length` against the column width and counted one column per code unit, and the split/auto decision did the same, so 59 characters of Chinese (108 columns when drawn) looked like they fit on one row: in a split diff the text ran past the divider and the removed side's `╱` stripes and the gutter alignment drifted with it. Diff rows are now laid out in terminal cells — SGR sequences carry zero width and a grapheme cluster contributes its real width from pi's `visibleWidth` — and a double-width glyph that does not fit pads its row so both code columns keep their edges. ASCII output is unchanged.
+
+### Internal
+
+- **Tests and typecheck run on every pull request** (GitHub Actions, Node 22 and 24), contributed by @ccfco. `scripts/terminal-theme.test.mts` pins `FORCE_COLOR=3` so its truecolor assertion no longer depends on the terminal that starts the run.
 
 ## 1.0.101 — 2026-10-26
 
