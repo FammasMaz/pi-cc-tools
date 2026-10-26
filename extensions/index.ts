@@ -184,9 +184,11 @@ interface SettingsFile {
 	 * Thinking display mode. `live` (default): only the currently-streaming
 	 * thinking is expanded; finished thinking collapses to a one-line
 	 * `Thought for Xs` row (Ctrl+O still expands it). `full`: thinking always
-	 * renders expanded, like stock pi.
+	 * renders expanded, like stock pi. `latest`: like `live`, but only the latest
+	 * assistant message keeps its thinking; earlier ones drop it entirely, and the
+	 * tool rows they separated merge into one group.
 	 */
-	thinkingMode?: "live" | "full";
+	thinkingMode?: "live" | "full" | "latest";
 }
 
 let _settingsCache: { value: SettingsFile; timestamp: number } | null = null;
@@ -552,10 +554,11 @@ function setToolGroupingEnabled(enabled: boolean): void {
 	writeSettingsKey("groupToolCalls", enabled);
 }
 
-type ThinkingMode = "live" | "full";
+type ThinkingMode = "live" | "full" | "latest";
+const THINKING_MODES = ["live", "full", "latest"] as const;
 
 function getThinkingMode(): ThinkingMode {
-	return getMode(readSettings().thinkingMode, ["live", "full"] as const, "live");
+	return getMode(readSettings().thinkingMode, THINKING_MODES, "live");
 }
 
 function isAssistantThinkingComplete(comp: any, message: any): boolean {
@@ -1384,6 +1387,130 @@ function maybeMergeConsecutiveThinkingMessages(parent: any): void {
 	}
 }
 
+// thinkingMode "latest": only the latest assistant message keeps its thinking. When a new one
+// arrives, the earlier ones are marked superseded and re-render without their thinking blocks.
+// A message left with nothing to show no longer separates tool rows (isIgnorableToolSeparator),
+// so the rows around it merge into one group.
+const SUPERSEDED_KEY = Symbol.for("pi-claude-style-tools:superseded-assistant");
+/** Order components were added in, to undo merges when the thinking mode changes. */
+const ADD_SEQ_KEY = Symbol.for("pi-claude-style-tools:add-seq");
+let addSequence = 0;
+/** Containers that hold assistant messages (pi's chat), for re-applying the thinking mode. */
+const CHAT_CONTAINERS = new Set<any>();
+
+function isAssistantMessageComponent(value: unknown): boolean {
+	return value instanceof AssistantMessageComponent || (value as any)?.constructor?.name === "AssistantMessageComponent";
+}
+
+function hidesSupersededThinking(component: any, message: any): boolean {
+	return getThinkingMode() === "latest" && component?.[SUPERSEDED_KEY] === true && messageHasThinkingContent(message);
+}
+
+/** A new assistant message arrived: the earlier ones are no longer the latest. */
+function supersedeEarlierAssistantMessages(parent: any, latest: any): void {
+	const children = parent?.children;
+	if (!Array.isArray(children)) return;
+	CHAT_CONTAINERS.add(parent);
+	const superseded: any[] = [];
+	for (let i = children.indexOf(latest) - 1; i >= 0; i--) {
+		const child = children[i];
+		if (!isAssistantMessageComponent(child)) continue;
+		if (child[SUPERSEDED_KEY]) break; // everything before it was handled already
+		child[SUPERSEDED_KEY] = true;
+		superseded.push(child);
+	}
+	if (getThinkingMode() !== "latest") return;
+	for (const message of superseded.reverse()) {
+		if (!messageHasThinkingContent(message.lastMessage)) continue;
+		message.invalidate?.(); // rebuilds its content without the thinking
+		mergeToolRowsAcross(parent, message);
+	}
+}
+
+/** Merge the tool rows on both sides of a component that no longer shows anything. */
+function mergeToolRowsAcross(parent: any, separator: any): void {
+	const children = parent?.children;
+	if (!toolGroupingEnabled() || !Array.isArray(children)) return;
+	const index = children.indexOf(separator);
+	if (index < 0 || !isIgnorableToolSeparator(separator)) return;
+	const previousEntry = findPreviousToolSibling(children, index - 1);
+	let nextIndex = index + 1;
+	while (nextIndex < children.length && isIgnorableToolSeparator(children[nextIndex])) nextIndex++;
+	if (!previousEntry || nextIndex >= children.length) return;
+	const previous = previousEntry.child;
+	const next = children[nextIndex];
+	const groupable = (value: any) => isToolGroupComponent(value) || isGroupableTool(value);
+	if (!groupable(previous) || !groupable(next)) return;
+	const incoming: any[] = isToolGroupComponent(next) ? next.releaseTools() : [next];
+	let group: any = previous;
+	if (!isToolGroupComponent(previous)) {
+		group = new ToolGroupComponent();
+		group.addTool(previous);
+		group[COMPONENT_PARENT] = parent;
+		children[previousEntry.index] = group;
+	}
+	group.expanded = group.expanded === true || incoming.some((tool) => tool?.expanded === true);
+	for (const tool of incoming) group.addTool(tool);
+	children.splice(nextIndex, 1);
+}
+
+/**
+ * Re-apply the thinking mode to transcripts already on screen: put every row back in the order
+ * it was added, re-render the assistant messages, and group the tool rows again.
+ */
+/** Redraw after re-applying the thinking mode (pi's command context has no render call of its own). */
+function requestChatRender(ctx: any): void {
+	try {
+		if (typeof ctx?.ui?.requestRender === "function") return void ctx.ui.requestRender();
+	} catch { /* fall through */ }
+	for (const parent of CHAT_CONTAINERS) {
+		for (const child of parent?.children ?? []) {
+			const tools = isToolGroupComponent(child) ? (child as any).tools : [child];
+			const ui = tools.find((tool: any) => typeof tool?.ui?.requestRender === "function")?.ui;
+			if (ui) return void ui.requestRender();
+		}
+	}
+}
+
+function applyThinkingModeToChats(): void {
+	for (const parent of CHAT_CONTAINERS) {
+		const children = parent?.children;
+		if (!Array.isArray(children)) {
+			CHAT_CONTAINERS.delete(parent);
+			continue;
+		}
+		const flat: any[] = [];
+		for (const child of children) {
+			if (!isToolGroupComponent(child)) {
+				flat.push(child);
+				continue;
+			}
+			for (const tool of child.releaseTools()) {
+				tool[COMPONENT_PARENT] = parent;
+				flat.push(tool);
+			}
+		}
+		// Rows added some other way keep their place after the row before them.
+		let sequence = 0;
+		const ordered = flat
+			.map((child) => {
+				const own = child?.[ADD_SEQ_KEY];
+				sequence = typeof own === "number" ? own : sequence + 1e-6;
+				return { child, sequence };
+			})
+			.sort((a, b) => a.sequence - b.sequence)
+			.map((entry) => entry.child);
+		for (const child of ordered) {
+			if (isAssistantMessageComponent(child) && messageHasThinkingContent(child.lastMessage)) child.invalidate?.();
+		}
+		children.length = 0;
+		for (const child of ordered) {
+			children.push(child);
+			maybeGroupToolComponent(parent, child);
+		}
+	}
+}
+
 function maybeGroupToolComponent(parent: any, component: any): void {
 	if (!toolGroupingEnabled() || !isGroupableTool(component) || isToolGroupComponent(parent)) return;
 	const children = parent?.children;
@@ -1419,9 +1546,13 @@ function patchContainerParentTracking(): void {
 	const originalClear = proto.clear;
 	proto.addChild = function patchedAddChild(component: any) {
 		const result = originalAddChild.call(this, component);
-		if (component && typeof component === "object") component[COMPONENT_PARENT] = this;
+		if (component && typeof component === "object") {
+			component[COMPONENT_PARENT] = this;
+			component[ADD_SEQ_KEY] = ++addSequence;
+		}
 		maybeGroupToolComponent(this, component);
 		maybeMergeConsecutiveThinkingMessages(this);
+		if (isAssistantMessageComponent(component)) supersedeEarlierAssistantMessages(this, component);
 		return result;
 	};
 	proto.removeChild = function patchedRemoveChild(component: any) {
@@ -3189,7 +3320,7 @@ function patchAssistantMessages(): void {
 		proto[ASSISTANT_RENDER_PATCH_FLAG] = true;
 	}
 	const originalUpdateContent = proto.updateContent;
-	proto.updateContent = function patchedUpdateContent(message: any, isStreaming?: boolean) {
+	const renderContent = function patchedUpdateContent(this: any, message: any, isStreaming?: boolean) {
 		// Content changed (also reached via invalidate() → updateContent): drop the
 		// cached rendered output so the next render rebuilds with the new children.
 		clearMessageRenderCache(this);
@@ -3206,7 +3337,7 @@ function patchAssistantMessages(): void {
 		// - "live" mode (default): the actively-streaming thinking block renders
 		//   expanded while streaming, and collapses to `Thought for Xs` once done.
 		// - "full" mode: behaves like stock pi (stays collapsed).
-		const liveMode = getThinkingMode() === "live";
+		const liveMode = getThinkingMode() !== "full";
 		const thinkingCollapsed = !!(this as any).hideThinkingBlock;
 		const override = (this as any).thinkingVisibilityOverrides?.get?.(0);
 		const showLiveThinking = liveMode && thinkingCollapsed && override !== true && isLiveThinkingMessage(this, message);
@@ -3276,6 +3407,19 @@ function patchAssistantMessages(): void {
 		const hasAssistantText = message.content.some((block: any) => block?.type === "text" && typeof block.text === "string" && block.text.trim());
 		if (typeof workedDuration === "number" && isFinalAssistantMessage && hasAssistantText && !hasWorkedDurationLine(message)) {
 			container.children.push(new Spacer(1), new Text(workedDurationText(workedDuration, workedSessionTotal, workedTurns), 1, 0));
+		}
+	};
+	proto.updateContent = function patchedUpdateContentSuperseded(this: any, message: any, isStreaming?: boolean) {
+		if (!hidesSupersededThinking(this, message)) return renderContent.call(this, message, isStreaming);
+		// thinkingMode "latest": an earlier message renders as if it had no thinking.
+		const withoutThinking = { ...message, content: message.content.filter((block: any) => block?.type !== "thinking") };
+		const worked = workedDurationByMessage.get(message);
+		if (worked) workedDurationByMessage.set(withoutThinking, worked);
+		try {
+			return renderContent.call(this, withoutThinking, isStreaming);
+		} finally {
+			// Keep the whole message: another thinking mode shows the thinking again.
+			this.lastMessage = message;
 		}
 	};
 	proto[ASSISTANT_PATCH_FLAG] = true;
@@ -7838,7 +7982,7 @@ export default function (pi: ExtensionAPI) {
 						label: m,
 						description:
 							m === "group" ? "Toggle grouped adjacent/concurrent tool rows"
-							: m === "thinking" ? "Thinking display: live (default) or full"
+							: m === "thinking" ? "Thinking display: live (default), full, or latest"
 							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
 							: m === "status" ? "Show tool UI settings"
 							: m === "outlines" ? "Horizontal rules around each tool (default)"
@@ -7848,9 +7992,17 @@ export default function (pi: ExtensionAPI) {
 			}
 			if (first === "thinking") {
 				const second = parts[1] ?? "";
-				return ["live", "full", "status"]
+				return [...THINKING_MODES, "status"]
 					.filter((m) => m.startsWith(second))
-					.map((m) => ({ value: `thinking ${m}`, label: m, description: `${m} thinking display` }));
+					.map((m) => ({
+						value: `thinking ${m}`,
+						label: m,
+						description:
+							m === "live" ? "Only the thinking in progress expands; finished thinking is a Thought for Xs row (default)"
+							: m === "full" ? "Thinking always expanded, like stock pi"
+							: m === "latest" ? "Like live, but only the latest message keeps its thinking; tool calls around earlier thinking merge"
+							: "Show the current mode",
+					}));
 			}
 			if (first === "group" || first === "detail" || first === "extra") {
 				const second = parts[1] ?? "";
@@ -7891,17 +8043,23 @@ export default function (pi: ExtensionAPI) {
 			if (sub === "thinking") {
 				const arg = (parts[1] ?? "status").toLowerCase();
 				if (arg === "status" || !arg) {
-					if (ctx.hasUI) ctx.ui.notify(`Thinking: ${getThinkingMode()} (live = only streaming thinking expands; full = always expanded)`, "info");
+					if (ctx.hasUI) ctx.ui.notify(`Thinking: ${getThinkingMode()} (live = only streaming thinking expands; full = always expanded; latest = only the latest message keeps its thinking)`, "info");
 					return;
 				}
-				if (arg !== "live" && arg !== "full") {
-					if (ctx.hasUI) ctx.ui.notify("Usage: /cc-tools thinking live|full|status", "error");
+				if (!(THINKING_MODES as readonly string[]).includes(arg)) {
+					if (ctx.hasUI) ctx.ui.notify(`Usage: /cc-tools thinking ${THINKING_MODES.join("|")}|status`, "error");
 					return;
 				}
 				writeSettingsKey("thinkingMode", arg);
+				applyThinkingModeToChats();
 				if (ctx.hasUI) {
 					ctx.ui.setToolsExpanded(ctx.ui.getToolsExpanded());
-					ctx.ui.notify(`Thinking → ${arg}${arg === "live" ? " (only the active thinking expands)" : " (thinking always expanded)"}`, "info");
+					requestChatRender(ctx);
+					ctx.ui.notify(`Thinking → ${arg}${
+						arg === "live" ? " (only the active thinking expands)"
+						: arg === "full" ? " (thinking always expanded)"
+						: " (only the latest message keeps its thinking)"
+					}`, "info");
 				}
 				return;
 			}

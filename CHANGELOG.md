@@ -5,6 +5,10 @@
 
 ## Unreleased
 
+### Added
+
+- **`/cc-tools thinking latest`** (setting `thinkingMode: "latest"`, off by default): like `live`, but only the latest assistant message keeps its thinking. When a new message arrives, the earlier ones drop theirs entirely (no `Thought for Xs` row), and the tool calls that thinking used to separate merge into one group, so a run of reads and commands reads as `● Read 2 files, ran 1 shell command`. Messages with text still separate tool rows. Switching modes re-applies to the transcript on screen, putting every thinking row back in its place for `live` and `full`.
+
 ### Changed
 
 - **The token counter counts up smoothly.** `↓ N tokens` on the working line eased into view only once a second, in jumps as chunks arrived (and when a finished message swapped its estimate for the real count). It now counts toward each new total frame by frame, so a large jump takes about a second and a steady stream is followed closely. Frames run only while the shown number trails the real one.

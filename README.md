@@ -21,7 +21,7 @@ Claude Code inspired tool rendering for Pi — Shiki-powered diffs, status dots,
 - **Adaptive edit/write diffs** with split or unified layouts, syntax highlighting, and inline word-level emphasis
 - **Diff summary** under each edit: added/removed line counts and hunk metadata, in the same quiet color as every other status line
 - **Progressive collapsed diff hints** that shorten on narrow terminals
-- **Live-only thinking** (default) — only the actively-streaming thinking renders expanded; finished thinking collapses to a one-line `Thought for Xs` row (`/cc-tools thinking full` restores always-expanded, `Ctrl+O` still expands anything)
+- **Live-only thinking** (default) — only the actively-streaming thinking renders expanded; finished thinking collapses to a one-line `Thought for Xs` row (`/cc-tools thinking full` restores always-expanded, `Ctrl+O` still expands anything). `/cc-tools thinking latest` goes further: only the latest message keeps its thinking, and the tool calls that earlier thinking separated merge into one group
 - **MCP-aware rendering** with hidden, summary, and preview modes
 - **Configurable output modes** for read, search, bash, and MCP results
 - **Quiet running rows** — a running tool shows its header, a blinking dot and a line count; `liveToolPreview: true` adds a few live output lines (latest lines for bash), kept until the next tool/text activity
@@ -148,6 +148,7 @@ Use `/cc-tools` to control tool UI at runtime:
 /cc-tools group off       # disable grouping (also ungroups current grouped rows)
 /cc-tools thinking live   # default: only the streaming thinking expands; finished ones collapse
 /cc-tools thinking full   # always render thinking expanded, like stock pi
+/cc-tools thinking latest # like live, but only the latest message keeps its thinking; tool calls around earlier thinking merge
 /cc-tools detail toggle   # same mode as Ctrl+Shift+O
 ```
 
@@ -169,7 +170,7 @@ Use `/cc-tools` to control tool UI at runtime:
 | `extraExpandedPreviewMaxLines` | `12000` | Max lines after Ctrl+Shift+O extra-detail mode |
 | `extraToolOutputExpanded` | `false` | Start with Ctrl+Shift+O extra-detail mode enabled |
 | `groupToolCalls` | `true` | Group adjacent/concurrent calls, collapsing repeated targets into one row |
-| `thinkingMode` | `live` | `live` = only streaming thinking expands (finished collapse to `Thought for Xs`); `full` = always expanded |
+| `thinkingMode` | `live` | `live` = only streaming thinking expands (finished collapse to `Thought for Xs`); `full` = always expanded; `latest` = like `live`, but earlier messages drop their thinking entirely and the tool calls around it merge |
 | `bashCollapsedLines` | `10` | Lines for collapsed bash output |
 | `bashCommandPreviewLines` | `0` | Script lines of a multi-line command shown under the row while bash runs or after it fails (for example `8`); `0` shows none. `Ctrl+O` always shows the whole command |
 | `liveToolPreview` | `false` | Show the latest output lines under a running tool (and keep bash's last lines once it finishes) |
