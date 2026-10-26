@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Documentation
+
+- **New README** with recordings of each feature (tool groups, diffs, shell edits, the spinner, thinking modes, terminal themes, subagents), a commands table, and the settings split into layout, tool output and colors. The images live in `docs/media` and are not part of the npm package.
+
 ## 1.0.100 — 2026-10-26
 
 ### Added
