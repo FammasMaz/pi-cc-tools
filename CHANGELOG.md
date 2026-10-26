@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Changed
+
+- **The token counter counts up smoothly.** `↓ N tokens` on the working line eased into view only once a second, in jumps as chunks arrived (and when a finished message swapped its estimate for the real count). It now counts toward each new total frame by frame, so a large jump takes about a second and a steady stream is followed closely. Frames run only while the shown number trails the real one.
+
 ## 1.0.99 — 2026-10-25
 
 ### Fixed

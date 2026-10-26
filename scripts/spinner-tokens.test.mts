@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { register } from "node:module";
 import { tmpdir } from "node:os";
@@ -15,7 +15,13 @@ const agentDir = mkdtempSync(join(tmpdir(), "spinner-tokens-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = agentDir;
 
+// The counter eases toward each new total over about a second; tests move the clock instead
+// of waiting for it.
+// (A real-looking clock: the spinner treats a start time of 0 as "not started".)
+mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 });
+
 const themeModule = await import("../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js");
+const { easeTokenCount } = await import("../extensions/spinner.ts");
 themeModule.initTheme("dark", false);
 const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
 (await import("../extensions/spinner.ts")).default({
@@ -40,17 +46,22 @@ async function fire(event: string, payload: unknown = {}) {
 	for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
 }
 const update = (assistantMessageEvent: unknown) => fire("message_update", { assistantMessageEvent });
-// The refresh loop redraws once a second; force a redraw the way a status change does.
+function readCount(): number | undefined {
+	const match = /↓ ([\d,]+) tokens/.exec(working.replace(/\x1b\[[0-9;]*m/g, ""));
+	return match ? Number(match[1].replaceAll(",", "")) : undefined;
+}
+// The count the line settles on: let the counter finish easing, then force a redraw the way a
+// status change does.
 async function shown(): Promise<number | undefined> {
+	mock.timers.tick(3_000);
 	await update({ type: "thinking_start", contentIndex: 99 });
 	await update({ type: "thinking_end", contentIndex: 99, content: "" });
-	const match = /↓ ([\d.]+)(k?) tokens/.exec(working.replace(/\x1b\[[0-9;]*m/g, ""));
-	if (!match) return undefined;
-	return Math.round(Number(match[1]) * (match[2] ? 1000 : 1));
+	return readCount();
 }
 
 test.after(async () => {
 	await fire("agent_end", { messages: [] });
+	mock.timers.reset();
 	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 	rmSync(agentDir, { recursive: true, force: true });
@@ -100,4 +111,29 @@ test("a long running command is cut without a second ellipsis", async () => {
 	assert.match(text, /^Running echo x+…( \(|$)/, text);
 	assert.ok(!text.includes("……"), text);
 	await fire("tool_execution_end", { toolCallId: "t1" });
+});
+
+test("the counter counts up to a new total instead of jumping there", async () => {
+	await fire("message_end", { message: { role: "assistant", content: [], usage: { output: 1_000 } } });
+	const target = 1_000; // the reported count replaces the 10 streamed (estimated) tokens
+	const seen: number[] = [];
+	for (let frame = 0; frame < 40; frame++) {
+		mock.timers.tick(50);
+		const count = readCount();
+		if (count !== undefined) seen.push(count);
+	}
+	assert.ok(seen.length > 5, `the line redraws while counting: ${seen.join(", ")}`);
+	assert.ok(seen.some((count) => count > 10 && count < target), `in-between values are shown: ${seen.join(", ")}`);
+	for (let i = 1; i < seen.length; i++) assert.ok(seen[i] >= seen[i - 1], `never counts backwards: ${seen.join(", ")}`);
+	assert.ok(seen.every((count) => count <= target), "never past the real total");
+	assert.equal(seen.at(-1), target, "arrives within two seconds");
+	await fire("turn_end");
+});
+
+test("easing: large gaps move fast, small ones by at least a token, never past the target", () => {
+	assert.equal(easeTokenCount(0, 1_000, 50), 283, "28% of the gap in one 50 ms frame");
+	assert.equal(easeTokenCount(997, 1_000, 50), 998, "at least one token per frame");
+	assert.equal(easeTokenCount(999, 1_000, 5_000), 1_000, "never past the target");
+	assert.equal(easeTokenCount(500, 400, 50), 472, "eases down after a downward correction too");
+	assert.equal(easeTokenCount(42, 42, 50), 42);
 });
