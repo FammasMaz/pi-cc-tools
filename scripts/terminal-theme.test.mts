@@ -1,3 +1,4 @@
+process.env.FORCE_COLOR = "3"; // this file asserts truecolor output
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { register } from "node:module";
