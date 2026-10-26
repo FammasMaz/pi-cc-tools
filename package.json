@@ -1,7 +1,7 @@
 {
   "name": "pi-claude-code-ui",
-  "version": "1.0.99",
-  "description": "Claude Code-style grouped tool rows for pi with Ctrl+O/Ctrl+Shift+O previews, math rendering, and consistent built-in, MCP, and custom tool rendering",
+  "version": "1.0.101",
+  "description": "Claude Code style UI for pi: one-line tool groups, syntax-highlighted diffs, an activity spinner, and colors from your terminal theme",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -15,7 +15,12 @@
     "latex",
     "keybindings",
     "shiki",
-    "diff"
+    "diff",
+    "terminal-theme",
+    "ghostty",
+    "subagents",
+    "spinner",
+    "tui"
   ],
   "license": "MIT",
   "author": "FammasMaz",

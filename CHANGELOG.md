@@ -9,6 +9,22 @@
 
 - **Diff previews measured lines in UTF-16 units, so CJK and emoji overflowed into the next column.** `wrapAnsi`/`fit` compared `text.length` against the column width and counted one column per code unit, and the split/auto decision did the same, so 59 characters of Chinese (108 columns when drawn) looked like they fit on one row: in a split diff the text ran past the divider and the removed side's `╱` stripes and the gutter alignment drifted with it. Diff rows are now laid out in terminal cells — SGR sequences carry zero width and a grapheme cluster contributes its real width from pi's `visibleWidth` — and a double-width glyph that does not fit pads its row so both code columns keep their edges. ASCII output is unchanged.
 
+## 1.0.101 — 2026-10-26
+
+### Documentation
+
+- **New README** with recordings of each feature (tool groups, diffs, shell edits, the spinner, thinking modes, terminal themes, subagents), a commands table, and the settings split into layout, tool output and colors. The images live in `docs/media` and are not part of the npm package.
+
+## 1.0.100 — 2026-10-26
+
+### Added
+
+- **`/cc-tools thinking latest`** (setting `thinkingMode: "latest"`, off by default): like `live`, but only the latest assistant message keeps its thinking. When a new message arrives, the earlier ones drop theirs entirely (no `Thought for Xs` row), and the tool calls that thinking used to separate merge into one group, so a run of reads and commands reads as `● Read 2 files, ran 1 shell command`. Messages with text still separate tool rows. Switching modes re-applies to the transcript on screen, putting every thinking row back in its place for `live` and `full`.
+
+### Changed
+
+- **The token counter counts up smoothly.** `↓ N tokens` on the working line eased into view only once a second, in jumps as chunks arrived (and when a finished message swapped its estimate for the real count). It now counts toward each new total frame by frame, so a large jump takes about a second and a steady stream is followed closely. Frames run only while the shown number trails the real one.
+
 ## 1.0.99 — 2026-10-25
 
 ### Fixed

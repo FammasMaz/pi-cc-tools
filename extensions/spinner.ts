@@ -770,6 +770,25 @@ const MIN_THINKING_SHOW_MS = 100;
 /** Message refresh cadence. Keep constant so status updates don't stall on long sessions. */
 const WORKING_MESSAGE_INTERVAL_MS = 1_000;
 
+/**
+ * The "↓ N tokens" counter counts up to each new total instead of jumping there. Tokens arrive
+ * in chunks (and a finished message swaps its estimate for the provider's real count), so the
+ * shown number eases toward the real one: each frame closes the same share of the gap, about
+ * 63% every TOKEN_EASE_MS, and at least one token, so a large jump takes about a second and a
+ * steady stream is followed within a few tokens. Frames only run while the numbers differ.
+ */
+const TOKEN_FRAME_MS = 50;
+const TOKEN_EASE_MS = 150;
+
+/** The counter's next value: `shown` moved toward `target` after `elapsedMs`, never past it. */
+export function easeTokenCount(shown: number, target: number, elapsedMs: number): number {
+	const gap = target - shown;
+	if (gap === 0) return target;
+	const eased = Math.abs(gap) * (1 - Math.exp(-Math.max(0, elapsedMs) / TOKEN_EASE_MS));
+	const step = Math.max(1, Math.round(eased));
+	return step >= Math.abs(gap) ? target : shown + Math.sign(gap) * step;
+}
+
 /** Completion message linger */
 const TURN_COMPLETION_MS = 2_500;
 
@@ -778,6 +797,9 @@ export default function (pi: ExtensionAPI) {
 	let agentStartTime = 0;
 	let turnStartTime = 0;
 	let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+	// What the working line shows; eases toward outputTokenCount() (see easeTokenCount).
+	let shownTokens = 0;
+	let tokenFrameTimer: ReturnType<typeof setTimeout> | null = null;
 	let completionTimer: ReturnType<typeof setTimeout> | null = null;
 	let thoughtStatusTimer: ReturnType<typeof setTimeout> | null = null;
 	let currentVerb = "";
@@ -812,7 +834,7 @@ export default function (pi: ExtensionAPI) {
 
 	function buildWorkingMessage(): string {
 		const elapsed = Date.now() - (agentStartTime || turnStartTime);
-		const tokenCount = outputTokenCount();
+		const tokenCount = shownTokens;
 		const statusParts: string[] = [];
 
 		if (thinkingStatus === "thinking") {
@@ -862,6 +884,32 @@ export default function (pi: ExtensionAPI) {
 		agentStartTime = now;
 		runOutputTokens = 0;
 		resetStreamed();
+		resetShownTokens();
+	}
+
+	function resetShownTokens(): void {
+		stopTokenAnimation();
+		shownTokens = 0;
+	}
+
+	function stopTokenAnimation(): void {
+		if (tokenFrameTimer) {
+			clearTimeout(tokenFrameTimer);
+			tokenFrameTimer = null;
+		}
+	}
+
+	/** Count the shown tokens toward the real total, one frame at a time, while they differ. */
+	function animateTokens(): void {
+		if (tokenFrameTimer || !turnActive || shownTokens === outputTokenCount()) return;
+		const scheduledAt = Date.now();
+		tokenFrameTimer = setTimeout(() => {
+			tokenFrameTimer = null;
+			shownTokens = easeTokenCount(shownTokens, outputTokenCount(), Date.now() - scheduledAt);
+			syncWorkingMessage();
+			animateTokens();
+		}, TOKEN_FRAME_MS);
+		unrefTimer(tokenFrameTimer);
 	}
 
 	function syncWorkingMessage(force = false): void {
@@ -924,12 +972,14 @@ export default function (pi: ExtensionAPI) {
 		stopRefreshLoop();
 		syncWorkingMessage(true);
 		scheduleRefreshTick();
+		animateTokens();
 	}
 
 	function rescheduleRefreshLoop(): void {
 		if (!turnActive) return;
 		stopRefreshLoop();
 		scheduleRefreshTick();
+		animateTokens();
 	}
 
 	function stopRefreshLoop(): void {
@@ -937,6 +987,7 @@ export default function (pi: ExtensionAPI) {
 			clearTimeout(refreshTimer);
 			refreshTimer = null;
 		}
+		stopTokenAnimation();
 	}
 
 	function clearCompletionTimer(): void {
@@ -987,6 +1038,7 @@ export default function (pi: ExtensionAPI) {
 		thoughtForSetAt = 0;
 		runOutputTokens = 0;
 		resetStreamed();
+		resetShownTokens();
 		restoreDefaultWorkingMessage();
 	}
 
@@ -1095,6 +1147,7 @@ export default function (pi: ExtensionAPI) {
 		if (statusChanged) {
 			syncWorkingMessage(true);
 			rescheduleRefreshLoop();
+			animateTokens();
 			// Same-frame ordering: ensure footer updates even if pi rendered first.
 			const timer = setTimeout(() => syncWorkingMessage(true), 0);
 			unrefTimer(timer);
@@ -1105,6 +1158,7 @@ export default function (pi: ExtensionAPI) {
 		if (previousTokenCount === 0 && nextTokenCount > 0) {
 			rescheduleRefreshLoop();
 		}
+		animateTokens();
 	});
 
 	// A finished message swaps its estimate for the provider's real output-token count.
@@ -1113,6 +1167,7 @@ export default function (pi: ExtensionAPI) {
 		runOutputTokens += messageOutputTokens(event.message);
 		resetStreamed();
 		if (turnActive) syncWorkingMessage();
+		animateTokens();
 	});
 
 	pi.on("tool_execution_start", async (event: any, ctx) => {
