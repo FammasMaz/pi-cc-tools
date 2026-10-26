@@ -5,6 +5,8 @@ import { register } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { visibleWidth } from "@earendil-works/pi-tui";
+
 import "./ts-resolve-loader.mjs";
 register("./ts-resolve-loader.mjs", import.meta.url);
 
@@ -109,5 +111,46 @@ test("split wraps long lines in full instead of cutting them off (#34)", async (
 		const [left, right] = [0, 1].map((side) => body.map((line) => line.split("│▌")[side].replace(/^(?:.*▌)?[^│]*│ /, "").trimEnd()).join(""));
 		assert.match(left.replace(/\s+/g, ""), /lazydogandkeepsrunningacrossthefielduntiltheend';$/);
 		assert.match(right.replace(/\s+/g, ""), /sleepycatandkeepsrunningacrossthefielduntiltheend';$/);
+	}
+});
+
+// CJK glyphs are one UTF-16 unit but two terminal cells, so measuring a line by
+// `text.length` treated it as half as wide as it draws and let it overflow into the
+// column beside it (the divider and the removed side's stripes drifted with it).
+function barColumns(line: string): number[] {
+	const columns: number[] = [];
+	let column = 0;
+	for (const glyph of line) {
+		if (glyph === "│") columns.push(column);
+		column += visibleWidth(glyph);
+	}
+	return columns;
+}
+
+const compact = (text: string) => text.replace(/\s+/g, "");
+
+const cjkOld = "职责接管： spec 只写方向（为什么做、做成什么样、不做什么、怕什么、定了什么、怎么算完成）。";
+const cjkNew = "职责接管： spec 只写方向（为什么做、做成什么样、不做什么、怕什么、定了什么、怎么算完成）以下全部由本计划承接。";
+
+test("split keeps double-width text inside its own column", async () => {
+	setLayout("split");
+	for (const width of [80, 120]) {
+		const body = (await renderEdit(width, { oldText: cjkOld, newText: cjkNew })).filter((line) => line.includes("│▌"));
+		assert.ok(body.length > 1, `${width}: the CJK line wraps onto continuation rows instead of one long row`);
+		assert.equal(new Set(body.map((line) => barColumns(line)[1])).size, 1, `${width}: the new column keeps a single left edge`);
+		const newSide = body.map((line) => line.split("│").pop() ?? "").join("");
+		assert.equal(compact(newSide), compact(cjkNew), `${width}: the whole added line is wrapped, not cut`);
+	}
+});
+
+test("unified keeps double-width text inside the row", async () => {
+	setLayout("unified");
+	for (const width of [80, 120]) {
+		const body = (await renderEdit(width, { oldText: cjkOld, newText: cjkNew })).filter((line) => line.includes("▌") && line.includes("│"));
+
+		assert.ok(body.length > 1, `${width}: the CJK line wraps onto continuation rows instead of one long row`);
+		assert.equal(new Set(body.map((line) => barColumns(line)[1])).size, 1, `${width}: the code column keeps a single left edge`);
+		const added = body.map((line) => line.split("│").pop() ?? "").join("");
+		assert.ok(compact(added).includes(compact("以下全部由本计划承接")), `${width}: the added line is wrapped, not cut`);
 	}
 });

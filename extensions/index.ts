@@ -5463,25 +5463,72 @@ function adaptiveWrapRows(tw?: number): number {
 	return MAX_WRAP_ROWS_NARROW;
 }
 
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const ASCII_PLAIN_RE = /^[\x20-\x7e]*$/;
+const CELL_WIDTH_CACHE = new Map<string, number>();
+
+/** Terminal columns for one grapheme cluster; CJK and emoji occupy two. */
+function graphemeWidth(grapheme: string): number {
+	if (grapheme.length === 1) {
+		const code = grapheme.charCodeAt(0);
+		if (code >= 0x20 && code <= 0x7e) return 1;
+	}
+	const cached = CELL_WIDTH_CACHE.get(grapheme);
+	if (cached !== undefined) return cached;
+	const measured = visibleWidth(grapheme);
+	if (CELL_WIDTH_CACHE.size < 4096) CELL_WIDTH_CACHE.set(grapheme, measured);
+	return measured;
+}
+
+interface AnsiCell {
+	text: string;
+	width: number;
+}
+
+/**
+ * Split ANSI-styled text into terminal cells: SGR sequences carry zero width, every
+ * grapheme cluster keeps its real column width. Diff gutters, padding and stripes are
+ * laid out in cells, so measuring `text.length` (UTF-16 units) overflowed every CJK line
+ * into the next column.
+ */
+function toCells(text: string): AnsiCell[] {
+	const cells: AnsiCell[] = [];
+	const pushPlain = (plain: string): void => {
+		if (!plain) return;
+		if (ASCII_PLAIN_RE.test(plain)) {
+			for (let i = 0; i < plain.length; i++) cells.push({ text: plain[i], width: 1 });
+			return;
+		}
+		for (const { segment } of GRAPHEME_SEGMENTER.segment(plain)) {
+			cells.push({ text: segment, width: graphemeWidth(segment) });
+		}
+	};
+	let last = 0;
+	for (const match of text.matchAll(ANSI_RE)) {
+		const start = match.index ?? 0;
+		pushPlain(text.slice(last, start));
+		cells.push({ text: match[0], width: 0 });
+		last = start + match[0].length;
+	}
+	pushPlain(text.slice(last));
+	return cells;
+}
+
 function fit(value: string, width: number): string {
 	if (width <= 0) return "";
-	const plain = diffStrip(value);
-	if (plain.length <= width) return value + " ".repeat(width - plain.length);
+	const plainWidth = visibleWidth(diffStrip(value));
+	if (plainWidth <= width) return value + " ".repeat(width - plainWidth);
 	const showWidth = width > 2 ? width - 1 : width;
+	let out = "";
 	let vis = 0;
-	let i = 0;
-	while (i < value.length && vis < showWidth) {
-		if (value[i] === "\x1b") {
-			const end = value.indexOf("m", i);
-			if (end !== -1) {
-				i = end + 1;
-				continue;
-			}
-		}
-		vis++;
-		i++;
+	for (const cell of toCells(value)) {
+		if (vis + cell.width > showWidth) break;
+		out += cell.text;
+		vis += cell.width;
 	}
-	return width > 2 ? `${value.slice(0, i)}${D_RST}${FG_DIM}›${D_RST}` : `${value.slice(0, i)}${D_RST}`;
+	// A trailing double-width grapheme can stop the loop one cell short.
+	const pad = " ".repeat(Math.max(0, showWidth - vis));
+	return width > 2 ? `${out}${pad}${D_RST}${FG_DIM}›${D_RST}` : `${out}${pad}${D_RST}`;
 }
 
 function ansiState(text: string): string {
@@ -5522,11 +5569,12 @@ function normalizeShikiContrast(ansi: string): string {
 
 function wrapAnsi(text: string, width: number, maxRows = adaptiveWrapRows(), fillBg = ""): string[] {
 	if (width <= 0) return [""];
-	const plain = diffStrip(text);
-	if (plain.length <= width) {
-		const pad = width - plain.length;
+	const plainWidth = visibleWidth(diffStrip(text));
+	if (plainWidth <= width) {
+		const pad = width - plainWidth;
 		return pad > 0 ? [text + fillBg + " ".repeat(pad) + (fillBg ? D_RST : "")] : [text];
 	}
+	const cells = toCells(text);
 
 	const rows: string[] = [];
 	let row = "";
@@ -5535,32 +5583,20 @@ function wrapAnsi(text: string, width: number, maxRows = adaptiveWrapRows(), fil
 	let onLastRow = false;
 	let effectiveWidth = width;
 
-	while (i < text.length) {
+	while (i < cells.length) {
 		if (!onLastRow && rows.length >= maxRows - 1) {
 			onLastRow = true;
 			effectiveWidth = width > 2 ? width - 1 : width;
 		}
-		if (text[i] === "\x1b") {
-			const end = text.indexOf("m", i);
-			if (end !== -1) {
-				row += text.slice(i, end + 1);
-				i = end + 1;
-				continue;
-			}
-		}
-		if (vis >= effectiveWidth) {
+		const cell = cells[i];
+		if (vis > 0 && vis + cell.width > effectiveWidth) {
 			if (onLastRow) {
 				let hasMore = false;
-				for (let j = i; j < text.length; j++) {
-					if (text[j] === "\x1b") {
-						const e2 = text.indexOf("m", j);
-						if (e2 !== -1) {
-							j = e2;
-							continue;
-						}
+				for (let j = i; j < cells.length; j++) {
+					if (cells[j].width > 0) {
+						hasMore = true;
+						break;
 					}
-					hasMore = true;
-					break;
 				}
 				if (hasMore && width > 2) row += `${D_RST}${FG_DIM}›${D_RST}`;
 				else row += fillBg + " ".repeat(Math.max(0, width - vis)) + D_RST;
@@ -5568,7 +5604,9 @@ function wrapAnsi(text: string, width: number, maxRows = adaptiveWrapRows(), fil
 				return rows;
 			}
 			const state = ansiState(row);
-			rows.push(row + D_RST);
+			// A double-width grapheme that does not fit leaves a cell empty; pad it so the
+			// next column's gutter stays aligned.
+			rows.push(vis < width ? `${row}${fillBg}${" ".repeat(width - vis)}${D_RST}` : `${row}${D_RST}`);
 			row = state + fillBg;
 			vis = 0;
 			if (rows.length >= maxRows - 1) {
@@ -5576,8 +5614,8 @@ function wrapAnsi(text: string, width: number, maxRows = adaptiveWrapRows(), fil
 				effectiveWidth = width > 2 ? width - 1 : width;
 			}
 		}
-		row += text[i];
-		vis++;
+		row += cell.text;
+		vis += cell.width;
 		i++;
 	}
 
@@ -5666,7 +5704,7 @@ function shouldUseSplit(diff: ParsedDiff, tw: number, maxRows = MAX_PREVIEW_LINE
 	for (const line of vis) {
 		if (line.type === "sep") continue;
 		contentLines++;
-		if (tabs(line.content).length > cw) wrapCandidates++;
+		if (visibleWidth(tabs(line.content)) > cw) wrapCandidates++;
 	}
 	if (contentLines === 0) return true;
 	const wrapRatio = wrapCandidates / contentLines;
