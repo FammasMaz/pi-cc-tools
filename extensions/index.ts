@@ -104,6 +104,10 @@ let CODE_BLOCK_LANG_FG = "\x1b[38;2;95;95;95m";
 const CHROME_ITALIC = "\x1b[3m";
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const ANSI_PRESENT_RE = /\x1b\[[0-9;]*m/;
+const DISPLAY_SUMMARY_MAX_CODE_POINTS = 96;
+const TERMINAL_CONTROL_SEQUENCE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][\s\S]*?(?:\x07|\x1b\\)|[()][ -~]|[78=>])/g;
+const C1_CONTROL_SEQUENCE_RE = /\x9b[0-?]*[ -/]*[@-~]|\x9d[\s\S]*?(?:\x07|\x9c)/g;
+const CONTROL_CHARACTER_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
 const TOOL_RENDER_CACHE = Symbol.for("pi-claude-style-tools:tool-render-cache");
 const COMPONENT_PARENT = Symbol.for("pi-claude-style-tools:component-parent");
@@ -137,6 +141,8 @@ interface SettingsFile {
 	extraToolOutputExpanded?: boolean;
 	groupToolCalls?: boolean;
 	bashOutputMode?: "opencode" | "summary" | "preview";
+	/** Show model-written purpose text in Bash rows. Defaults to true. */
+	bashIntent?: boolean;
 	bashCollapsedLines?: number;
 	/** Verbatim script lines shown while bash is running or after failure. Defaults to 8. */
 	bashCommandPreviewLines?: number;
@@ -295,6 +301,23 @@ function applyToolBackgroundMode(theme: unknown): void {
 
 function stripAnsi(text: string): string {
 	return text.replace(ANSI_RE, "");
+}
+
+function bashDisplaySummarySuffix(args: any): string {
+	if (typeof args?.displaySummary !== "string") return "";
+	const summary = args.displaySummary
+		.replace(TERMINAL_CONTROL_SEQUENCE_RE, "")
+		.replace(C1_CONTROL_SEQUENCE_RE, "")
+		.replace(ANSI_RE, "")
+		.replace(CONTROL_CHARACTER_RE, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!summary) return "";
+	const codePoints = [...summary];
+	const clipped = codePoints.length > DISPLAY_SUMMARY_MAX_CODE_POINTS
+		? `${codePoints.slice(0, DISPLAY_SUMMARY_MAX_CODE_POINTS - 1).join("")}…`
+		: summary;
+	return ` — ${clipped}`;
 }
 
 function stripRenderedHeadingMarkers(line: string): string {
@@ -8483,19 +8506,38 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const bashTool = createBashTool(cwd);
+	const bashIntentEnabled = readSettings().bashIntent !== false;
+	const bashParameters = {
+		...bashTool.parameters,
+		properties: {
+			...bashTool.parameters.properties,
+			displaySummary: {
+				type: "string",
+				description: "Concise user-facing purpose for this command, in the user's current language. Do not include credentials, secrets, or command output.",
+			},
+		},
+	} as typeof bashTool.parameters;
+	const bashIntentGuidelines = bashIntentEnabled
+		? [
+			...((bashTool as any).promptGuidelines ?? []),
+			"When calling bash, include displaySummary: a concise user-facing purpose in the user's current language. Do not include credentials, secrets, or command output.",
+		]
+		: (bashTool as any).promptGuidelines;
+
 	pi.registerTool({
 		name: "bash",
 		label: "bash",
 		description: bashTool.description,
 		promptSnippet: (bashTool as any).promptSnippet,
-		promptGuidelines: (bashTool as any).promptGuidelines,
-		parameters: bashTool.parameters,
+		promptGuidelines: bashIntentGuidelines,
+		parameters: bashIntentEnabled ? bashParameters : bashTool.parameters,
 		async execute(toolCallId, params, signal, onUpdate) {
+			const { displaySummary: _displaySummary, ...bashParams } = params as typeof params & { displaySummary?: string };
 			// A command that only changes files: look at them before and after, so the row
 			// can show a diff like an edit/write row. The command itself runs unchanged.
-			const fileEdit = detectBashFileEdit(typeof params.command === "string" ? params.command : "");
+			const fileEdit = detectBashFileEdit(typeof bashParams.command === "string" ? bashParams.command : "");
 			const before = fileEdit ? snapshotBashFileEdit(cwd, fileEdit) : undefined;
-			const result = await bashTool.execute(toolCallId, params, signal, onUpdate);
+			const result = await bashTool.execute(toolCallId, bashParams, signal, onUpdate);
 			if (fileEdit && before) {
 				const details = result.details && typeof result.details === "object" ? result.details : {};
 				(result as any).details = { ...details, fileEdits: collectBashFileEdits(cwd, fileEdit, before) };
@@ -8513,8 +8555,10 @@ export default function (pi: ExtensionAPI) {
 				const showCommand = status === "error" || ctx.expanded === true;
 				const commandBlock = showCommand ? renderBashCommandBlock(command, ctx.expanded === true, theme) : "";
 				const rowCwd = ctx.cwd ?? cwd;
-				const header = bashFileEditHeader(fileEdit, ctx.state?._bashFileEdits, theme, rowCwd, (path) => shortPath(rowCwd, path), toolStatusDot(ctx, theme), bashHeaderTrailing(ctx, theme));
-				return makeText(ctx.lastComponent, commandBlock ? `${header}\n${commandBlock}` : header);
+				const trailing = bashHeaderTrailing(ctx, theme);
+				const header = bashFileEditHeader(fileEdit, ctx.state?._bashFileEdits, theme, rowCwd, (path) => shortPath(rowCwd, path), toolStatusDot(ctx, theme), "");
+				const withIntent = `${header}${theme.fg("accent", bashIntentEnabled ? bashDisplaySummarySuffix(args) : "")}${trailing}`;
+				return makeText(ctx.lastComponent, commandBlock ? `${withIntent}\n${commandBlock}` : withIntent);
 			}
 			const presentation = buildBashCommandPresentation(command);
 			const summary = stableCallSummary(ctx, "_bashHeadline", () => presentation.headline);
@@ -8525,7 +8569,7 @@ export default function (pi: ExtensionAPI) {
 			const headerSummary = ctx.expanded === true && commandBlock ? describeBashSource(presentation) : summary;
 			const header = toolHeader(
 				"Bash",
-				`${headerSummary}${rtkBadge}`,
+				`${headerSummary}${bashIntentEnabled ? bashDisplaySummarySuffix(args) : ""}${rtkBadge}`,
 				theme,
 				toolStatusDot(ctx, theme),
 				bashHeaderTrailing(ctx, theme),

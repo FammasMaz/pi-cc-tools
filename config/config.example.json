@@ -10,6 +10,7 @@
   "groupToolCalls": true,
   "thinkingMode": "live",
   "bashOutputMode": "opencode",
+  "bashIntent": true,
   "bashCollapsedLines": 10,
   "bashCommandPreviewLines": 0,
   "liveToolPreview": false,
