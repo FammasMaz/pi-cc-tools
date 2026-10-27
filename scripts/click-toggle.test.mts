@@ -116,3 +116,105 @@ test("a wrapped last line continues under blank space, not under a connector", (
 		assert.notEqual(continuation[corner], "│", JSON.stringify(lines));
 	}
 });
+
+test("a click on any line of an expanded group closes the whole group", () => {
+	const { ui } = fakeUi(false);
+	const rows = group(ui);
+	assert.ok(rows.handleMouse(click(rows, 1))?.handled);
+	assert.ok(rows.tools.every((tool: any) => tool.expanded === true), "the sentence opens every call");
+	const lines: string[] = rows.render(100);
+	const inner = lines.findIndex((line) => plain(line).includes("Bash"));
+	assert.ok(inner > 1, "a line inside the group, below the sentence");
+	assert.ok(rows.handleMouse({ type: "click", button: "left", x: 30, y: inner, width: 100, height: lines.length, screenY: 10 + inner, clickCount: 1 })?.handled);
+	assert.ok(rows.tools.every((tool: any) => tool.expanded !== true), "every call closed, not just the one clicked");
+	assert.ok(rows.handleMouse(click(rows, 1))?.handled);
+	assert.ok(rows.tools.every((tool: any) => tool.expanded === true), "and the next click opens it again");
+});
+
+test("a group that is partly open closes on the next click instead of opening the rest", () => {
+	const { ui } = fakeUi(false);
+	const rows = group(ui);
+	rows.tools[0].setExpanded(true);
+	rows.expanded = true;
+	assert.ok(rows.handleMouse(click(rows, 1))?.handled);
+	assert.ok(rows.tools.every((tool: any) => tool.expanded !== true));
+});
+
+test("a press and release one cell apart is a click; a longer move is a drag", () => {
+	const { applyClickSlop } = extension;
+	const press = { button: 0, x: 10, y: 5 };
+	assert.deepEqual(applyClickSlop(press), press);
+	assert.equal(applyClickSlop({ button: 32, x: 11, y: 5 }), undefined, "a one-cell move while pressed is dropped");
+	assert.deepEqual(applyClickSlop({ button: 0, x: 11, y: 6, release: true }), { button: 0, x: 10, y: 5, release: true }, "the release is reported at the press");
+
+	applyClickSlop({ button: 0, x: 10, y: 5 });
+	assert.deepEqual(applyClickSlop({ button: 32, x: 14, y: 5 }), { button: 32, x: 14, y: 5 }, "a real drag passes through");
+	assert.deepEqual(applyClickSlop({ button: 32, x: 10, y: 5 }), { button: 32, x: 10, y: 5 }, "and stays a drag even if it comes back");
+	assert.deepEqual(applyClickSlop({ button: 0, x: 11, y: 5, release: true }), { button: 0, x: 11, y: 5, release: true });
+
+	assert.deepEqual(applyClickSlop({ button: 64, x: 3, y: 3 }), { button: 64, x: 3, y: 3 }, "wheel untouched");
+	assert.deepEqual(applyClickSlop({ button: 35, x: 4, y: 4 }), { button: 35, x: 4, y: 4 }, "plain moves untouched");
+	assert.deepEqual(applyClickSlop({ button: 2, x: 5, y: 5 }), { button: 2, x: 5, y: 5 }, "right button untouched");
+});
+
+test("a row's padding is measured from its label, so a blinking dot does not move the lines below", () => {
+	assert.equal(extension.toolRowPad(" ● Bash command"), 1);
+	assert.equal(extension.toolRowPad("   Bash command"), 1, "dot blinked off");
+	assert.equal(extension.toolRowPad(" \x1b[32m●\x1b[39m Bash"), 1);
+	assert.equal(extension.toolRowPad(" · Agent"), 1);
+});
+
+// pi's ScrollView, reduced to what the hold uses.
+function fakeView(following: boolean) {
+	const calls: string[] = [];
+	const view = {
+		isFollowingEnd: following,
+		scrollTop: 40,
+		scrollTo(top: number, options?: { disableFollow?: boolean }) {
+			calls.push(`scrollTo ${top}${options?.disableFollow ? " hold" : ""}`);
+			this.scrollTop = top;
+			if (options?.disableFollow) this.isFollowingEnd = false;
+		},
+		scrollToEnd() {
+			calls.push("scrollToEnd");
+			this.isFollowingEnd = true;
+		},
+	};
+	return { view, calls, tui: { getPrimaryScrollView: () => view, requestRender() {} } };
+}
+
+test("the transcript holds still while the button is down, then follows its end again", () => {
+	const { dispatchMouseWithClickFixes } = extension;
+	const seen: any[] = [];
+	const pass = (raw: any) => { seen.push(raw); return undefined; };
+	const { view, calls, tui } = fakeView(true);
+	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 3 }, pass);
+	assert.deepEqual(calls, ["scrollTo 40 hold"], "pressing stops the view from following new output");
+	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 3, release: true }, pass);
+	assert.deepEqual(calls, ["scrollTo 40 hold", "scrollToEnd"], "releasing follows the end again");
+	assert.equal(view.isFollowingEnd, true);
+	assert.equal(seen.length, 2);
+});
+
+test("after a click that opens a row, or a scroll during the press, the view stays where it is", () => {
+	const { dispatchMouseWithClickFixes } = extension;
+	// The click opens a group, which keeps the row in place (no snap back to the end).
+	const { ui } = fakeUi(false);
+	const rows = group(ui);
+	const opened = fakeView(true);
+	dispatchMouseWithClickFixes(opened.tui, { button: 0, x: 5, y: 3 }, () => undefined);
+	dispatchMouseWithClickFixes(opened.tui, { button: 0, x: 5, y: 3, release: true }, () => rows.handleMouse(click(rows, 1)));
+	assert.ok(rows.tools.every((tool: any) => tool.expanded === true));
+	assert.ok(!opened.calls.includes("scrollToEnd"), opened.calls.join(", "));
+	// Something else scrolled the view while the button was down (a scrollbar drag).
+	const dragged = fakeView(true);
+	dispatchMouseWithClickFixes(dragged.tui, { button: 0, x: 99, y: 3 }, () => undefined);
+	dragged.view.scrollTop = 12;
+	dispatchMouseWithClickFixes(dragged.tui, { button: 0, x: 99, y: 3, release: true }, () => undefined);
+	assert.ok(!dragged.calls.includes("scrollToEnd"), "no snap back after scrolling away");
+	// A view that was not following is left alone.
+	const still = fakeView(false);
+	dispatchMouseWithClickFixes(still.tui, { button: 0, x: 5, y: 3 }, () => undefined);
+	dispatchMouseWithClickFixes(still.tui, { button: 0, x: 5, y: 3, release: true }, () => undefined);
+	assert.deepEqual(still.calls, []);
+});

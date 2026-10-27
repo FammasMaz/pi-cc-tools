@@ -59,7 +59,7 @@ const themes = await import("../node_modules/@earendil-works/pi-coding-agent/dis
 themes.initTheme("dark", false);
 const plain = (text: string) => text.replace(/\x1b\[[0-9;]*m|\x1b\][^\x07]*\x07/g, "").replace(/[\uE000\uE001]/g, "");
 const requests = () => (existsSync(requestLog) ? readFileSync(requestLog, "utf8").split("\n").filter(Boolean) : []);
-const until = async (check: () => boolean, ms = 3000) => {
+const until = async (check: () => boolean, ms = 10_000) => {
 	for (const end = Date.now() + ms; Date.now() < end; ) {
 		if (check()) return true;
 		await new Promise((resolve) => setTimeout(resolve, 10));

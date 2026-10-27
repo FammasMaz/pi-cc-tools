@@ -930,12 +930,21 @@ function getCollapsedToolEntryLine(entry: CollapsedToolEntry, width: number, gro
 	return clampLineWidth(`${sharedLine}${suffix}`, width);
 }
 
+/**
+ * A tool row's own left padding: the column of its status dot. Measured from where the label
+ * starts (two columns after the dot), because a running row's dot blinks and its off phase is
+ * a space; counting leading spaces gave 1 or 3 and made the lines below jump sideways.
+ */
+export function toolRowPad(firstLine: string): number {
+	const lead = /^[ ●•·]*/.exec(stripAnsi(firstLine))?.[0].length ?? 0;
+	return Math.max(0, lead - 2);
+}
+
 function getExpandedToolGroupLines(tool: any, width: number, groupedLabel?: string): string[] {
 	const rendered = stripToolChrome(tool.render(Math.max(1, width)));
-	// The child row's own padding is its first line's leading spaces. The header loses its
-	// marker and padding; the lines below lose only the padding, so the child's └ and the
-	// output under it keep their indent.
-	const childPad = /^ */.exec(stripAnsi(rendered[0] ?? ""))?.[0].length ?? 0;
+	// The header loses its marker and padding; the lines below lose only the padding, so the
+	// child's └ and the output under it keep their indent.
+	const childPad = toolRowPad(rendered[0] ?? "");
 	const lines = rendered.map((line, index) =>
 		index === 0 ? tintGroupedToolLine(removeGroupedToolPrefix(line, groupedLabel), groupedLabel) : trimAnsiLeftBy(line, childPad),
 	);
@@ -1149,16 +1158,17 @@ class ToolGroupComponent extends Container {
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		const target = mouseLayoutTarget(this.mouseLayout, event);
+		// The whole group is one click target: any of its lines toggles all of its calls, so a
+		// group is never left half open (which made the next click on it re-expand instead of
+		// collapse). Hover lights up the group's sentence wherever the pointer is on it.
 		if (event.type === "move") {
-			const row = target?.top ?? -1;
+			const header = this.mouseLayout?.children.find((entry) => !entry.component);
+			const row = target ? (header?.top ?? target.top) : -1;
 			claimClickHover(this, () => { if (setGroupHover(this, -1)) requestComponentRender(this); });
 			return setGroupHover(this, row) ? { handled: true, render: true } : undefined;
 		}
 		if (isPrimaryClick(event) && target) {
-			const targets = target.component
-				? Array.isArray(target.component) ? target.component : [target.component]
-				: this.tools;
-			return toggleGroupedTools(this, targets, event);
+			return toggleGroupedTools(this, this.tools, event);
 		}
 		return undefined;
 	}
@@ -1287,7 +1297,8 @@ function applyGroupHover(lines: string[], layout: { children: MouseLayoutEntry[]
 	const entry = layout.children.find((candidate) => candidate.top === hoverStart);
 	if (!entry) return lines;
 	const rendered = lines.slice();
-	const line = entry.top + (entry.component ? 0 : Math.max(0, entry.height - 1));
+	// A group's header is a blank line, its sentence, and (while running) the call in progress.
+	const line = entry.top + (entry.component ? 0 : Math.min(1, Math.max(0, entry.height - 1)));
 	if (line < rendered.length) rendered[line] = brightenRenderedLine(rendered[line]);
 	return rendered;
 }
@@ -1806,6 +1817,7 @@ function scrollViewRect(tui: any, view: any): { y: number; height: number } | un
 
 function keepClickedRowInPlace(ui: any, expanding: boolean, component?: any, event?: TuiMouseEvent): void {
 	if (!expanding) return;
+	clickOpenedRow = true;
 	try {
 		const tui = typeof ui?.getPrimaryScrollView === "function" ? ui : mouseDispatchTui;
 		const view = tui?.getPrimaryScrollView?.();
@@ -1893,7 +1905,8 @@ function mouseLayoutTarget(
 function toggleGroupedTools(group: any, tools: any[], event?: TuiMouseEvent): { handled: true } | undefined {
 	const targets = tools.filter((tool) => typeof tool?.setExpanded === "function");
 	if (targets.length === 0) return undefined;
-	const expanded = targets.some((tool) => tool.expanded !== true);
+	// Shown open (any call expanded) → close all; shown closed → open all.
+	const expanded = !targets.some((tool) => tool.expanded === true);
 	keepClickedRowInPlace(targets.find((tool) => tool?.ui)?.ui, expanded, group, event);
 	for (const tool of targets) tool.setExpanded(expanded);
 	if (Array.isArray(group?.tools)) group.expanded = group.tools.some((tool: any) => tool?.expanded === true);
@@ -1908,6 +1921,95 @@ let hoveredClickTarget: { owner: object; clear: () => void } | undefined;
 let mouseDispatchTui: any;
 let hoverClaimedThisMove = false;
 
+// pi counts a click only when the press and the release land on the same cell, so a pointer
+// that drifts across a cell edge while clicking (a trackpad press often does) selected a
+// character instead of expanding the row. Within one cell of the press, moves are dropped and
+// the release is reported where the press was. Farther moves are drags, as before.
+const CLICK_SLOP_CELLS = 1;
+let mousePress: { x: number; y: number; dragging: boolean } | undefined;
+
+// While the transcript follows its end, new output scrolls it, and pi compares a press and its
+// release by their place in the transcript: a line arriving mid-click turned the click into a
+// selection. Hold the view still while the left button is down, then follow again, unless the
+// click opened a row (which keeps it in place) or something else scrolled the view meanwhile
+// (a scrollbar drag, the wheel).
+let heldView: { view: any; top: number; timer?: ReturnType<typeof setTimeout> } | undefined;
+let clickOpenedRow = false;
+
+type RawMouseEvent = { button: number; x: number; y: number; release?: boolean };
+
+/** pi's raw mouse handling with the click fixes around it: slop, and a held view while pressed. */
+export function dispatchMouseWithClickFixes(tui: any, input: RawMouseEvent, original: (raw: RawMouseEvent) => unknown): unknown {
+	const raw = applyClickSlop(input);
+	if (!raw) return undefined;
+	const leftButton = (raw.button & 64) === 0 && (raw.button & 3) === 0;
+	const leftPress = leftButton && (raw.button & 32) === 0 && !raw.release;
+	const leftRelease = leftButton && raw.release === true;
+	if (leftPress) holdViewForPress(tui);
+	else if (leftButton && (raw.button & 32) !== 0) armHeldViewTimer(tui); // still dragging
+	if (leftRelease) clickOpenedRow = false;
+	const result = original(raw);
+	if (leftRelease) releaseHeldView(true, tui);
+	return result;
+}
+
+function holdViewForPress(tui: any): void {
+	releaseHeldView(false);
+	try {
+		const view = tui?.getPrimaryScrollView?.();
+		if (!view || view.isFollowingEnd !== true || typeof view.scrollTo !== "function") return;
+		view.scrollTo(view.scrollTop, { disableFollow: true });
+		heldView = { view, top: view.scrollTop };
+		// A release can go missing (the pointer left the window); never stay held.
+		armHeldViewTimer(tui);
+	} catch { /* no scroll view in regular mode */ }
+}
+
+function armHeldViewTimer(tui: any): void {
+	if (!heldView) return;
+	if (heldView.timer) clearTimeout(heldView.timer);
+	heldView.timer = setTimeout(() => releaseHeldView(true, tui), 8000);
+	unrefTimer(heldView.timer);
+}
+
+function releaseHeldView(follow: boolean, tui?: any): void {
+	const held = heldView;
+	heldView = undefined;
+	if (!held) return;
+	if (held.timer) clearTimeout(held.timer);
+	if (!follow || clickOpenedRow) return;
+	try {
+		if (held.view.scrollTop === held.top && held.view.isFollowingEnd !== true && typeof held.view.scrollToEnd === "function") {
+			held.view.scrollToEnd();
+			tui?.requestRender?.();
+		}
+	} catch { /* view gone */ }
+}
+
+/** The mouse event pi should see, or undefined to drop it (a tiny move while pressed). */
+export function applyClickSlop<T extends { button: number; x: number; y: number; release?: boolean }>(raw: T): T | undefined {
+	const button = raw.button;
+	const wheel = (button & 64) !== 0;
+	const motion = (button & 32) !== 0;
+	const left = !wheel && (button & 3) === 0;
+	if (!left) return raw;
+	if (!motion && !raw.release) {
+		mousePress = { x: raw.x, y: raw.y, dragging: false };
+		return raw;
+	}
+	const press = mousePress;
+	if (!press) return raw;
+	if (raw.release) mousePress = undefined;
+	if (press.dragging) return raw;
+	const near = Math.abs(raw.x - press.x) <= CLICK_SLOP_CELLS && Math.abs(raw.y - press.y) <= CLICK_SLOP_CELLS;
+	if (!near) {
+		press.dragging = true;
+		return raw;
+	}
+	if (motion) return undefined;
+	return raw.x === press.x && raw.y === press.y ? raw : { ...raw, x: press.x, y: press.y };
+}
+
 function claimClickHover(owner: object, clear: () => void): void {
 	hoverClaimedThisMove = true;
 	if (hoveredClickTarget?.owner === owner) return;
@@ -1920,11 +2022,11 @@ function patchFullscreenHoverExit(): void {
 	const proto = (PiTui as any).TuiAltScreen?.prototype;
 	if (!proto || proto[FULLSCREEN_HOVER_PATCH_FLAG] || typeof proto.handleMouseEvent !== "function") return;
 	const originalHandleMouse = proto.handleMouseEvent;
-	proto.handleMouseEvent = function patchedFullscreenMouseEvent(raw: { button: number }) {
+	proto.handleMouseEvent = function patchedFullscreenMouseEvent(input: RawMouseEvent) {
 		mouseDispatchTui = this;
-		const isMove = (raw.button & 35) === 35;
+		const isMove = (input.button & 35) === 35;
 		if (isMove) hoverClaimedThisMove = false;
-		const result = originalHandleMouse.call(this, raw);
+		const result = dispatchMouseWithClickFixes(this, input, (raw) => originalHandleMouse.call(this, raw));
 		if (isMove && !hoverClaimedThisMove && hoveredClickTarget) {
 			const previous = hoveredClickTarget;
 			hoveredClickTarget = undefined;
@@ -3578,7 +3680,7 @@ const TOOL_MOUSE_EVENT_KEY = Symbol.for("pi-claude-style-tools:tool-mouse-event"
 
 function toggleToolRowByClick(tool: any, event: TuiMouseEvent): { handled: true } | undefined {
 	const group = tool[COMPONENT_PARENT];
-	if (group?.constructor?.name === "ToolGroupComponent") return toggleGroupedTools(group, [tool], event);
+	if (group?.constructor?.name === "ToolGroupComponent") return toggleGroupedTools(group, Array.isArray(group.tools) ? group.tools : [tool], event);
 	if (!toggleExpandedComponent(tool, event)) return undefined;
 	requestComponentRender(tool);
 	return { handled: true };

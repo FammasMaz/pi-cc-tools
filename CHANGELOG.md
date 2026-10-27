@@ -3,6 +3,16 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Fixed
+
+- **Click to expand missed clicks.**
+  - A click whose pointer drifted by one cell between press and release (common on trackpads) selected a character instead of toggling the row. Within one cell of the press it now counts as a click; a longer move is still a text selection.
+  - While a reply streamed, the transcript scrolled under the pointer during the click, so pi saw the release on a different line and treated it as a selection. The transcript now holds still while the button is down, then follows the end again unless the click opened a row.
+  - Clicking a line inside an expanded group toggled only that call, leaving the group half open, and the next click on the group's sentence re-opened it instead of closing it. Any line of a group now opens or closes the whole group.
+- **Lines under a running call in an expanded group jumped sideways** each time its dot blinked off. The row's padding is now measured from its label instead of counting leading spaces.
+
 ## 1.0.105 — 2026-10-27
 
 ### Changed
