@@ -38,6 +38,7 @@
     "extensions/settings-path.ts",
     "extensions/bash-command.ts",
     "extensions/bash-file-edit.ts",
+    "extensions/bash-intent.ts",
     "extensions/theme-colors.ts",
     "extensions/terminal-theme.ts",
     "config/config.example.json",
