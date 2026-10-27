@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Changed
+
+- **A labelled bash row shows the label in place of the command**, as `Bash Run the test suite`. Long commands left no room for the label, which was cut to a word or two. Clicking the row or pressing `Ctrl+O` still shows the full command and its output. Labels use the normal text color, so they read as a description rather than a command.
+
 ## 1.0.104 — 2026-10-27
 
 ### Added

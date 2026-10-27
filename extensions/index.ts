@@ -73,6 +73,7 @@ import {
 } from "./bash-command";
 import {
 	BASH_INTENT_MODES,
+	cleanIntentLabel,
 	configureLocalIntents,
 	localIntentFor,
 	localIntentUnsupportedReason,
@@ -114,10 +115,6 @@ let CODE_BLOCK_LANG_FG = "\x1b[38;2;95;95;95m";
 const CHROME_ITALIC = "\x1b[3m";
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const ANSI_PRESENT_RE = /\x1b\[[0-9;]*m/;
-const DISPLAY_SUMMARY_MAX_CODE_POINTS = 96;
-const TERMINAL_CONTROL_SEQUENCE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][\s\S]*?(?:\x07|\x1b\\)|[()][ -~]|[78=>])/g;
-const C1_CONTROL_SEQUENCE_RE = /\x9b[0-?]*[ -/]*[@-~]|\x9d[\s\S]*?(?:\x07|\x9c)/g;
-const CONTROL_CHARACTER_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
 const TOOL_RENDER_CACHE = Symbol.for("pi-claude-style-tools:tool-render-cache");
 const COMPONENT_PARENT = Symbol.for("pi-claude-style-tools:component-parent");
@@ -316,23 +313,6 @@ function applyToolBackgroundMode(theme: unknown): void {
 
 function stripAnsi(text: string): string {
 	return text.replace(ANSI_RE, "");
-}
-
-function bashDisplaySummarySuffix(args: any): string {
-	if (typeof args?.displaySummary !== "string") return "";
-	const summary = args.displaySummary
-		.replace(TERMINAL_CONTROL_SEQUENCE_RE, "")
-		.replace(C1_CONTROL_SEQUENCE_RE, "")
-		.replace(ANSI_RE, "")
-		.replace(CONTROL_CHARACTER_RE, "")
-		.replace(/\s+/g, " ")
-		.trim();
-	if (!summary) return "";
-	const codePoints = [...summary];
-	const clipped = codePoints.length > DISPLAY_SUMMARY_MAX_CODE_POINTS
-		? `${codePoints.slice(0, DISPLAY_SUMMARY_MAX_CODE_POINTS - 1).join("")}…`
-		: summary;
-	return ` — ${clipped}`;
 }
 
 function stripRenderedHeadingMarkers(line: string): string {
@@ -3808,11 +3788,12 @@ function isBlinkOn(): boolean {
 	return Math.floor(Date.now() / 500) % 2 === 0;
 }
 
-function toolHeader(tool: string, summary: string, theme: Theme, prefix = "", trailing = ""): string {
+/** `summaryColor`: accent for literal values (commands, paths), text for plain-English labels. */
+function toolHeader(tool: string, summary: string, theme: Theme, prefix = "", trailing = "", summaryColor: "accent" | "text" = "accent"): string {
 	applyThemePaletteIfNeeded(theme);
 	const label = theme.fg("toolTitle", theme.bold(tool));
 	const body = summary
-		? `${label} ${WRAP_MARK}${theme.fg("accent", summary)}`
+		? `${label} ${WRAP_MARK}${theme.fg(summaryColor, summary)}`
 		: label;
 	return trailing ? `${prefix}${body}${trailing}` : `${prefix}${body}`;
 }
@@ -8579,13 +8560,13 @@ export default function (pi: ExtensionAPI) {
 	const bashIntentEnabled = bashIntentMode === "model";
 	const localIntentProblem = bashIntentMode === "local" ? localIntentUnsupportedReason() : undefined;
 	configureLocalIntents(bashIntentMode === "local" && !localIntentProblem, (message) => notifyIntentProblem(message));
-	/** " — label" for a bash row, from the model's argument or the local model's cache. */
-	const bashIntentSuffix = (args: any, ctx: any): string => {
-		if (bashIntentMode === "model") return bashDisplaySummarySuffix(args);
+	/** The label for a bash row, from the model's argument or the local model's cache, or "". */
+	const bashIntentLabel = (args: any, ctx: any): string => {
+		if (bashIntentMode === "model") return cleanIntentLabel(args?.displaySummary);
 		if (bashIntentMode !== "local") return "";
 		const command = typeof args?.command === "string" ? args.command : "";
 		const label = localIntentFor(command);
-		if (label) return bashDisplaySummarySuffix({ displaySummary: label });
+		if (label) return label;
 		if (ctx?.executionStarted === true) watchLocalIntent(command, () => safeInvalidate(ctx));
 		return "";
 	};
@@ -8641,7 +8622,8 @@ export default function (pi: ExtensionAPI) {
 				const rowCwd = ctx.cwd ?? cwd;
 				const trailing = bashHeaderTrailing(ctx, theme);
 				const header = bashFileEditHeader(fileEdit, ctx.state?._bashFileEdits, theme, rowCwd, (path) => shortPath(rowCwd, path), toolStatusDot(ctx, theme), "");
-				const withIntent = `${header}${theme.fg("accent", bashIntentSuffix(args, ctx))}${trailing}`;
+				const label = bashIntentLabel(args, ctx);
+				const withIntent = `${header}${label ? theme.fg("text", ` — ${label}`) : ""}${trailing}`;
 				return makeText(ctx.lastComponent, commandBlock ? `${withIntent}\n${commandBlock}` : withIntent);
 			}
 			const presentation = buildBashCommandPresentation(command);
@@ -8650,13 +8632,17 @@ export default function (pi: ExtensionAPI) {
 			const status = ctx?.state?._toolStatus;
 			const showCommand = ctx.argsComplete === true && (status === "pending" || status === "error" || ctx.expanded === true);
 			const commandBlock = showCommand ? renderBashCommandBlock(command, ctx.expanded === true, theme) : "";
-			const headerSummary = ctx.expanded === true && commandBlock ? describeBashSource(presentation) : summary;
+			// With a label, the row shows it in place of the command; expanding shows the command.
+			const label = bashIntentLabel(args, ctx);
+			const headerSummary = label || (ctx.expanded === true && commandBlock ? describeBashSource(presentation) : summary);
 			const header = toolHeader(
 				"Bash",
-				`${headerSummary}${bashIntentSuffix(args, ctx)}${rtkBadge}`,
+				`${headerSummary}${rtkBadge}`,
 				theme,
 				toolStatusDot(ctx, theme),
 				bashHeaderTrailing(ctx, theme),
+				// A label is a description, not the command: plain text, like the group sentences.
+				label ? "text" : "accent",
 			).replace(WRAP_MARK, CLIP_MARK);
 			return makeText(ctx.lastComponent, commandBlock ? `${header}\n${commandBlock}` : header);
 		},

@@ -41,11 +41,15 @@ While a tool runs, the working line names it: `Running npm test…`, `Reading st
 
 ## Bash labels
 
-Bash rows can carry a short purpose after the command, as in `Bash git status --short — Show status summary`. `/cc-tools intent` picks where the label comes from:
+With labels on, a bash row shows what the command is for instead of the command itself: `Bash Run the test suite` rather than `Bash python3 -m unittest -q 2>&1 | tail -4`. The label is plain text, so it reads differently from a command. Click the row or press `Ctrl+O` to see the full command and its output.
 
-- `off` (default): no labels.
-- `model`: the model writes the label as an extra argument of each bash call. This adds a field to the bash tool and a line to the model's instructions, and the label becomes part of the conversation.
-- `local`: Apple's on-device model writes the label on your Mac, so nothing the model sees changes. It needs macOS 26 or newer on Apple silicon with Apple Intelligence turned on, and the Xcode command line tools for a one-time build of a small helper. A label takes about 0.3 to 0.6 seconds and appears shortly after the command starts. Labels are cached, so a resumed session shows them without asking again.
+![Labelled bash rows, and one clicked open to show its command](https://raw.githubusercontent.com/FammasMaz/pi-cc-tools/master/docs/media/bash-labels.gif)
+
+`/cc-tools intent` picks where labels come from:
+
+- `off` (default): no labels; rows show the command.
+- `model`: the model writes the label as an extra argument of each bash call. This adds a field to the bash tool and a line to the model's instructions. There is no extra request; the label costs a few output tokens on each call.
+- `local`: Apple's on-device model writes the label on your Mac, so nothing the model sees changes. It needs macOS 26 or newer on Apple silicon with Apple Intelligence turned on, and the Xcode command line tools for a one-time build of a small helper. The row shows the command until the label arrives, about 0.3 to 0.6 seconds after the command starts. Labels are cached, so a resumed session shows them without asking again.
 
 The choice applies on the next start or after `/reload`, because the model mode changes the bash tool itself. Collapsed groups show only the sentence summary; expand a group to see each command's label.
 
@@ -151,7 +155,7 @@ The screenshots on this page use `"toolBackground": "transparent"`.
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `bashIntent` | `off` | Purpose labels on bash rows: `off`, `model` (the model writes them; changes the bash tool and its instructions) or `local` (Apple's on-device model writes them on this Mac). `true` means `model`. Applies on the next start or `/reload` |
+| `bashIntent` | `off` | Labels on bash rows in place of the command: `off`, `model` (the model writes them; changes the bash tool and its instructions) or `local` (Apple's on-device model writes them on this Mac). `true` means `model`. Applies on the next start or `/reload` |
 | `bashCollapsedLines` | `10` | Output lines shown for a collapsed bash row |
 | `bashCommandPreviewLines` | `0` | Lines of a multi-line command shown under a running or failed bash row. `Ctrl+O` always shows the whole command |
 | `liveToolPreview` | `false` | Show the latest output lines under a running tool |

@@ -116,13 +116,13 @@ test("a command that runs gets a label from the helper; the model's arguments ar
 	const redraws = { count: 0 };
 	const row = bashRow(params.command, redraws);
 	row.markExecutionStarted();
-	assert.equal(header(row), "● Bash echo hi", "no label before the helper answers");
+	assert.equal(header(row), "● Bash echo hi", "the command shows until the label arrives");
 	const result = await tools.get("bash").execute("call-1", params, undefined, undefined);
 	assert.equal(result.content[0].text.trim(), "hi", "the command ran normally");
 	assert.deepEqual(params, { command: "echo hi" }, "arguments not modified");
 	assert.ok(await until(() => redraws.count > 0), "the row is redrawn when the label arrives");
 	row.updateResult(result, false);
-	assert.match(header(row), /^● Bash echo hi — Print a greeting\b/);
+	assert.match(header(row), /^● Bash Print a greeting\b/, "then the label takes its place");
 	assert.deepEqual(requests(), ["echo hi"]);
 });
 
@@ -130,7 +130,7 @@ test("labels are cached: the same command again, and rows that are only redrawn,
 	await tools.get("bash").execute("call-2", { command: "echo hi" }, undefined, undefined);
 	const resumed = bashRow("npm test", { count: 0 });
 	resumed.updateResult({ content: [{ type: "text", text: "ok" }], isError: false }, false);
-	assert.ok(header(resumed).startsWith("● Bash npm test") && !header(resumed).includes("—"), `a redrawn row with no label stays plain: ${header(resumed)}`);
+	assert.ok(header(resumed).startsWith("● Bash npm test"), `a redrawn row with no label keeps its command: ${header(resumed)}`);
 	await new Promise((resolve) => setTimeout(resolve, 100));
 	assert.deepEqual(requests(), ["echo hi"], "no new requests");
 	intent.flushLocalIntentCacheForTests();
@@ -147,7 +147,7 @@ test("control codes in a label never reach the terminal", async () => {
 	await tools.get("bash").execute("call-3", { command: "npm test" }, undefined, undefined).catch(() => undefined);
 	assert.ok(await until(() => redraws.count > 0));
 	const line = row.render(100).find((l: string) => plain(l).includes("Bash")) ?? "";
-	assert.match(plain(line), /Bash npm test — Run the test suite/);
+	assert.match(plain(line), /Bash Run the test suite/);
 	assert.ok(!line.includes("\x1b[31m"), "the helper's color codes are stripped");
 });
 

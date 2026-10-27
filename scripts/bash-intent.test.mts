@@ -56,7 +56,7 @@ test("bash accepts optional user-facing intent without changing command executio
 });
 
 
-test("bash rows append the user-facing intent after the command summary", () => {
+test("a labelled bash row shows the label in place of the command; expanding shows the command", () => {
 	const row = new ToolExecutionComponent(
 		"bash",
 		"bash-intent-row",
@@ -68,8 +68,16 @@ test("bash rows append the user-facing intent after the command summary", () => 
 	) as any;
 	row.setArgsComplete();
 	row.updateResult({ content: [{ type: "text", text: "pass" }], details: undefined, isError: false }, false);
-	const lines = row.render(100).map(plain);
-	assert.ok(lines.some((line: string) => line.includes("Bash npm test — Check the test suite")), lines.join(" / "));
+	const collapsed = row.render(100).map(plain).join("\n");
+	assert.match(collapsed, /● Bash Check the test suite/);
+	assert.doesNotMatch(collapsed, /npm test/, "the command is hidden while collapsed");
+	const headerLine = row.render(100).find((line: string) => plain(line).includes("Check the test suite")) ?? "";
+	assert.ok(headerLine.includes(`${themes.theme.getFgAnsi("text")}Check the test suite`), "the label is plain text, not the command color");
+	assert.ok(!headerLine.includes(`${themes.theme.getFgAnsi("accent")}Check the test suite`));
+	row.setExpanded(true);
+	const expanded = row.render(100).map(plain).join("\n");
+	assert.match(expanded, /● Bash Check the test suite/);
+	assert.match(expanded, /npm test/, "expanding shows the command");
 });
 
 test("bash rows preserve visible words while removing terminal controls and normalizing whitespace", () => {
@@ -87,7 +95,7 @@ test("bash rows preserve visible words while removing terminal controls and norm
 	) as any;
 	row.setArgsComplete();
 	const line = row.render(100).map(plain).find((value: string) => value.includes("Bash")) ?? "";
-	assert.match(line, /Bash npm test — Run tests first red charset value/);
+	assert.match(line, /Bash Run tests first red charset value/);
 	assert.doesNotMatch(line, /[\x00-\x1f\x7f-\x9f]/);
 });
 
@@ -165,6 +173,6 @@ test("group summaries stay unchanged while expanded Bash rows show intent", () =
 	assert.doesNotMatch(group.render(100).map(plain).join("\n"), /Check the test suite/);
 	group.setExpanded(true);
 	const expanded = group.render(100).map(plain).join("\n");
-	assert.match(expanded, /Bash command — Check the test suite/);
-	assert.match(expanded, /npm test/);
+	assert.match(expanded, /● Bash Check the test suite/);
+	assert.match(expanded, /npm test/, "the expanded group shows the command under its label");
 });
