@@ -8538,7 +8538,7 @@ export default function (pi: ExtensionAPI) {
 			const rewrite = ensureRtkRewriteForContext(ctx, ctx.args);
 			const output = result.content[0]?.type === "text" ? result.content[0].text : "";
 			const fileEdit = !isPartial && !ctx.isError ? detectBashFileEdit(typeof ctx.args?.command === "string" ? ctx.args.command : "") : undefined;
-			if (fileEdit && !/exit code: [1-9]/.test(output)) {
+			if (fileEdit) {
 				const records = Array.isArray((details as any)?.fileEdits) ? (details as any).fileEdits as BashFileEditRecord[] : undefined;
 				if (ctx.state && ctx.state._bashFileEdits !== records) {
 					ctx.state._bashFileEdits = records;
@@ -8568,16 +8568,16 @@ export default function (pi: ExtensionAPI) {
 			}
 			// Collapsed: only keep the live-preview tail (or nothing). Expanded: full list.
 			const keepTail = !expanded && liveToolPreviewEnabled() ? liveToolPreviewLimit() : undefined;
-			const nonEmpty = collectNonEmptyLines(output, expanded ? undefined : (keepTail ?? 0));
+			// pi ends a non-zero exit with this line; the label shows the code, so it is not output.
+			const exit = ctx.isError ? output.match(/\s*Command exited with code (\d+)\s*$/) : null;
+			const nonEmpty = collectNonEmptyLines(exit ? output.slice(0, exit.index) : output, expanded ? undefined : (keepTail ?? 0));
 			clearBlinkTimer(ctx);
 			setToolStatus(ctx, ctx.isError ? "error" : "success");
 			if (nonEmpty.total > 0 && ctx.state?._bashPreviewReleased !== true) {
 				preserveBashPreview(ctx);
 				if (ctx.state) ctx.state._bashPreviewReleased = true;
 			}
-			const exitMatch = output.match(/exit code: (\d+)/);
-			const exitCode = exitMatch ? Number.parseInt(exitMatch[1], 10) : null;
-			let text = exitCode === null || exitCode === 0 ? theme.fg("success", "Done") : theme.fg("error", `Exit ${exitCode}`);
+			let text = ctx.isError ? theme.fg("error", exit ? `Exit ${exit[1]}` : "Failed") : theme.fg("success", "Done");
 			text += theme.fg("muted", ` (${nonEmpty.total} lines)`);
 			if (details?.truncation?.truncated) text += theme.fg("warning", " [truncated]");
 			const mode = bashOutputMode();

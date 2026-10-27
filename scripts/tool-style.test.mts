@@ -123,6 +123,11 @@ test("a bash command that only edits a file is drawn as an edit with its diff", 
 	const lines = await settle(row);
 	assert.match(lines[0], /^ ● Edit \(sed\) stats\.py/);
 	assert.ok(lines.some((line) => /return 1/.test(line)), "shows the changed line");
+	// A successful edit that prints "exit code: 1" is still drawn as an edit.
+	const mentions = new ToolExecutionComponent("bash", "bash-sed-2", { command }, { showImages: false }, tools.get("bash"), ui, cwd) as any;
+	mentions.setArgsComplete();
+	mentions.updateResult({ ...result, content: [{ type: "text", text: "exit code: 1" }] }, false);
+	assert.match((await settle(mentions))[0], /^ ● Edit \(sed\) stats\.py/);
 	// Never grouped with neighbouring calls.
 	const chat = new Container();
 	chat.addChild(finishedRow("read", { path: "a.ts" }));
@@ -202,6 +207,33 @@ test("the status line under a command is dim, as in pi-polish; errors stay red",
 	failed.updateResult({ content: [{ type: "text", text: "ENOENT: no such file" }], isError: true }, false);
 	const errorLine = statusOf(failed);
 	assert.ok(errorLine.includes(error) && !errorLine.includes(`${dim}ENOENT`), JSON.stringify(errorLine));
+});
+
+test("a failed command shows its exit code, or Failed when it has none", () => {
+	const error = themes.theme.getFgAnsi("error");
+	const rowOf = (text: string, isError: boolean, expanded = false) => {
+		const row = new ToolExecutionComponent("bash", `bash-${Math.random()}`, { command: "x" }, { showImages: false }, tools.get("bash"), ui, cwd) as any;
+		row.setArgsComplete();
+		row.setExpanded(expanded);
+		row.updateResult({ content: [{ type: "text", text }], isError }, false);
+		return row.render(100) as string[];
+	};
+	const statusOf = (text: string, isError: boolean) => rowOf(text, isError).find((line: string) => /[├└]/.test(plain(line))) ?? "";
+	// pi's non-zero exit: isError, and a last line with the code that is neither counted nor repeated.
+	const exited = statusOf("partial\n\nCommand exited with code 127\n", true);
+	assert.ok(exited.includes(`${error}Exit 127`) && plain(exited).includes("(1 lines)"), JSON.stringify(exited));
+	assert.ok(!rowOf("partial\n\nCommand exited with code 127", true, true).some((line) => plain(line).includes("Command exited")));
+	// Only the last line counts.
+	const nested = statusOf("child exit code: 2\nCommand exited with code 1", true);
+	assert.ok(nested.includes(`${error}Exit 1`), JSON.stringify(nested));
+	// Blocked, aborted and timed-out calls are errors with no exit code.
+	const blocked = statusOf("Plan mode blocks bash commands outside its reviewed inspection policy.", true);
+	assert.ok(blocked.includes(`${error}Failed`) && !plain(blocked).includes("Done"), JSON.stringify(blocked));
+	const timedOut = statusOf("Command exited with code 2\n\nCommand timed out after 5 seconds", true);
+	assert.ok(timedOut.includes(`${error}Failed`), JSON.stringify(timedOut));
+	// Output that only mentions an exit code is not a failure.
+	const printed = statusOf("exit code: 3", false);
+	assert.ok(plain(printed).includes("Done") && !printed.includes(error), JSON.stringify(printed));
 });
 
 test("a running command's source keeps its color; only status lines are dim", async () => {
