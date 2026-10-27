@@ -3,6 +3,17 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Added
+
+- **`/cc-tools intent off|model|local|status`** sets where bash labels come from, so the choice no longer needs a hand-edited settings file. It applies on the next start or after `/reload`, since the model mode changes the bash tool itself.
+- **`"bashIntent": "local"`**: Apple's on-device model (macOS 26+, Apple silicon, Apple Intelligence on) writes the bash labels on this Mac, so nothing the model sees changes and no tokens are spent. A small Swift helper is built on first use with the Xcode command line tools and cached in `~/Library/Caches/pi-claude-code-ui`; it runs once per session and macOS loads the model only while labels are being written. Labels are asked for only when a command starts and are cached by a hash of the command, so a resumed session shows them without asking again. When the model is unavailable or the helper cannot be built, labels turn off with one notice.
+
+### Changed
+
+- **`bashIntent` takes `"off"`, `"model"` or `"local"`.** `true` still means `"model"`.
+
 ## 1.0.103 — 2026-10-27
 
 ### Added

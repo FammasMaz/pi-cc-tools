@@ -71,6 +71,16 @@ import {
 	describeBashSource,
 	formatBashDuration,
 } from "./bash-command";
+import {
+	BASH_INTENT_MODES,
+	configureLocalIntents,
+	localIntentFor,
+	localIntentUnsupportedReason,
+	normalizeBashIntentMode,
+	requestLocalIntent,
+	watchLocalIntent,
+	type BashIntentMode,
+} from "./bash-intent";
 import { detectBashFileEdit, type BashFileEdit } from "./bash-file-edit";
 import { getUserSettingsPath } from "./settings-path";
 import {
@@ -141,8 +151,13 @@ interface SettingsFile {
 	extraToolOutputExpanded?: boolean;
 	groupToolCalls?: boolean;
 	bashOutputMode?: "opencode" | "summary" | "preview";
-	/** Ask the model for a short purpose with each bash call and show it in the row. Off by default: it changes the bash tool and the model's instructions. */
-	bashIntent?: boolean;
+	/**
+	 * Short purpose labels on bash rows. `off` (default); `model`: the model writes them as an
+	 * extra bash argument (changes the bash tool and the model's instructions; `true` means this);
+	 * `local`: Apple's on-device model writes them on this Mac, without changing anything the model
+	 * sees. Applied when the extension loads (pi start or /reload).
+	 */
+	bashIntent?: boolean | "off" | "model" | "local";
 	bashCollapsedLines?: number;
 	/** Verbatim script lines shown while bash is running or after failure. Defaults to 8. */
 	bashCommandPreviewLines?: number;
@@ -8012,7 +8027,13 @@ export default function (pi: ExtensionAPI) {
 	// /cc-tools command — control tool chrome, grouping, and detail level.
 	const TOOL_MODES = ["outlines", "transparent", "default"] as const;
 	const TOOL_BOOL_MODES = ["on", "off", "toggle", "status"] as const;
-	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "thinking", "status"] as const;
+	const TOOL_SUBCOMMANDS = [...TOOL_MODES, "group", "detail", "thinking", "intent", "status"] as const;
+	const INTENT_DESCRIPTIONS: Record<string, string> = {
+		off: "No labels on bash rows (default)",
+		model: "The model writes a short purpose with each bash call (adds a field to the bash tool and a line to its instructions)",
+		local: "Apple's on-device model writes the purpose on this Mac; nothing the model sees changes (macOS 26+, Apple silicon)",
+		status: "Show the current mode",
+	};
 	const booleanMode = (raw: string | undefined, current: boolean): boolean | "status" | undefined => {
 		const mode = raw || "toggle";
 		if (mode === "on") return true;
@@ -8027,11 +8048,12 @@ export default function (pi: ExtensionAPI) {
 			`Tool style: ${toolBackgroundMode}`,
 			`Tool grouping: ${toolGroupingEnabled() ? "on" : "off"}`,
 			`Thinking: ${getThinkingMode()}`,
+			`Bash labels: ${bashIntentMode}`,
 			`Extra detail: ${extraToolOutputExpanded ? "on" : "off"} (${rawKeyHint("ctrl+shift+o", "toggle")})`,
 		].join("\n"), "info");
 	};
 	pi.registerCommand("cc-tools", {
-		description: "Control tool UI: style, grouped rows, and Ctrl+Shift+O extra-detail mode",
+		description: "Control tool UI: style, grouped rows, thinking, bash labels, and Ctrl+Shift+O extra-detail mode",
 		getArgumentCompletions(prefix) {
 			const parts = prefix.trimStart().split(/\s+/);
 			const first = parts[0] ?? "";
@@ -8044,6 +8066,7 @@ export default function (pi: ExtensionAPI) {
 						description:
 							m === "group" ? "Toggle grouped adjacent/concurrent tool rows"
 							: m === "thinking" ? "Thinking display: live (default), full, or latest"
+							: m === "intent" ? "Purpose labels on bash rows: off (default), model, or local"
 							: m === "detail" ? "Toggle Ctrl+Shift+O extra-detail mode"
 							: m === "status" ? "Show tool UI settings"
 							: m === "outlines" ? "Horizontal rules around each tool (default)"
@@ -8064,6 +8087,12 @@ export default function (pi: ExtensionAPI) {
 							: m === "latest" ? "Like live, but only the latest message keeps its thinking; tool calls around earlier thinking merge"
 							: "Show the current mode",
 					}));
+			}
+			if (first === "intent") {
+				const second = parts[1] ?? "";
+				return [...BASH_INTENT_MODES, "status"]
+					.filter((m) => m.startsWith(second))
+					.map((m) => ({ value: `intent ${m}`, label: m, description: INTENT_DESCRIPTIONS[m] }));
 			}
 			if (first === "group" || first === "detail" || first === "extra") {
 				const second = parts[1] ?? "";
@@ -8100,6 +8129,32 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+
+			if (sub === "intent") {
+				const arg = parts[1] ?? "status";
+				const saved = normalizeBashIntentMode(readSettings().bashIntent);
+				if (arg === "status") {
+					const pending = saved !== bashIntentMode ? ` Saved: ${saved}, applies after /reload.` : "";
+					if (ctx.hasUI) ctx.ui.notify(`Bash labels: ${bashIntentMode} (off, model or local).${pending}`, "info");
+					return;
+				}
+				if (!(BASH_INTENT_MODES as readonly string[]).includes(arg)) {
+					if (ctx.hasUI) ctx.ui.notify(`Usage: /cc-tools intent ${BASH_INTENT_MODES.join("|")}|status`, "error");
+					return;
+				}
+				const next = arg as BashIntentMode;
+				writeSettingsKey("bashIntent", next);
+				if (!ctx.hasUI) return;
+				const unsupported = next === "local" ? localIntentUnsupportedReason() : undefined;
+				if (unsupported) {
+					ctx.ui.notify(`Bash labels → local saved, but ${unsupported}; it will stay off here.`, "warning");
+				} else if (next === bashIntentMode) {
+					ctx.ui.notify(`Bash labels: ${next} (already active)`, "info");
+				} else {
+					ctx.ui.notify(`Bash labels → ${next}. Applies after /reload or on the next start.`, "info");
+				}
+				return;
+			}
 
 			if (sub === "thinking") {
 				const arg = (parts[1] ?? "status").toLowerCase();
@@ -8398,6 +8453,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (event, ctx) => {
 		clearRtkRewriteState();
 		if (!ctx.hasUI) return;
+		intentNoticeUi = ctx.ui;
+		if (localIntentProblem && !localIntentProblemShown) {
+			localIntentProblemShown = true;
+			notifyIntentProblem(`Bash labels: ${localIntentProblem}, so they are off. /cc-tools intent model|off`);
+		}
 		patchUiNotifications(ctx.ui);
 		patchAgentWidget(ctx.ui);
 		installPromptMarkerEditor(ctx);
@@ -8505,9 +8565,30 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	let intentNoticeUi: any;
+	let localIntentProblemShown = false;
+	const notifyIntentProblem = (message: string): void => {
+		try {
+			intentNoticeUi?.notify?.(message, "warning");
+		} catch { /* session ended */ }
+	};
 	const bashTool = createBashTool(cwd);
-	// Opt-in: the field and the guideline change what the model is told, so they stay out unless asked for.
-	const bashIntentEnabled = readSettings().bashIntent === true;
+	// Read once per load: "model" changes the bash tool and the model's instructions, which are
+	// fixed when the tool registers, so every mode switch applies on the next start or /reload.
+	const bashIntentMode: BashIntentMode = normalizeBashIntentMode(readSettings().bashIntent);
+	const bashIntentEnabled = bashIntentMode === "model";
+	const localIntentProblem = bashIntentMode === "local" ? localIntentUnsupportedReason() : undefined;
+	configureLocalIntents(bashIntentMode === "local" && !localIntentProblem, (message) => notifyIntentProblem(message));
+	/** " — label" for a bash row, from the model's argument or the local model's cache. */
+	const bashIntentSuffix = (args: any, ctx: any): string => {
+		if (bashIntentMode === "model") return bashDisplaySummarySuffix(args);
+		if (bashIntentMode !== "local") return "";
+		const command = typeof args?.command === "string" ? args.command : "";
+		const label = localIntentFor(command);
+		if (label) return bashDisplaySummarySuffix({ displaySummary: label });
+		if (ctx?.executionStarted === true) watchLocalIntent(command, () => safeInvalidate(ctx));
+		return "";
+	};
 	const bashParameters = {
 		...bashTool.parameters,
 		properties: {
@@ -8537,6 +8618,8 @@ export default function (pi: ExtensionAPI) {
 			// A command that only changes files: look at them before and after, so the row
 			// can show a diff like an edit/write row. The command itself runs unchanged.
 			const fileEdit = detectBashFileEdit(typeof bashParams.command === "string" ? bashParams.command : "");
+			// Local labels are asked for only here, when a command really runs, never on redraws.
+			if (bashIntentMode === "local" && typeof bashParams.command === "string") requestLocalIntent(bashParams.command);
 			const before = fileEdit ? snapshotBashFileEdit(cwd, fileEdit) : undefined;
 			const result = await bashTool.execute(toolCallId, bashParams, signal, onUpdate);
 			if (fileEdit && before) {
@@ -8558,7 +8641,7 @@ export default function (pi: ExtensionAPI) {
 				const rowCwd = ctx.cwd ?? cwd;
 				const trailing = bashHeaderTrailing(ctx, theme);
 				const header = bashFileEditHeader(fileEdit, ctx.state?._bashFileEdits, theme, rowCwd, (path) => shortPath(rowCwd, path), toolStatusDot(ctx, theme), "");
-				const withIntent = `${header}${theme.fg("accent", bashIntentEnabled ? bashDisplaySummarySuffix(args) : "")}${trailing}`;
+				const withIntent = `${header}${theme.fg("accent", bashIntentSuffix(args, ctx))}${trailing}`;
 				return makeText(ctx.lastComponent, commandBlock ? `${withIntent}\n${commandBlock}` : withIntent);
 			}
 			const presentation = buildBashCommandPresentation(command);
@@ -8570,7 +8653,7 @@ export default function (pi: ExtensionAPI) {
 			const headerSummary = ctx.expanded === true && commandBlock ? describeBashSource(presentation) : summary;
 			const header = toolHeader(
 				"Bash",
-				`${headerSummary}${bashIntentEnabled ? bashDisplaySummarySuffix(args) : ""}${rtkBadge}`,
+				`${headerSummary}${bashIntentSuffix(args, ctx)}${rtkBadge}`,
 				theme,
 				toolStatusDot(ctx, theme),
 				bashHeaderTrailing(ctx, theme),

@@ -39,6 +39,16 @@ While a tool runs, the working line names it: `Running npm test…`, `Reading st
 
 ![The working line during a run](https://raw.githubusercontent.com/FammasMaz/pi-cc-tools/master/docs/media/spinner.gif)
 
+## Bash labels
+
+Bash rows can carry a short purpose after the command, as in `Bash git status --short — Show status summary`. `/cc-tools intent` picks where the label comes from:
+
+- `off` (default): no labels.
+- `model`: the model writes the label as an extra argument of each bash call. This adds a field to the bash tool and a line to the model's instructions, and the label becomes part of the conversation.
+- `local`: Apple's on-device model writes the label on your Mac, so nothing the model sees changes. It needs macOS 26 or newer on Apple silicon with Apple Intelligence turned on, and the Xcode command line tools for a one-time build of a small helper. A label takes about 0.3 to 0.6 seconds and appears shortly after the command starts. Labels are cached, so a resumed session shows them without asking again.
+
+The choice applies on the next start or after `/reload`, because the model mode changes the bash tool itself. Collapsed groups show only the sentence summary; expand a group to see each command's label.
+
 ## Thinking
 
 By default (`live`), thinking is shown while it streams and then collapses to `Thought for 3s`. Click the row to read it again.
@@ -78,6 +88,7 @@ With [pi-subagents](https://github.com/tintinweb/pi-subagents), `Agent` calls ge
 | `/cc-tools outlines`, `transparent`, `default` | Tool row style: rules around each tool (default), no rules, or pi's own backgrounds |
 | `/cc-tools group on`, `off`, `toggle` | Fold consecutive tool calls into one row |
 | `/cc-tools thinking live`, `full`, `latest` | How finished thinking is shown |
+| `/cc-tools intent off`, `model`, `local`, `status` | Where bash labels come from; applies after `/reload` |
 | `/cc-tools detail on`, `off`, `toggle` | Higher preview limits, same as `Ctrl+Shift+O` |
 | `/cc-theme terminal on`, `off`, `status` | Follow the terminal's colors, or go back to your previous theme |
 | `/cc-theme on`, `off`, `toggle`, `status` | Derive the extension's colors from the pi theme, or use a fixed Claude palette |
@@ -101,7 +112,7 @@ Settings are read from `.pi/settings.json` in the project and from the agent set
   "searchOutputMode": "preview",
   "mcpOutputMode": "preview",
   "bashOutputMode": "opencode",
-  "bashIntent": false,
+  "bashIntent": "off",
   "previewLines": 8,
   "expandedPreviewMaxLines": 4000,
   "extraExpandedPreviewMaxLines": 12000,
@@ -140,7 +151,7 @@ The screenshots on this page use `"toolBackground": "transparent"`.
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `bashIntent` | `false` | Ask the model for a short purpose with each bash call and show it after the command, as in `Bash ls -la — List the project files`. This adds a field to the bash tool and a line to the model's instructions, so it is off by default. Collapsed groups do not show it. Restart pi after changing it |
+| `bashIntent` | `off` | Purpose labels on bash rows: `off`, `model` (the model writes them; changes the bash tool and its instructions) or `local` (Apple's on-device model writes them on this Mac). `true` means `model`. Applies on the next start or `/reload` |
 | `bashCollapsedLines` | `10` | Output lines shown for a collapsed bash row |
 | `bashCommandPreviewLines` | `0` | Lines of a multi-line command shown under a running or failed bash row. `Ctrl+O` always shows the whole command |
 | `liveToolPreview` | `false` | Show the latest output lines under a running tool |
