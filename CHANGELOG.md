@@ -3,6 +3,16 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.103 — 2026-10-27
+
+### Added
+
+- **`bashIntent`** (off by default), contributed by @DxTa in #41: the model writes a short purpose with each bash call (`displaySummary`), shown after the command as `Bash ls -la — List the project files`. The text is stripped of control sequences and capped at 96 characters, and it is removed before the command runs. Turning it on adds a field to the bash tool and a line to the model's instructions, which is why it is opt-in; restart pi after changing it. Collapsed groups do not show it.
+
+### Fixed
+
+- **A failed bash command said `Done`**, contributed by @XiaoleiShi-NV in #42. A non-zero exit now reads `Exit 3`, and a timed-out or blocked command reads `Failed`; pi's `Command exited with code N` line is no longer counted or repeated in the output. The check used to look for `exit code: N`, which pi never prints.
+
 ## 1.0.102 — 2026-10-26
 
 ### Fixed
