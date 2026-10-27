@@ -101,7 +101,7 @@ Settings are read from `.pi/settings.json` in the project and from the agent set
   "searchOutputMode": "preview",
   "mcpOutputMode": "preview",
   "bashOutputMode": "opencode",
-  "bashIntent": true,
+  "bashIntent": false,
   "previewLines": 8,
   "expandedPreviewMaxLines": 4000,
   "extraExpandedPreviewMaxLines": 12000,
@@ -140,7 +140,7 @@ The screenshots on this page use `"toolBackground": "transparent"`.
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `bashIntent` | `true` | Ask for a concise current-language purpose and append it to Bash rows. Set `false` and reload to restore the previous schema and row wording. Purpose text is model metadata, not secret redaction; grouped summaries stay unchanged. |
+| `bashIntent` | `false` | Ask the model for a short purpose with each bash call and show it after the command, as in `Bash ls -la — List the project files`. This adds a field to the bash tool and a line to the model's instructions, so it is off by default. Collapsed groups do not show it. Restart pi after changing it |
 | `bashCollapsedLines` | `10` | Output lines shown for a collapsed bash row |
 | `bashCommandPreviewLines` | `0` | Lines of a multi-line command shown under a running or failed bash row. `Ctrl+O` always shows the whole command |
 | `liveToolPreview` | `false` | Show the latest output lines under a running tool |

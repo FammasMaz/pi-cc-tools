@@ -141,7 +141,7 @@ interface SettingsFile {
 	extraToolOutputExpanded?: boolean;
 	groupToolCalls?: boolean;
 	bashOutputMode?: "opencode" | "summary" | "preview";
-	/** Show model-written purpose text in Bash rows. Defaults to true. */
+	/** Ask the model for a short purpose with each bash call and show it in the row. Off by default: it changes the bash tool and the model's instructions. */
 	bashIntent?: boolean;
 	bashCollapsedLines?: number;
 	/** Verbatim script lines shown while bash is running or after failure. Defaults to 8. */
@@ -8506,7 +8506,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const bashTool = createBashTool(cwd);
-	const bashIntentEnabled = readSettings().bashIntent !== false;
+	// Opt-in: the field and the guideline change what the model is told, so they stay out unless asked for.
+	const bashIntentEnabled = readSettings().bashIntent === true;
 	const bashParameters = {
 		...bashTool.parameters,
 		properties: {

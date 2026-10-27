@@ -15,7 +15,8 @@ const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 const previousCwd = process.cwd();
 process.env.PI_CODING_AGENT_DIR = agentDir;
 process.chdir(cwd);
-writeFileSync(join(agentDir, "settings.json"), "{}");
+// bashIntent is opt-in; these tests turn it on.
+writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ bashIntent: true }));
 
 const tools = new Map<string, any>();
 const fakePi = {
@@ -91,9 +92,9 @@ test("bash rows preserve visible words while removing terminal controls and norm
 });
 
 
-test("bashIntent false restores the previous Bash schema and guidance after reload", () => {
+test("by default bash keeps its stock schema and guidance", () => {
 	const disabledAgentDir = mkdtempSync(join(tmpdir(), "bash-intent-disabled-"));
-	writeFileSync(join(disabledAgentDir, "settings.json"), JSON.stringify({ bashIntent: false }));
+	writeFileSync(join(disabledAgentDir, "settings.json"), "{}");
 	try {
 		const output = execFileSync(process.execPath, [
 			"--experimental-strip-types",
