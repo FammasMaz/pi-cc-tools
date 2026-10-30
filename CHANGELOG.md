@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## Unreleased
+
+### Fixed
+
+- **Copying from the fullscreen transcript picked up the decoration** ([#12](https://github.com/FammasMaz/pi-cc-tools/issues/12)). A selection over a code block came out wrapped in the box's `│` borders and `╭···╮` / `╰···╯` rules, and every reply, prompt and thinking line kept its `●` / `❯` / `∴` marker and indent. The box and markers still show, but a fullscreen copy now leaves them out, along with the two-space indent pi puts in front of code and the `Thinking:` label, so code pastes at its own indentation. Tables, quotes and tool rows copy as before.
+
 ## 1.0.106 — 2026-10-27
 
 ### Fixed

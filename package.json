@@ -48,6 +48,7 @@
   "scripts": {
     "test": "node --experimental-strip-types --test scripts/*.test.ts scripts/*.test.mts",
     "test:fullscreen": "node scripts/fullscreen-mouse.test.mjs",
+    "test:fullscreen-copy": "node scripts/fullscreen-copy.test.mjs",
     "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck extensions/index.ts extensions/spinner.ts",
     "pack:dry-run": "npm pack --dry-run",
     "publish:dry-run": "npm publish --dry-run",

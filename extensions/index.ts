@@ -115,6 +115,17 @@ let CODE_BLOCK_LANG_FG = "\x1b[38;2;95;95;95m";
 const CHROME_ITALIC = "\x1b[3m";
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 const ANSI_PRESENT_RE = /\x1b\[[0-9;]*m/;
+
+// Copy markers for decoration (code box borders, ● / ❯ / ∴ gutters). They are
+// zero-width private OSC strings: pi-tui treats them like any other escape, the
+// terminal writer strips them before output, and the fullscreen selection patch
+// reads them to leave decoration out of the copied text. SKIP…END excludes the
+// cells between them; DROP anywhere in a row leaves the whole row out.
+const COPY_MARK_PREFIX = "\x1b]8686;";
+const COPY_SKIP_START = `${COPY_MARK_PREFIX}s\x07`;
+const COPY_SKIP_END = `${COPY_MARK_PREFIX}e\x07`;
+const COPY_DROP_LINE = `${COPY_MARK_PREFIX}d\x07`;
+const COPY_MARK_RE = /\x1b\]8686;[a-z]\x07/g;
 const PATCH_FLAG = Symbol.for("pi-claude-style-tools:patched-container-render");
 const TOOL_RENDER_CACHE = Symbol.for("pi-claude-style-tools:tool-render-cache");
 const COMPONENT_PARENT = Symbol.for("pi-claude-style-tools:component-parent");
@@ -312,7 +323,45 @@ function applyToolBackgroundMode(theme: unknown): void {
 }
 
 function stripAnsi(text: string): string {
-	return text.replace(ANSI_RE, "");
+	return stripCopyMarks(text.replace(ANSI_RE, ""));
+}
+
+function stripCopyMarks(text: string): string {
+	return text.includes(COPY_MARK_PREFIX) ? text.replace(COPY_MARK_RE, "") : text;
+}
+
+/** Mark decoration so fullscreen copies leave it out. */
+function copySkip(text: string): string {
+	return text ? `${COPY_SKIP_START}${text}${COPY_SKIP_END}` : text;
+}
+
+/** A selected slice with its SKIP…END spans removed; other escapes stay for the caller to strip. */
+function removeCopySkipped(slice: string): string {
+	if (!slice.includes(COPY_MARK_PREFIX)) return slice;
+	let out = "";
+	let skipping = false;
+	let i = 0;
+	while (i < slice.length) {
+		const at = slice.indexOf(COPY_MARK_PREFIX, i);
+		const stop = at === -1 ? slice.length : at;
+		if (!skipping) out += slice.slice(i, stop);
+		if (at === -1) break;
+		const kind = slice[at + COPY_MARK_PREFIX.length];
+		if (kind === "s") skipping = true;
+		else if (kind === "e") skipping = false;
+		i = at + COPY_MARK_PREFIX.length + 2;
+	}
+	return out;
+}
+
+// Pi's Markdown indents every code-block line by this much (theme.codeBlockIndent default).
+const PI_CODE_BLOCK_INDENT = "  ";
+
+/** Leave Pi's code-block indent out of copies so code pastes at its own indentation. */
+function copySkipCodeIndent(line: string): string {
+	return line.startsWith(PI_CODE_BLOCK_INDENT)
+		? `${copySkip(PI_CODE_BLOCK_INDENT)}${line.slice(PI_CODE_BLOCK_INDENT.length)}`
+		: line;
 }
 
 function stripRenderedHeadingMarkers(line: string): string {
@@ -447,15 +496,20 @@ function borderedCodeBlockLine(line: string, width: number): string {
 		content = truncateToWidth(content, innerWidth, "", false);
 	}
 	const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(content)));
-	return `${BORDER_COLOR}│${TRANSPARENT_RESET} ${content}${padding} ${BORDER_COLOR}│${TRANSPARENT_RESET}`;
+	const indent = content.startsWith(PI_CODE_BLOCK_INDENT) ? PI_CODE_BLOCK_INDENT : "";
+	const code = content.slice(indent.length);
+	// Borders and Pi's code indent stay out of copies; padding is trailing space after trimEnd.
+	const left = copySkip(`${BORDER_COLOR}│${TRANSPARENT_RESET} ${indent}`);
+	const right = copySkip(` ${BORDER_COLOR}│${TRANSPARENT_RESET}`);
+	return `${left}${code}${padding}${right}`;
 }
 
 function boxRenderedCodeBlock(bodyLines: string[], language: string, width: number): string[] {
 	const safeWidth = Math.max(4, Number.isFinite(width) ? Math.floor(width) : 0);
 	const framed = [
-		roundedCodeBlockTop(safeWidth, language),
+		`${COPY_DROP_LINE}${roundedCodeBlockTop(safeWidth, language)}`,
 		...bodyLines.map((line) => borderedCodeBlockLine(line, safeWidth)),
-		roundedCodeBlockBottom(safeWidth),
+		`${COPY_DROP_LINE}${roundedCodeBlockBottom(safeWidth)}`,
 	];
 	return framed.map((line) => padRenderedLineToWidth(line, safeWidth));
 }
@@ -480,12 +534,10 @@ function sanitizeRenderedTextBlockLines(lines: string[], width?: number): string
 				body.push(lines[i]);
 				i++;
 			}
-			if (hideBox) {
-				result.push(...body);
-			} else if (canBox && (body.length > 0 || language.trim())) {
+			if (!hideBox && canBox && (body.length > 0 || language.trim())) {
 				result.push(...boxRenderedCodeBlock(body, language, width));
 			} else {
-				result.push(...body);
+				result.push(...body.map(copySkipCodeIndent));
 			}
 			continue;
 		}
@@ -2050,6 +2102,67 @@ function patchFullscreenHoverExit(): void {
 	proto[FULLSCREEN_HOVER_PATCH_FLAG] = true;
 }
 
+const FULLSCREEN_COPY_PATCH_FLAG = Symbol.for("pi-claude-style-tools:fullscreen-copy-skips-chrome");
+
+interface SelectedRow {
+	line: string;
+	start: number;
+	end: number;
+}
+
+/** Selection text rebuilt from the rows Pi selected, minus COPY_SKIP spans and COPY_DROP rows. */
+function selectionTextWithoutChrome(rows: SelectedRow[]): string | undefined {
+	const slice = (PiTui as any).sliceByColumn;
+	const strip = (PiTui as any).stripTerminalSequences;
+	if (typeof slice !== "function" || typeof strip !== "function") return undefined;
+	const lines: string[] = [];
+	for (const { line, start, end } of rows) {
+		if (line.includes(COPY_DROP_LINE)) continue;
+		const selected = slice(line, start, Math.max(0, end - start), true);
+		lines.push(strip(removeCopySkipped(selected)).trimEnd());
+	}
+	return lines.join("\n");
+}
+
+// Fullscreen owns mouse selection and builds the copied text from rendered rows, so
+// box borders and gutters would land on the clipboard. Pi asks getSelectionColumns for
+// each selected row in order; record those rows while Pi builds its text, then rebuild it
+// without the marked decoration. Rows without markers come out exactly as Pi made them.
+function patchFullscreenCopySkipsChrome(): void {
+	const proto = (PiTui as any).TuiAltScreen?.prototype;
+	if (
+		!proto
+		|| proto[FULLSCREEN_COPY_PATCH_FLAG]
+		|| typeof proto.getActiveSelectionText !== "function"
+		|| typeof proto.getSelectionColumns !== "function"
+	) return;
+	const originalText = proto.getActiveSelectionText;
+	proto.getActiveSelectionText = function patchedActiveSelectionText(this: any) {
+		const rows: SelectedRow[] = [];
+		const ownColumns = Object.prototype.hasOwnProperty.call(this, "getSelectionColumns");
+		const columnsOf = this.getSelectionColumns;
+		this.getSelectionColumns = function recordSelectedRow(this: any, line: unknown, ...rest: unknown[]) {
+			const columns = columnsOf.call(this, line, ...rest);
+			rows.push({ line: typeof line === "string" ? line : "", start: columns?.start ?? 0, end: columns?.end ?? 0 });
+			return columns;
+		};
+		let text: string | undefined;
+		try {
+			text = originalText.call(this);
+		} finally {
+			if (ownColumns) this.getSelectionColumns = columnsOf;
+			else delete this.getSelectionColumns;
+		}
+		if (typeof text !== "string" || !rows.some((row) => row.line.includes(COPY_MARK_PREFIX))) return text;
+		// Only rebuild when the recorded rows are the ones Pi joined; otherwise keep Pi's text.
+		if (rows.length !== text.split("\n").length) return text;
+		const cleaned = selectionTextWithoutChrome(rows);
+		// A selection of nothing but decoration copies what is on screen.
+		return cleaned && cleaned.trim() ? cleaned : text;
+	};
+	proto[FULLSCREEN_COPY_PATCH_FLAG] = true;
+}
+
 function unrefTimer(timer: ReturnType<typeof setTimeout> | null | undefined): void {
 	(timer as any)?.unref?.();
 }
@@ -2499,8 +2612,10 @@ function patchTerminalWriteTagScrubber(): void {
 	const originalWrite = proto.write;
 	if (typeof originalWrite !== "function") return;
 	proto.write = function patchedTerminalWrite(this: any, data: any, ...rest: any[]) {
-		if (typeof data === "string" && data.includes("§")) {
-			data = data.replace(MAGIC_CONTEXT_TAG_TOKEN, "");
+		if (typeof data === "string") {
+			if (data.includes("§")) data = data.replace(MAGIC_CONTEXT_TAG_TOKEN, "");
+			// Copy markers are for Pi's own selection; the terminal never needs them.
+			data = stripCopyMarks(data);
 		}
 		return originalWrite.call(this, data, ...rest);
 	};
@@ -2811,14 +2926,15 @@ class DottedParagraph {
 		const looksLikeTaskStatus = lines.some((line) => /\b(?:transcript:|No output\.|Wrapped up)/.test(stripAnsi(line)));
 		const displayLines = looksLikeTaskStatus ? lines.map(normalizeLeadingCheckGlyph) : lines;
 		let dotPlaced = false;
+		const gutter = copySkip("   ");
 		const rendered = displayLines.map((line: string) => {
-			if (!stripAnsi(line).trim()) return `   ${line}`;
-			if (isCodeBoxChromeLine(line)) return `   ${line}`;
+			if (!stripAnsi(line).trim()) return `${gutter}${line}`;
+			if (isCodeBoxChromeLine(line)) return `${gutter}${line}`;
 			if (!dotPlaced) {
 				dotPlaced = true;
-				return ` ● ${line}`;
+				return `${copySkip(" ● ")}${line}`;
 			}
-			return `   ${line}`;
+			return `${gutter}${line}`;
 		}).map((line) => {
 			const gap = safeWidth - visibleWidth(line);
 			return gap > 0 ? line + " ".repeat(gap) : gap < 0 ? truncateToWidth(line, safeWidth, "", false) : line;
@@ -2952,12 +3068,15 @@ class ThinkingParagraph {
 		const lines = sanitizeRenderedTextBlockLines(md.render(safeWidth - PREFIX_W), safeWidth - PREFIX_W);
 		const displayLines = this.hovered ? lines.map((line) => brightenRenderedLine(line)) : lines;
 		let symbolPlaced = false;
+		const gutter = copySkip("   ");
 		const rendered = displayLines.map((line: string) => {
 			if (!symbolPlaced && stripAnsi(line).trim()) {
 				symbolPlaced = true;
-				return ` ${prefix} ${line}`;
+				// The "Thinking: " label is presentation added by prefixThinkingLine, not the thought.
+				const unlabeled = line.replace(/^((?:\x1b\[[0-9;]*m)*)Thinking: /, (_match, esc: string) => `${esc}${copySkip("Thinking: ")}`);
+				return `${copySkip(` ${prefix} `)}${unlabeled}`;
 			}
-			return `   ${line}`;
+			return `${gutter}${line}`;
 		}).map((line) => clampLineWidth(line, safeWidth));
 		this.cachedWidth = width;
 		this.cachedHovered = this.hovered;
@@ -3308,9 +3427,16 @@ function userMessageBandAnsi(): string {
 	return rgbBgAnsi(theme, band);
 }
 
-function markUserPromptLine(line: string): string {
+function markUserPromptLine(line: string, copyMarked = false): string {
 	const mark = `${chromeAnsi(getGlobalPiTheme(), "outline")}${USER_PROMPT_MARK}\x1b[39m`;
-	return line.replace(/^((?:\x1b\[[0-9;]*m)*) {3}/, (_match, esc: string) => `${esc} ${mark} `);
+	return line.replace(/^((?:\x1b\[[0-9;]*m)*) {3}/, (_match, esc: string) => (
+		copyMarked ? `${esc}${copySkip(` ${mark} `)}` : `${esc} ${mark} `
+	));
+}
+
+/** Leave a past prompt's 3-column pad out of fullscreen copies. */
+function copySkipUserPad(line: string): string {
+	return line.replace(/^((?:\x1b\[[0-9;]*m)*) {3}/, (_match, esc: string) => `${esc}${copySkip("   ")}`);
 }
 
 /** Paint a full-width band behind a line, surviving resets inside it. */
@@ -3374,7 +3500,7 @@ function patchUserMessageRender(): void {
 		// Drop the top and bottom padding rows: one compact band.
 		let body = (lines.length > 2 ? lines.slice(1, -1) : lines).map(cleanUserMessageLine);
 		if (!padded) body = body.map((line) => line.replace(/^((?:\x1b\[[0-9;]*m)*)/, "$1  "));
-		body[0] = markUserPromptLine(body[0]);
+		body = body.map((line, index) => (index === 0 ? markUserPromptLine(line, true) : copySkipUserPad(line)));
 		const band = userMessageBandAnsi();
 		const rendered = body.map((line) => withUserBand(line, safeWidth, band));
 		return storeMessageRenderCache(this, width, applyTerminalCopyZones(rendered));
@@ -8082,6 +8208,7 @@ export default function (pi: ExtensionAPI) {
 	patchToolRenderCacheInvalidation();
 	patchReadImageExpansion();
 	patchFullscreenHoverExit();
+	patchFullscreenCopySkipsChrome();
 	patchScrollViewReveal();
 	patchToolFullscreenMouse();
 	patchContainerParentTracking();

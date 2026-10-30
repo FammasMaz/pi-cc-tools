@@ -80,6 +80,7 @@ With [pi-subagents](https://github.com/tintinweb/pi-subagents), `Agent` calls ge
 ## Smaller things
 
 - Past prompts are a single highlighted line starting with `❯`, and the input line gets the same marker.
+- In pi's fullscreen mode, selecting text copies only the text: code box borders, the indent pi adds to code, and the `●`, `❯` and `∴` markers in front of replies, prompts and thinking stay out of the clipboard. In regular mode the terminal does the copying, so it copies what is on screen.
 - LaTeX math in replies is shown with Unicode symbols.
 - RTK command rewrites appear as a muted `(RTK)` badge on the bash row.
 - `apply_patch` calls show their parsed patch as a diff before they run.
