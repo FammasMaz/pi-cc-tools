@@ -640,7 +640,11 @@ function isAssistantThinkingComplete(comp: any, message: any): boolean {
 	// completion signals. Without this, live-thinking detection would depend on
 	// THINKING_ACTIVE_KEY being stamped before the UI renders the same event.
 	if (message.stopReason === "pending" || message.stopReason === "deferred") return false;
-	if (typeof message.stopReason === "string" && message.stopReason.length > 0) return true;
+	// Some OpenAI-compatible proxies send `finish_reason: "stop"` on empty
+	// chunks before (and between) reasoning and content, so pi-ai sets a final
+	// stopReason while the stream is still running. Mid-stream, stopReason is
+	// not a completion signal; fall through to the block structure instead.
+	if (!isAssistantMessageStreaming(message) && typeof message.stopReason === "string" && message.stopReason.length > 0) return true;
 	if (Array.isArray(message.content)) {
 		let sawThinking = false;
 		for (const block of message.content) {
@@ -2240,14 +2244,30 @@ const MAX_REASONABLE_THINKING_DURATION_MS = 24 * 60 * 60 * 1000;
 // Presentation metadata belongs to the renderer, not the canonical session
 // messages. Weak collections keep live state available to the TUI without
 // changing the objects Pi persists or projects for compaction replay.
+//
+// Pi emits every message_update with a fresh shallow copy of the streaming
+// message (`{ ...partial }`), so keying on the message object only tags the
+// one copy that carried the event. The copies share the same `content` array,
+// which therefore identifies the stream across updates and message_end.
 const thinkingDurationByMessage = new WeakMap<object, number>();
 const thinkingActiveMessages = new WeakSet<object>();
+/** Content arrays of assistant messages still streaming (message_start..message_end). */
+const streamingAssistantContents = new WeakSet<object>();
+
+function thinkingStateKey(message: object): object {
+	const content = (message as any).content;
+	return Array.isArray(content) ? content : message;
+}
+
+function isAssistantMessageStreaming(message: any): boolean {
+	return !!message && typeof message === "object" && streamingAssistantContents.has(thinkingStateKey(message));
+}
 const workedStartByMessage = new WeakMap<object, number>();
 const workedDurationByMessage = new WeakMap<object, { duration: number; sessionTotal?: number; turns?: number }>();
 
 function getThinkingDurationMetadata(message: any): number | undefined {
 	if (!message || typeof message !== "object") return undefined;
-	const stored = thinkingDurationByMessage.get(message) ?? message[THINKING_DURATION_KEY];
+	const stored = thinkingDurationByMessage.get(thinkingStateKey(message)) ?? message[THINKING_DURATION_KEY];
 	return typeof stored === "number"
 		&& Number.isFinite(stored)
 		&& stored > 0
@@ -2259,7 +2279,7 @@ function getThinkingDurationMetadata(message: any): number | undefined {
 function hasThinkingActiveMetadata(message: any): boolean {
 	return !!message
 		&& typeof message === "object"
-		&& (thinkingActiveMessages.has(message) || message[THINKING_ACTIVE_KEY] === true);
+		&& (thinkingActiveMessages.has(thinkingStateKey(message)) || message[THINKING_ACTIVE_KEY] === true);
 }
 
 function workedMetadataForMessage(message: any): { duration: number; sessionTotal?: number; turns?: number } | undefined {
@@ -6895,8 +6915,8 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 		thinkingBlockInFlight = true;
 		thinkingBlockStartMs = Date.now();
 		if (message?.role === "assistant") {
-			thinkingActiveMessages.add(message);
-			thinkingDurationByMessage.delete(message);
+			thinkingActiveMessages.add(thinkingStateKey(message));
+			thinkingDurationByMessage.delete(thinkingStateKey(message));
 		}
 		refreshThinkingChrome();
 		return;
@@ -6906,9 +6926,9 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 		const duration = thinkingBlockStartMs > 0
 			? Math.max(0, Date.now() - thinkingBlockStartMs)
 			: undefined;
-		if (message?.role === "assistant") thinkingActiveMessages.delete(message);
+		if (message?.role === "assistant") thinkingActiveMessages.delete(thinkingStateKey(message));
 		if (typeof duration === "number" && duration <= MAX_REASONABLE_THINKING_DURATION_MS && message?.role === "assistant") {
-			thinkingDurationByMessage.set(message, duration);
+			thinkingDurationByMessage.set(thinkingStateKey(message), duration);
 		}
 		thinkingBlockStartMs = 0;
 		refreshThinkingChrome();
@@ -6924,9 +6944,9 @@ function trackThinkingBlockEvents(event: any, ctx?: any): void {
 		if (evt.type === "text_start" || evt.type === "text_delta" || evt.type === "toolcall_start" || evt.type === "toolcall_end") {
 			thinkingBlockInFlight = false;
 			const duration = thinkingBlockStartMs > 0 ? Math.max(0, Date.now() - thinkingBlockStartMs) : undefined;
-			if (message?.role === "assistant") thinkingActiveMessages.delete(message);
+			if (message?.role === "assistant") thinkingActiveMessages.delete(thinkingStateKey(message));
 			if (typeof duration === "number" && duration <= MAX_REASONABLE_THINKING_DURATION_MS && message?.role === "assistant") {
-				thinkingDurationByMessage.set(message, duration);
+				thinkingDurationByMessage.set(thinkingStateKey(message), duration);
 			}
 			thinkingBlockStartMs = 0;
 			refreshThinkingChrome();
@@ -6976,7 +6996,8 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			// "Thinking..." row until its own thinking events arrive.
 			thinkingBlockInFlight = false;
 			thinkingBlockStartMs = 0;
-			thinkingActiveMessages.delete(message);
+			thinkingActiveMessages.delete(thinkingStateKey(message));
+			streamingAssistantContents.add(thinkingStateKey(message));
 		}
 	});
 	pi.on("message_update", async (event, ctx) => {
@@ -6991,10 +7012,11 @@ function registerThinkingLabels(pi: ExtensionAPI): void {
 			// into its "Thought for Xs" duration here so the row always resolves
 			// at the end of the message instead of sticking into later calls.
 			thinkingBlockInFlight = false;
-			thinkingActiveMessages.delete(message);
+			thinkingActiveMessages.delete(thinkingStateKey(message));
+			streamingAssistantContents.delete(thinkingStateKey(message));
 			if (getThinkingDurationMetadata(message) === undefined && thinkingBlockStartMs > 0) {
 				const duration = Math.max(0, Date.now() - thinkingBlockStartMs);
-				if (duration <= MAX_REASONABLE_THINKING_DURATION_MS) thinkingDurationByMessage.set(message, duration);
+				if (duration <= MAX_REASONABLE_THINKING_DURATION_MS) thinkingDurationByMessage.set(thinkingStateKey(message), duration);
 			}
 			thinkingBlockStartMs = 0;
 			const started = typeof currentAgentWorkStartMs === "number"
