@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.108 — 2026-11-03
+
+### Fixed
+
+- **Thinking from some providers showed only `Thought for Xs`, and the timer ran faster than real time** (seen with symbiote → `z-ai/glm-5.3-flash`). The proxy sends a `stop` finish reason before the reasoning starts, so the thinking was treated as finished at once and collapsed, and its duration was guessed from the text length. The thinking now streams live until the answer or a tool call starts, and the `Thought for Xs` row shows the real elapsed time.
+
 ## 1.0.107 — 2026-10-30
 
 ### Fixed
