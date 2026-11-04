@@ -8743,8 +8743,9 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: (readTool as any).promptSnippet,
 		promptGuidelines: (readTool as any).promptGuidelines,
 		parameters: readTool.parameters,
-		async execute(toolCallId, params, signal, onUpdate) {
-			return readTool.execute(toolCallId, params, signal, onUpdate);
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			// Pi's typings for this tool lag its runtime, which reads ctx.cwd/model; forward ctx anyway.
+			return (readTool.execute as (...args: unknown[]) => ReturnType<typeof readTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
@@ -8845,7 +8846,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: (bashTool as any).promptSnippet,
 		promptGuidelines: bashIntentGuidelines,
 		parameters: bashIntentEnabled ? bashParameters : bashTool.parameters,
-		async execute(toolCallId, params, signal, onUpdate) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const { displaySummary: _displaySummary, ...bashParams } = params as typeof params & { displaySummary?: string };
 			// A command that only changes files: look at them before and after, so the row
 			// can show a diff like an edit/write row. The command itself runs unchanged.
@@ -8853,7 +8854,8 @@ export default function (pi: ExtensionAPI) {
 			// Local labels are asked for only here, when a command really runs, never on redraws.
 			if (bashIntentMode === "local" && typeof bashParams.command === "string") requestLocalIntent(bashParams.command);
 			const before = fileEdit ? snapshotBashFileEdit(cwd, fileEdit) : undefined;
-			const result = await bashTool.execute(toolCallId, bashParams, signal, onUpdate);
+			// Pi's typings lag its runtime, which builds PI_* env vars and cwd from ctx; forward ctx anyway.
+			const result = await (bashTool.execute as (...args: unknown[]) => ReturnType<typeof bashTool.execute>)(toolCallId, bashParams, signal, onUpdate, ctx);
 			if (fileEdit && before) {
 				const details = result.details && typeof result.details === "object" ? result.details : {};
 				(result as any).details = { ...details, fileEdits: collectBashFileEdits(cwd, fileEdit, before) };
@@ -8973,8 +8975,9 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: (grepTool as any).promptSnippet,
 		promptGuidelines: (grepTool as any).promptGuidelines,
 		parameters: grepTool.parameters,
-		async execute(toolCallId, params, signal, onUpdate) {
-			return grepTool.execute(toolCallId, params, signal, onUpdate);
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			// Pi's typings for this tool lag its runtime, which reads ctx.cwd; forward ctx anyway.
+			return (grepTool.execute as (...args: unknown[]) => ReturnType<typeof grepTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
@@ -9015,8 +9018,8 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: (findTool as any).promptSnippet,
 		promptGuidelines: (findTool as any).promptGuidelines,
 		parameters: findTool.parameters,
-		async execute(toolCallId, params, signal, onUpdate) {
-			return findTool.execute(toolCallId, params, signal, onUpdate);
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return (findTool.execute as (...args: unknown[]) => ReturnType<typeof findTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
@@ -9068,8 +9071,8 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: (lsTool as any).promptSnippet,
 		promptGuidelines: (lsTool as any).promptGuidelines,
 		parameters: lsTool.parameters,
-		async execute(toolCallId, params, signal, onUpdate) {
-			return lsTool.execute(toolCallId, params, signal, onUpdate);
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			return (lsTool.execute as (...args: unknown[]) => ReturnType<typeof lsTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 		},
 		renderCall(args, theme, ctx) {
 			syncToolCallStatus(ctx);
@@ -9121,7 +9124,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: (writeTool as any).promptSnippet,
 		promptGuidelines: (writeTool as any).promptGuidelines,
 		parameters: writeTool.parameters,
-		async execute(toolCallId, params, signal, onUpdate, _ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const fp = params.path ?? (params as any).file_path ?? "";
 			const fullPath = fp ? resolve(cwd, fp) : "";
 			const existedBefore = !!fullPath && fileExistsForTool(cwd, fp);
@@ -9132,7 +9135,7 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				old = null;
 			}
-			const result = await writeTool.execute(toolCallId, params, signal, onUpdate);
+			const result = await (writeTool.execute as (...args: unknown[]) => ReturnType<typeof writeTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 			const content = params.content ?? "";
 			if (old !== null && old !== content) {
 				const diff = parseDiff(old, content);
@@ -9256,12 +9259,12 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: (editTool as any).promptSnippet,
 		promptGuidelines: (editTool as any).promptGuidelines,
 		parameters: editTool.parameters,
-		async execute(toolCallId, params, signal, onUpdate, _ctx) {
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const fp = params.path ?? (params as any).file_path ?? "";
 			const operations = getEditOperations(params);
 			const localizedDiffs = await localizeEditOnce(toolCallId, fp, operations);
 			EDIT_LOCALIZED.delete(toolCallId);
-			const result = await editTool.execute(toolCallId, params, signal, onUpdate);
+			const result = await (editTool.execute as (...args: unknown[]) => ReturnType<typeof editTool.execute>)(toolCallId, params, signal, onUpdate, ctx);
 			if (operations.length === 0) return result;
 			const { diffs, summary, totalLines, totalHunks } = summarizeEditOperations(operations);
 			const baseDetails = (((result as any).details ?? {}) as Record<string, unknown>);
