@@ -3,6 +3,12 @@
 > [!IMPORTANT]
 > **1.0.69 — package rename (permanent).** Canonical npm name is now [`pi-claude-code-ui`](https://www.npmjs.com/package/pi-claude-code-ui). `pi-claude-style-tools` is legacy and will not receive further releases. Install with `pi install npm:pi-claude-code-ui` or `npm i pi-claude-code-ui`.
 
+## 1.0.109 — 2026-11-04
+
+### Fixed
+
+- **Tool overrides dropped Pi's `ctx` argument** ([#44](https://github.com/FammasMaz/pi-cc-tools/issues/44)). The `read`, `bash`, `grep`, `find`, `ls`, `write` and `edit` overrides called the built-in tool without the 5th `ctx` parameter, so on Pi 1.5 `PI_SESSION_ID`, `PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL` and `PI_REASONING_LEVEL` were always empty in bash and the tools fell back to the startup cwd instead of the session cwd. `ctx` is now forwarded by every override.
+
 ## 1.0.108 — 2026-11-03
 
 ### Fixed
