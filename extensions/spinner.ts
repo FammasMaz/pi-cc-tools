@@ -542,8 +542,12 @@ function formatDuration(ms: number): string {
 	return `${s}s`;
 }
 
+// One formatter for the process: the working line rebuilds every animation frame, and
+// Intl.NumberFormat instances are costly to construct.
+const COUNT_FORMATTER = new Intl.NumberFormat("en-US");
+
 function formatCount(value: number): string {
-	return new Intl.NumberFormat("en-US").format(value);
+	return COUNT_FORMATTER.format(value);
 }
 
 /** Characters the model produced in one content block: text, thinking, or tool-call arguments. */

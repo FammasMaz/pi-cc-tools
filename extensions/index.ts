@@ -70,6 +70,7 @@ import {
 	buildBashPreview,
 	describeBashSource,
 	formatBashDuration,
+	type BashCommandPresentation,
 } from "./bash-command";
 import {
 	BASH_INTENT_MODES,
@@ -910,7 +911,7 @@ function getToolArgSummary(tool: any): string {
 		if (parts.length > 0) value += ` (${parts.join(", ")})`;
 		return value;
 	}
-	if (name === "bash") return buildBashCommandPresentation(args.command ?? "").headline;
+	if (name === "bash") return cachedBashPresentation(args.command ?? "").headline;
 	if (name === "grep") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "find") return `"${summarizeText(args.pattern ?? "", 40)}"${args.path ? ` in ${args.path}` : ""}`;
 	if (name === "ls") return shortPath(process.cwd(), args.path ?? ".");
@@ -1053,11 +1054,44 @@ function isGroupableTool(value: unknown): value is InstanceType<typeof ToolExecu
 	return value instanceof ToolExecutionComponent && !NON_GROUPABLE_TOOL_NAMES.has(getToolName(value)) && !isBashFileEditTool(value);
 }
 
+/** Keep only the newest entries of a map that is filled per tool call and never retired otherwise. */
+function trimOldestEntries(map: Map<string, unknown>, limit: number): void {
+	while (map.size > limit) {
+		const oldest = map.keys().next().value;
+		if (oldest === undefined) break;
+		map.delete(oldest);
+	}
+}
+
+// Bash rows parse their command on every redraw (blink ticks, hover, resize, group
+// sentences). Both parses depend on the command text alone, so keep the newest results.
+const BASH_PARSE_CACHE_LIMIT = 256;
+const BASH_PRESENTATION_CACHE = new Map<string, BashCommandPresentation>();
+const BASH_FILE_EDIT_CACHE = new Map<string, BashFileEdit | null>();
+
+function cachedBashPresentation(command: string): BashCommandPresentation {
+	const hit = BASH_PRESENTATION_CACHE.get(command);
+	if (hit) return hit;
+	const presentation = buildBashCommandPresentation(command);
+	BASH_PRESENTATION_CACHE.set(command, presentation);
+	trimOldestEntries(BASH_PRESENTATION_CACHE, BASH_PARSE_CACHE_LIMIT);
+	return presentation;
+}
+
+function cachedBashFileEdit(command: string): BashFileEdit | undefined {
+	const hit = BASH_FILE_EDIT_CACHE.get(command);
+	if (hit !== undefined) return hit ?? undefined;
+	const fileEdit = detectBashFileEdit(command);
+	BASH_FILE_EDIT_CACHE.set(command, fileEdit ?? null);
+	trimOldestEntries(BASH_FILE_EDIT_CACHE, BASH_PARSE_CACHE_LIMIT);
+	return fileEdit;
+}
+
 /** A bash row that only changes files (sed -i, heredoc, ...): drawn like edit/write, never grouped. */
 function isBashFileEditTool(tool: any): boolean {
 	if (getToolName(tool) !== "bash") return false;
 	const command = tool?.args?.command;
-	return typeof command === "string" && !!detectBashFileEdit(command);
+	return typeof command === "string" && !!cachedBashFileEdit(command);
 }
 
 /**
@@ -1431,11 +1465,26 @@ function isThinkingOnlyAssistantComponent(comp: unknown): comp is InstanceType<t
 	return true;
 }
 
-function maybeMergeConsecutiveThinkingMessages(parent: any): void {
+/**
+ * Merge only around the newest row. The rows before it were checked when they were added, and
+ * every render re-checks the whole chat; scanning it all again per insert made a history
+ * rebuild quadratic in its length.
+ */
+function maybeMergeThinkingMessagesAtEnd(parent: any): void {
+	const children = parent?.children;
+	if (!Array.isArray(children) || children.length < 2) return;
+	let last = children.length - 1;
+	while (last > 0 && isSpacerComponent(children[last])) last--;
+	let from = last - 1;
+	while (from > 0 && isSpacerComponent(children[from])) from--;
+	maybeMergeConsecutiveThinkingMessages(parent, Math.max(0, from));
+}
+
+function maybeMergeConsecutiveThinkingMessages(parent: any, fromIndex = 0): void {
 	const children = parent?.children;
 	if (!Array.isArray(children) || children.length < 2) return;
 
-	for (let i = 0; i < children.length; i++) {
+	for (let i = Math.max(0, fromIndex); i < children.length; i++) {
 		const current = children[i];
 		if (!isThinkingOnlyAssistantComponent(current)) continue;
 
@@ -1606,7 +1655,7 @@ function maybeGroupToolComponent(parent: any, component: any): void {
 	if (isToolGroupComponent(previous)) {
 		children.splice(index, 1);
 		previous.addTool(component);
-		maybeMergeConsecutiveThinkingMessages(parent);
+		maybeMergeThinkingMessagesAtEnd(parent);
 		return;
 	}
 	if (isGroupableTool(previous)) {
@@ -1617,7 +1666,7 @@ function maybeGroupToolComponent(parent: any, component: any): void {
 		(group as any)[COMPONENT_PARENT] = parent;
 		children[previousEntry.index] = group;
 		children.splice(index, 1);
-		maybeMergeConsecutiveThinkingMessages(parent);
+		maybeMergeThinkingMessagesAtEnd(parent);
 	}
 }
 
@@ -1633,19 +1682,24 @@ function patchContainerParentTracking(): void {
 			component[COMPONENT_PARENT] = this;
 			component[ADD_SEQ_KEY] = ++addSequence;
 		}
+		if (isToolGroupComponent(component) && (component as any).tools?.length > 0) ACTIVE_TOOL_GROUPS.add(component);
 		maybeGroupToolComponent(this, component);
-		maybeMergeConsecutiveThinkingMessages(this);
+		maybeMergeThinkingMessagesAtEnd(this);
 		if (isAssistantMessageComponent(component)) supersedeEarlierAssistantMessages(this, component);
 		return result;
 	};
+	// A group taken out of the chat (session switch, /tree, compaction rebuild) must leave the
+	// registry too, or it keeps its tools, results and rendered lines alive for the whole process.
 	proto.removeChild = function patchedRemoveChild(component: any) {
 		const result = originalRemoveChild.call(this, component);
 		if (component && typeof component === "object" && component[COMPONENT_PARENT] === this) delete component[COMPONENT_PARENT];
+		if (isToolGroupComponent(component)) ACTIVE_TOOL_GROUPS.delete(component);
 		return result;
 	};
 	proto.clear = function patchedClear() {
 		for (const child of this.children ?? []) {
 			if (child && typeof child === "object" && child[COMPONENT_PARENT] === this) delete child[COMPONENT_PARENT];
+			if (isToolGroupComponent(child)) ACTIVE_TOOL_GROUPS.delete(child);
 		}
 		return originalClear.call(this);
 	};
@@ -3907,11 +3961,17 @@ function syncLiveToolRenderState(component: any): void {
 	};
 	syncToolCallStatus(ctxLike);
 	if (component?.isPartial === true && component?.result) {
-		const raw = getTextContent(component.result).replace(/\r\n/g, "\n").trimEnd();
-		// tailLimit=0 → count-only (no line materialization) so huge bash tails stay cheap.
-		state._liveLineCount = collectNonEmptyLines(raw, 0).total;
+		// Blink and duration ticks invalidate the row without changing its output; pi hands the
+		// row a new result object for every partial update, so count again only for a new one.
+		if (state._liveLineCountSource !== component.result || typeof state._liveLineCount !== "number") {
+			const raw = getTextContent(component.result).replace(/\r\n/g, "\n").trimEnd();
+			// tailLimit=0 → count-only (no line materialization) so huge bash tails stay cheap.
+			state._liveLineCount = collectNonEmptyLines(raw, 0).total;
+			state._liveLineCountSource = component.result;
+		}
 	} else if (component?.isPartial !== true) {
 		delete state._liveLineCount;
+		delete state._liveLineCountSource;
 		// renderCall never sees the result, so hand a finished edit's details over: its diff is redrawn from them, not from
 		// the file. A call aborted while streaming ends with a bare error instead of a toolResult; it never drew a diff.
 		if (component?.toolName === "edit" && component.result && (!ctxLike.isError || component.result.role === "toolResult")) {
@@ -4256,6 +4316,8 @@ const RTK_ORIGINAL_BASH_COMMANDS = new Map<string, string>();
 const RTK_REWRITES_BY_TOOL_ID = new Map<string, RtkRewriteRecord>();
 const RTK_PENDING_REWRITES: RtkRewriteRecord[] = [];
 const RTK_PENDING_REWRITE_LIMIT = 20;
+// Tool ids arrive once per bash call and nothing retires them; keep the newest only.
+const RTK_TOOL_RECORD_LIMIT = 256;
 const PRESERVED_BASH_PREVIEWS = new Set<string>();
 const BASH_PREVIEW_INVALIDATORS = new Map<string, () => void>();
 
@@ -4321,7 +4383,7 @@ function findRtkRewriteToolId(record: RtkRewriteRecord): string | undefined {
 function rememberRtkRewrite(record: RtkRewriteRecord): void {
 	const toolCallId = findRtkRewriteToolId(record);
 	if (toolCallId) {
-		RTK_REWRITES_BY_TOOL_ID.set(toolCallId, record);
+		setRtkRewriteForTool(toolCallId, record);
 		return;
 	}
 	rememberPendingRtkRewrite(record);
@@ -4347,7 +4409,7 @@ function ensureRtkRewriteForContext(ctx: any, args: any): RtkRewriteRecord | und
 	let record = RTK_REWRITES_BY_TOOL_ID.get(toolCallId);
 	if (!record) {
 		record = takePendingRtkRewrite(originalCommand, currentCommand);
-		if (record) RTK_REWRITES_BY_TOOL_ID.set(toolCallId, record);
+		if (record) setRtkRewriteForTool(toolCallId, record);
 	}
 	if (!record && originalCommand && currentCommand && normalizeRtkCommandPreview(originalCommand) !== normalizeRtkCommandPreview(currentCommand)) {
 		record = {
@@ -4355,7 +4417,7 @@ function ensureRtkRewriteForContext(ctx: any, args: any): RtkRewriteRecord | und
 			rewritten: currentCommand,
 			notice: `RTK rewrite: ${originalCommand} -> ${currentCommand}`,
 		};
-		RTK_REWRITES_BY_TOOL_ID.set(toolCallId, record);
+		setRtkRewriteForTool(toolCallId, record);
 	}
 	if (record && ctx?.state) ctx.state._rtkRewriteRecord = record;
 	return record;
@@ -4390,11 +4452,17 @@ function patchUiNotifications(ui: any): void {
 	ui[UI_NOTIFY_PATCH_FLAG] = true;
 }
 
+function setRtkRewriteForTool(toolCallId: string, record: RtkRewriteRecord): void {
+	RTK_REWRITES_BY_TOOL_ID.set(toolCallId, record);
+	trimOldestEntries(RTK_REWRITES_BY_TOOL_ID, RTK_TOOL_RECORD_LIMIT);
+}
+
 function trackRtkOriginalBashCommand(toolCallId: unknown, args: unknown): void {
 	if (typeof toolCallId !== "string") return;
 	const command = (args as any)?.command;
 	if (typeof command === "string" && command.trim()) {
 		RTK_ORIGINAL_BASH_COMMANDS.set(toolCallId, command);
+		trimOldestEntries(RTK_ORIGINAL_BASH_COMMANDS, RTK_TOOL_RECORD_LIMIT);
 	}
 }
 
@@ -4914,7 +4982,7 @@ function renderBashCommandBlock(
 	expanded: boolean,
 	theme: Theme,
 ): string {
-	const presentation = buildBashCommandPresentation(command);
+	const presentation = cachedBashPresentation(command);
 	const limit = bashCommandPreviewLimit();
 	if (!expanded && (limit === 0 || presentation.sourceLineCount < 2)) return "";
 	const sourceLimit = expandedPreviewLimit();
@@ -8866,7 +8934,13 @@ export default function (pi: ExtensionAPI) {
 		const command = typeof args?.command === "string" ? args.command : "";
 		const label = localIntentFor(command);
 		if (label) return label;
-		if (ctx?.executionStarted === true) watchLocalIntent(command, () => safeInvalidate(ctx));
+		if (ctx?.executionStarted === true) {
+			// One callback per row: the watcher set can only deduplicate a stable function, and this
+			// runs on every redraw until the label arrives.
+			const state = ctx.state;
+			const redraw: () => void = state ? (state._intentRedraw ??= () => safeInvalidate(ctx)) : () => safeInvalidate(ctx);
+			watchLocalIntent(command, redraw);
+		}
 		return "";
 	};
 	const bashParameters = {
@@ -8914,7 +8988,7 @@ export default function (pi: ExtensionAPI) {
 			syncBashDuration(ctx);
 			const rewrite = ensureRtkRewriteForContext(ctx, args);
 			const command = typeof args.command === "string" ? args.command : "";
-			const fileEdit = ctx.argsComplete === true || ctx.executionStarted === true ? detectBashFileEdit(command) : undefined;
+			const fileEdit = ctx.argsComplete === true || ctx.executionStarted === true ? cachedBashFileEdit(command) : undefined;
 			if (fileEdit) {
 				const status = ctx?.state?._toolStatus;
 				const showCommand = status === "error" || ctx.expanded === true;
@@ -8926,7 +9000,10 @@ export default function (pi: ExtensionAPI) {
 				const withIntent = `${header}${label ? theme.fg("text", ` — ${label}`) : ""}${trailing}`;
 				return makeText(ctx.lastComponent, commandBlock ? `${withIntent}\n${commandBlock}` : withIntent);
 			}
-			const presentation = buildBashCommandPresentation(command);
+			// While the arguments still stream every delta is a new command string; cache only settled ones.
+			const presentation = ctx.argsComplete === true || ctx.executionStarted === true
+				? cachedBashPresentation(command)
+				: buildBashCommandPresentation(command);
 			const summary = stableCallSummary(ctx, "_bashHeadline", () => presentation.headline);
 			const rtkBadge = rewrite ? theme.fg("muted", " (RTK)") : "";
 			const status = ctx?.state?._toolStatus;
@@ -8951,7 +9028,7 @@ export default function (pi: ExtensionAPI) {
 			const details = result.details as BashToolDetails | undefined;
 			const rewrite = ensureRtkRewriteForContext(ctx, ctx.args);
 			const output = result.content[0]?.type === "text" ? result.content[0].text : "";
-			const fileEdit = !isPartial && !ctx.isError ? detectBashFileEdit(typeof ctx.args?.command === "string" ? ctx.args.command : "") : undefined;
+			const fileEdit = !isPartial && !ctx.isError ? cachedBashFileEdit(typeof ctx.args?.command === "string" ? ctx.args.command : "") : undefined;
 			if (fileEdit) {
 				const records = Array.isArray((details as any)?.fileEdits) ? (details as any).fileEdits as BashFileEditRecord[] : undefined;
 				if (ctx.state && ctx.state._bashFileEdits !== records) {
@@ -9176,6 +9253,8 @@ export default function (pi: ExtensionAPI) {
 			const fullPath = fp ? resolve(cwd, fp) : "";
 			const existedBefore = !!fullPath && fileExistsForTool(cwd, fp);
 			WRITE_EXISTED_BEFORE.set(toolCallId, existedBefore);
+			// Drained by renderResult; without a UI nothing drains it, so keep the newest only.
+			trimOldestEntries(WRITE_EXISTED_BEFORE, RTK_TOOL_RECORD_LIMIT);
 			let old: string | null = null;
 			try {
 				if (fullPath && existedBefore) old = readFileSync(fullPath, "utf-8");
