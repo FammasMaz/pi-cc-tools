@@ -249,3 +249,39 @@ test("a press in the editor does not hold the transcript; a press in the transcr
 	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 5, release: true }, noop);
 	assert.equal(followSuppressed, false, "release restores follow when the view is still at its end");
 });
+
+test("pi's jump-to-latest indicator stays hidden while a press holds the view at its end (#47)", () => {
+	const { dispatchMouseWithClickFixes, pressHoldsViewAtEnd } = extension;
+	let followSuppressed = false;
+	const view = {
+		scrollTop: 10, contentHeight: 30, viewportHeight: 20,
+		get isFollowingEnd() { return !followSuppressed; },
+		scrollTo(_top: number, o: any) { if (o?.disableFollow) followSuppressed = true; },
+		scrollToEnd() { followSuppressed = false; },
+	};
+	const tui = {
+		getPrimaryScrollView: () => view,
+		requestRender() {},
+		currentLayout: { root: { rect: { x: 0, y: 0, width: 80, height: 24 }, children: [
+			{ scrollView: view, rect: { x: 0, y: 0, width: 80, height: 20 }, children: [] },
+			{ rect: { x: 0, y: 20, width: 80, height: 4 }, children: [] },
+		] } },
+	};
+	const noop = () => undefined;
+	assert.equal(pressHoldsViewAtEnd(view), false, "nothing held before a press");
+	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 5 }, noop);
+	assert.equal(followSuppressed, true, "the transcript press holds the view");
+	assert.equal(pressHoldsViewAtEnd(view), true, "held at the end: the indicator would lie, hide it");
+	assert.equal(pressHoldsViewAtEnd({ scrollTop: 10, contentHeight: 30, viewportHeight: 20 }), false, "only the held view");
+	// Output arrives while held: the view now really sits above the end, so the indicator is true.
+	view.contentHeight = 34;
+	assert.equal(pressHoldsViewAtEnd(view), false, "held view moved off the end: indicator shows");
+	view.contentHeight = 30;
+	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 5, release: true }, noop);
+	assert.equal(followSuppressed, false, "release follows the end again");
+	assert.equal(pressHoldsViewAtEnd(view), false, "nothing held after release");
+	// A press in the editor never holds, so never hides the indicator either.
+	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 22 }, noop);
+	assert.equal(pressHoldsViewAtEnd(view), false);
+	dispatchMouseWithClickFixes(tui, { button: 0, x: 5, y: 22, release: true }, noop);
+});

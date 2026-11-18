@@ -2049,6 +2049,18 @@ function releaseHeldView(follow: boolean, tui?: any): void {
 	} catch { /* view gone */ }
 }
 
+/**
+ * Whether pi's "Jump to latest message" indicator must stay hidden: a press holds the view
+ * still at its end. The hold suppresses following (so pi reports "not following") although
+ * the viewport still sits on the newest line; once held output moves the view off the end,
+ * the indicator is true again and shows.
+ */
+export function pressHoldsViewAtEnd(view: any): boolean {
+	if (!heldView || !view || heldView.view !== view) return false;
+	const maxTop = Math.max(0, (Number(view.contentHeight) || 0) - (Number(view.viewportHeight) || 0));
+	return Number(view.scrollTop) >= maxTop;
+}
+
 /** Whether a screen cell lies inside the scroll view's box of the current fullscreen layout. */
 export function pressInsideScrollView(tui: any, view: any, x: number, y: number): boolean {
 	const root = tui?.currentLayout?.root;
@@ -2126,6 +2138,17 @@ function patchFullscreenHoverExit(): void {
 				this.requestRender();
 			}
 			return originalInput.call(this, data);
+		};
+	}
+	if (typeof proto.compositeScrollToEndIndicator === "function") {
+		const originalIndicator = proto.compositeScrollToEndIndicator;
+		proto.compositeScrollToEndIndicator = function patchedScrollToEndIndicator(screen: string[], layout: any, width: number) {
+			const view = layout?.primaryScrollView ?? this.implicitScrollView;
+			if (pressHoldsViewAtEnd(view)) {
+				this.scrollToEndIndicatorRect = undefined;
+				return screen;
+			}
+			return originalIndicator.call(this, screen, layout, width);
 		};
 	}
 	proto[FULLSCREEN_HOVER_PATCH_FLAG] = true;
